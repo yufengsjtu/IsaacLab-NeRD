@@ -1,0 +1,69 @@
+# Copyright (c) 2024 NVIDIA CORPORATION.  All rights reserved.
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+
+from collections import deque
+
+import torch
+from newton import Contacts, State
+
+from .neural_solver import NeuralSolver
+
+
+class TransformerNeuralSolver(NeuralSolver):
+    """Neural solver variant that feeds a fixed history window to transformer models."""
+
+    def __init__(self, num_states_history: int = 1, **kwargs):
+        self.num_states_history = num_states_history
+        super().__init__(**kwargs)
+        self.reset_states_history()
+
+    def reset_states_history(self):
+        self.states_history = deque(maxlen=self.num_states_history)
+
+    def reset(self):
+        self.reset_states_history()
+
+    # TODO[Jie]: _reset_idx (per-env history reset)
+
+    def sync_from_newton(self, newton_states: State, contacts: Contacts, joint_f, *, update_history: bool = True) -> None:
+        """Synchronize cached inputs, optionally without appending to history."""
+        if update_history:
+            self._update_states(newton_states, contacts, joint_f)
+        else:
+            NeuralSolver._update_states(self, newton_states, contacts, joint_f)
+
+    def _update_states(self, newton_states: State, contacts: Contacts, joint_f):
+        super()._update_states(newton_states, contacts, joint_f)
+        self.states_history.append(
+            {
+                "root_body_q": self.root_body_q.clone(),
+                "states": self.states.clone(),
+                "states_embedding": self.states_embedding.clone(),
+                "joint_f": self.joint_f.clone(),
+                "gravity_dir": self.gravity_dir.clone(),
+                **self.contacts,
+            }
+        )
+
+    def get_neural_model_inputs(self):
+        if len(self.states_history) == 0:  # for dummy call
+            model_inputs = {
+                "root_body_q": torch.zeros_like(self.root_body_q),
+                "states": torch.zeros_like(self.states),
+                "states_embedding": torch.zeros_like(self.states_embedding),
+                "joint_f": torch.zeros_like(self.joint_f),
+                "gravity_dir": torch.zeros_like(self.gravity_dir),
+                **{key: torch.zeros_like(value) for key, value in self.contacts.items()},
+            }
+            return {key: value.unsqueeze(1) for key, value in model_inputs.items()}
+
+        # assemble the model inputs in world frame
+        model_inputs = torch.utils.data.default_collate(list(self.states_history))
+        for key in model_inputs:
+            model_inputs[key] = model_inputs[key].permute(1, 0, 2)
+
+        return self.process_neural_model_inputs(model_inputs)
