@@ -273,4 +273,4 @@ class NewtonNerdManager(NewtonManager):
                 except TypeError:
                     should_reset = True
             if should_reset:
-                reset_solver()
+                reset_solver(env_ids)

@@ -255,7 +255,15 @@ class NeuralSolver(SolverBase):
     def eval(self):
         self.neural_model.eval()
 
-    def reset(self):
+    def reset(self, env_ids=None):
+        """Reset solver state.
+
+        Args:
+            env_ids: Optional environment ids to reset. Stateless solvers do
+                not maintain per-env memory, so the argument is accepted for
+                subclass consistency.
+        """
+        del env_ids
         pass
 
     def sync_from_newton(

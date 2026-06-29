@@ -100,11 +100,11 @@ class NeuralEnvAdapter:
         self.manager.sync_neural_solver(update_history=update_history)
         return self.solver
 
-    def reset_history(self) -> None:
+    def reset_history(self, env_ids=None) -> None:
         """Reset recurrent/history state on the active neural solver."""
         reset_solver = getattr(self.solver, "reset", None)
         if reset_solver is not None:
-            reset_solver()
+            reset_solver(env_ids)
 
     def reset(
         self,

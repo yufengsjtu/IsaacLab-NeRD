@@ -24,10 +24,30 @@ class TransformerNeuralSolver(NeuralSolver):
     def reset_states_history(self):
         self.states_history = deque(maxlen=self.num_states_history)
 
-    def reset(self):
-        self.reset_states_history()
+    def reset(self, env_ids=None):
+        """Reset transformer history globally or for selected environments."""
+        if env_ids is None:
+            self.reset_states_history()
+            return
 
-    # TODO[Jie]: _reset_idx (per-env history reset)
+        if len(self.states_history) == 0:
+            return
+
+        env_ids = self._normalize_env_ids(env_ids)
+        if env_ids.numel() == 0:
+            return
+
+        for history_entry in self.states_history:
+            for value in history_entry.values():
+                value[env_ids] = 0.0
+
+    def _normalize_env_ids(self, env_ids) -> torch.Tensor:
+        """Return env ids as a 1-D tensor on the solver torch device."""
+        if isinstance(env_ids, torch.Tensor):
+            normalized = env_ids.to(device=self.torch_device, dtype=torch.long)
+        else:
+            normalized = torch.as_tensor(env_ids, device=self.torch_device, dtype=torch.long)
+        return normalized.reshape(-1)
 
     def sync_from_newton(self, newton_states: State, contacts: Contacts, joint_f, *, update_history: bool = True) -> None:
         """Synchronize cached inputs, optionally without appending to history."""
