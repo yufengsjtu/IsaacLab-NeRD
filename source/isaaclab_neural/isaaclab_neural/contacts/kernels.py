@@ -150,6 +150,153 @@ def generate_contact_points(
 
 
 @wp.kernel(enable_backward=False)
+def generate_contact_points_by_body_world(
+    shape_transform: wp.array(dtype=wp.transform),
+    shape_body: wp.array(dtype=int),
+    body_world: wp.array(dtype=int),
+    shape_type: wp.array(dtype=int),
+    shape_scale: wp.array(dtype=wp.vec3),
+    shape_margin: wp.array(dtype=float),
+    shape_flags: wp.array(dtype=wp.int32),
+    shape_count: int,
+    num_contacts_per_env: int,
+    ground_shape_index: int,
+    up_vector: wp.vec3,
+    # outputs
+    contact_shape0: wp.array(dtype=int),
+    contact_shape1: wp.array(dtype=int),
+    contact_point0: wp.array(dtype=wp.vec3),
+    contact_point1: wp.array(dtype=wp.vec3),
+    contact_thickness0: wp.array(dtype=float),
+    contact_thickness1: wp.array(dtype=float),
+    contact_normal: wp.array(dtype=wp.vec3),
+    contact_depth: wp.array(dtype=float),
+):
+    """Generate fixed-ground contact anchors by filtering shapes by body world id."""
+    env_id = wp.tid()
+    contact_idx = num_contacts_per_env * env_id
+    contact_end = contact_idx + num_contacts_per_env
+
+    for shape_idx in range(shape_count):
+        body = shape_body[shape_idx]
+        if body == -1:
+            # static shapes are ignored, e.g. ground
+            continue
+        if body_world[body] != env_id:
+            continue
+        if shape_flags[shape_idx] & ShapeFlags.COLLIDE_SHAPES == 0:
+            # filter out visual meshes
+            continue
+
+        geo_type = shape_type[shape_idx]
+        geo_scale = shape_scale[shape_idx]
+        geo_margin = shape_margin[shape_idx]
+        shape_tf = shape_transform[shape_idx]
+
+        if geo_type == GeoType.SPHERE:
+            if contact_idx < contact_end:
+                contact_shape0[contact_idx] = shape_idx
+                contact_shape1[contact_idx] = ground_shape_index
+                contact_point0[contact_idx] = wp.transform_get_translation(shape_tf)
+                contact_point1[contact_idx] = wp.vec3(0.0)
+                contact_normal[contact_idx] = up_vector
+                contact_depth[contact_idx] = 1000.0
+                contact_thickness0[contact_idx] = geo_margin + geo_scale[0]
+                contact_thickness1[contact_idx] = 0.0
+                contact_idx += 1
+
+        if geo_type == GeoType.CAPSULE:
+            if contact_idx < contact_end:
+                contact_shape0[contact_idx] = shape_idx
+                contact_shape1[contact_idx] = ground_shape_index
+                contact_point0[contact_idx] = wp.transform_point(
+                    shape_tf, wp.vec3(0.0, 0.0, geo_scale[1])
+                )
+                contact_point1[contact_idx] = wp.vec3(0.0)
+                contact_normal[contact_idx] = up_vector
+                contact_depth[contact_idx] = 1000.0
+                contact_thickness0[contact_idx] = geo_margin + geo_scale[0]
+                contact_thickness1[contact_idx] = 0.0
+                contact_idx += 1
+
+            if contact_idx < contact_end:
+                contact_shape0[contact_idx] = shape_idx
+                contact_shape1[contact_idx] = ground_shape_index
+                contact_point0[contact_idx] = wp.transform_point(
+                    shape_tf, wp.vec3(0.0, 0.0, -geo_scale[1])
+                )
+                contact_point1[contact_idx] = wp.vec3(0.0)
+                contact_normal[contact_idx] = up_vector
+                contact_depth[contact_idx] = 1000.0
+                contact_thickness0[contact_idx] = geo_margin + geo_scale[0]
+                contact_thickness1[contact_idx] = 0.0
+                contact_idx += 1
+
+        if geo_type == GeoType.BOX:
+            # add box corner points
+            for j in range(8):
+                if contact_idx < contact_end:
+                    p = get_box_vertex(j, geo_scale)
+                    contact_shape0[contact_idx] = shape_idx
+                    contact_shape1[contact_idx] = ground_shape_index
+                    contact_point0[contact_idx] = wp.transform_point(shape_tf, p)
+                    contact_point1[contact_idx] = wp.vec3(0.0)
+                    contact_normal[contact_idx] = up_vector
+                    contact_depth[contact_idx] = 1000.0
+                    contact_thickness0[contact_idx] = geo_margin
+                    contact_thickness1[contact_idx] = 0.0
+                    contact_idx += 1
+
+        if geo_type == GeoType.CYLINDER:
+            # Capsule treatment: 2 anchors at the centerline endpoints.
+            if contact_idx < contact_end:
+                contact_shape0[contact_idx] = shape_idx
+                contact_shape1[contact_idx] = ground_shape_index
+                contact_point0[contact_idx] = wp.transform_point(
+                    shape_tf, wp.vec3(0.0, 0.0, geo_scale[1])
+                )
+                contact_point1[contact_idx] = wp.vec3(0.0)
+                contact_normal[contact_idx] = up_vector
+                contact_depth[contact_idx] = 1000.0
+                contact_thickness0[contact_idx] = geo_margin + geo_scale[0]
+                contact_thickness1[contact_idx] = 0.0
+                contact_idx += 1
+
+            if contact_idx < contact_end:
+                contact_shape0[contact_idx] = shape_idx
+                contact_shape1[contact_idx] = ground_shape_index
+                contact_point0[contact_idx] = wp.transform_point(
+                    shape_tf, wp.vec3(0.0, 0.0, -geo_scale[1])
+                )
+                contact_point1[contact_idx] = wp.vec3(0.0)
+                contact_normal[contact_idx] = up_vector
+                contact_depth[contact_idx] = 1000.0
+                contact_thickness0[contact_idx] = geo_margin + geo_scale[0]
+                contact_thickness1[contact_idx] = 0.0
+                contact_idx += 1
+
+        # COM fallback for mesh / unknown geo types
+        if (
+            geo_type != GeoType.BOX
+            and geo_type != GeoType.CAPSULE
+            and geo_type != GeoType.SPHERE
+            and geo_type != GeoType.CYLINDER
+        ):
+            if contact_idx < contact_end:
+                contact_shape0[contact_idx] = shape_idx
+                contact_shape1[contact_idx] = ground_shape_index
+                contact_point0[contact_idx] = wp.transform_point(
+                    shape_tf, wp.vec3(0.0, 0.0, 0.0)
+                )
+                contact_point1[contact_idx] = wp.vec3(0.0)
+                contact_normal[contact_idx] = up_vector
+                contact_depth[contact_idx] = 1000.0
+                contact_thickness0[contact_idx] = 0.0
+                contact_thickness1[contact_idx] = 0.0
+                contact_idx += 1
+
+
+@wp.kernel(enable_backward=False)
 def collision_detection_ground_kernel(
     body_q: wp.array(dtype=wp.transform),
     shape_transform: wp.array(dtype=wp.transform),

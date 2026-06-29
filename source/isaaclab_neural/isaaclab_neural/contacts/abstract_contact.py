@@ -5,7 +5,7 @@ import newton
 from newton import Contacts, GeoType, ShapeFlags
 from isaaclab_neural.utils.warp_utils import device_to_torch
 from isaaclab_neural.contacts.contact_utils import find_ground_shape_index
-from isaaclab_neural.contacts.kernels import generate_contact_points
+from isaaclab_neural.contacts.kernels import generate_contact_points, generate_contact_points_by_body_world
 
 class AbstractContact:
     """
@@ -40,7 +40,8 @@ class AbstractContact:
             self.shapes_start_offset = 0
 
         # Step 1: count the number of contacts per env
-        self.num_contacts_per_env = self.count_contacts(model)
+        # self.num_contacts_per_env = self.count_contacts(model)
+        self.num_contacts_per_env = self.count_contacts_by_body_world(model)
 
         self.num_total_contacts = self.num_contacts_per_env * self.num_envs
 
@@ -90,6 +91,77 @@ class AbstractContact:
                 num_contacts_per_env += 1
 
         return num_contacts_per_env
+
+    def count_contacts_by_body_world(self, model: newton.Model, env_id: int = 0) -> int:
+        """Count fixed-ground contact anchors for one env using shape body ownership.
+
+        This variant does not assume that ``model.shape_*`` arrays are grouped
+        as contiguous per-env blocks. Instead, it resolves each shape through
+        ``shape_body -> body_world`` and counts only collision shapes owned by
+        the requested environment.
+        """
+        counts = self.count_contacts_by_body_world_per_env(model)
+        if len(set(counts)) != 1:
+            raise ValueError(
+                "Fixed-ground abstract contacts require the same contact layout in every env. "
+                f"Found per-env counts: {counts}."
+            )
+        if env_id < 0 or env_id >= len(counts):
+            raise ValueError(f"env_id must be in [0, {len(counts)}), got {env_id}.")
+        return counts[env_id]
+
+    def count_contacts_by_body_world_per_env(self, model: newton.Model) -> list[int]:
+        """Count fixed-ground contact anchors for every env using ``body_world``."""
+        if not hasattr(model, "body_world"):
+            raise AttributeError("Newton model does not expose body_world; cannot group shapes by environment.")
+
+        shape_body = self._required_numpy_array(model.shape_body, "shape_body")
+        shape_flags = self._required_numpy_array(model.shape_flags, "shape_flags")
+        shape_types = self._required_numpy_array(model.shape_type, "shape_type")
+        body_world = self._required_numpy_array(model.body_world, "body_world")
+
+        counts = [0 for _ in range(model.world_count)]
+        for shape_idx in range(model.shape_count):
+            body_id = int(shape_body[shape_idx])
+            if body_id < 0:
+                continue
+            if shape_flags[shape_idx] & int(ShapeFlags.COLLIDE_SHAPES) == 0:
+                continue
+            if body_id >= len(body_world):
+                raise RuntimeError(
+                    f"Shape {shape_idx} references body {body_id}, but body_world has length {len(body_world)}."
+                )
+
+            env_id = int(body_world[body_id])
+            if env_id < 0 or env_id >= model.world_count:
+                raise RuntimeError(
+                    f"Body {body_id} for shape {shape_idx} maps to invalid world id {env_id}; "
+                    f"expected [0, {model.world_count})."
+                )
+
+            counts[env_id] += self._num_contact_anchors_for_shape_type(shape_types[shape_idx])
+
+        return counts
+
+    @staticmethod
+    def _required_numpy_array(value, name: str):
+        """Return a Newton array as numpy, raising a clear error if it is missing."""
+        if value is None:
+            raise AttributeError(f"Newton model does not expose {name}.")
+        return value.numpy()
+
+    @staticmethod
+    def _num_contact_anchors_for_shape_type(geo_type) -> int:
+        """Return the number of fixed-ground anchors generated for one shape."""
+        if geo_type == GeoType.SPHERE:
+            return 1
+        if geo_type == GeoType.CAPSULE:
+            return 2
+        if geo_type == GeoType.CYLINDER:
+            return 2
+        if geo_type == GeoType.BOX:
+            return 8
+        return 1
 
     # Create the torch buffer for the abstract contacts
     def create_abstract_contacts_buffer(self):
@@ -186,28 +258,63 @@ class AbstractContact:
         return contacts
 
     # Fill the contacts buffers with the values
+    # def initialize_contacts(
+    #     self,
+    #     model: newton.Model,
+    #     newton_contacts: newton.Contacts
+    # ):
+    #     num_non_ground_shapes = model.shape_count - (1 if self.has_ground else 0)
+    #     num_shapes_per_env = num_non_ground_shapes // model.world_count
+
+    #     wp.launch(
+    #         generate_contact_points,
+    #         dim=model.world_count,
+    #         inputs=[
+    #             model.shape_transform,
+    #             model.shape_body,
+    #             model.shape_type,
+    #             model.shape_scale,
+    #             model.shape_margin,
+    #             model.shape_flags,
+    #             num_shapes_per_env,
+    #             self.num_contacts_per_env,
+    #             self.ground_shape_index,
+    #             self.shapes_start_offset,
+    #             model.up_axis.to_vec3(),
+    #         ],
+    #         outputs=[
+    #             newton_contacts.rigid_contact_shape0,
+    #             newton_contacts.rigid_contact_shape1,
+    #             newton_contacts.rigid_contact_point0,
+    #             newton_contacts.rigid_contact_point1,
+    #             newton_contacts.rigid_contact_thickness0,
+    #             newton_contacts.rigid_contact_thickness1,
+    #             newton_contacts.rigid_contact_normal,
+    #             newton_contacts.rigid_contact_depth,
+    #         ],
+    #         device=model.device,
+    #     )
+
+    # Fill the contacts buffers with the values
     def initialize_contacts(
         self,
         model: newton.Model,
         newton_contacts: newton.Contacts
     ):
-        num_non_ground_shapes = model.shape_count - (1 if self.has_ground else 0)
-        num_shapes_per_env = num_non_ground_shapes // model.world_count
-
         wp.launch(
-            generate_contact_points,
+            generate_contact_points_by_body_world,
             dim=model.world_count,
             inputs=[
                 model.shape_transform,
                 model.shape_body,
+                model.body_world,
                 model.shape_type,
                 model.shape_scale,
                 model.shape_margin,
                 model.shape_flags,
-                num_shapes_per_env,
+                model.shape_count,
                 self.num_contacts_per_env,
                 self.ground_shape_index,
-                self.shapes_start_offset,
                 model.up_axis.to_vec3(),
             ],
             outputs=[
