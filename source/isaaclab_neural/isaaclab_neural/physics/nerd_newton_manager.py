@@ -85,7 +85,7 @@ class NewtonNerdManager(NewtonManager):
     def _load_nerd_neural_model(cls, cfg_dict: dict, neural_solver=None):
         neural_model_path = cfg_dict.get("neural_model_path", None)
         if neural_model_path is None:
-            raise ValueError("NerdSolverCfg.neural_model_path must be set for solver_type='nerd'.")
+            return None
 
         from isaaclab_neural.utils.checkpoint import install_legacy_module_aliases
 
@@ -130,12 +130,6 @@ class NewtonNerdManager(NewtonManager):
             NewtonManager._contacts = cls._nerd_abstract_contacts.newton_contacts
             cls._nerd_ground_shape_index = cls._nerd_abstract_contacts.ground_shape_index
             num_contacts_per_env = cls._nerd_abstract_contacts.num_contacts_per_env
-            requested_contacts = cfg_dict.get("num_contacts_per_env", 0)
-            if requested_contacts not in (0, None, num_contacts_per_env):
-                raise ValueError(
-                    "NerdSolverCfg.num_contacts_per_env does not match fixed_ground abstract contacts: "
-                    f"cfg={requested_contacts}, generated={num_contacts_per_env}."
-                )
             contact_adapter = None
         elif contact_mode == "newton_native":
             NewtonManager._needs_collision_pipeline = True
@@ -164,8 +158,9 @@ class NewtonNerdManager(NewtonManager):
             contact_adapter=contact_adapter,
         )
         neural_model = cls._load_nerd_neural_model(cfg_dict, cls._solver)
-        NewtonManager._solver.set_neural_solver_model(neural_model)
-        NewtonManager._solver.eval()
+        if neural_model is not None:
+            NewtonManager._solver.set_neural_solver_model(neural_model)
+            NewtonManager._solver.eval()
         cls._sync_upstream_newton_state()
 
     @classmethod

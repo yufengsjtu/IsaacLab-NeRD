@@ -235,7 +235,7 @@ def run_policy(env, agent_cfg, args: argparse.Namespace) -> None:
 
 
 args_cli, hydra_args = parse_args()
-sys.argv = [sys.argv[0], "presets=newton"] + hydra_args
+sys.argv = [sys.argv[0]] + hydra_args
 
 
 @hydra_task_config(args_cli.task, args_cli.policy_agent if args_cli.policy_checkpoint is not None else "")
