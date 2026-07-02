@@ -1,0 +1,88 @@
+env:
+  env_name: Anymal-C-Native
+  num_envs: 512
+  neural_solver_cfg:
+    name: TransformerNeuralSolver
+    states_frame: body
+    anchor_frame_step: every
+    states_embedding_type: identical
+    prediction_type: relative
+    orientation_prediction_parameterization: quaternion
+    num_states_history: 10
+    min_contact_event_threshold: 0.12
+    contact_mode: newton_native
+    num_contacts_per_env: 64
+    contact_packing_policy: penetration_priority
+    use_cuda_graph: false
+
+algorithm:
+  name: SequenceModelTrainer
+  num_epochs: 1000
+  num_iters_per_epoch: 5000
+  sample_sequence_length: 10
+  batch_size: 512
+  num_valid_batches: 100
+  truncate_grad: True
+  grad_norm: 1.0
+  update_dataset_statistics: True
+  loss:
+    type: MSE
+    beta: 0.0
+  optimizer:
+    type: Adam
+    weight_decay: 0.0
+    lr_start: 1e-3
+    lr_end: 1e-4
+    lr_schedule: linear
+    betas: [0.9, 0.999]
+
+  dataset:
+    train_dataset_path: ./data/datasets/Anymal-C-Native/dataset_train.hdf5
+    valid_datasets:
+      exp_trajectory: ./data/datasets/Anymal-C-Native/dataset_valid.hdf5
+      zero_action_trajectory: ./data/datasets/Anymal-C-Native/dataset_zero_action_valid.hdf5
+      lstm_actuator_zero_action_trajectory: ./data/datasets/Anymal-C-Native/dataset_lstm_actuator_zero_action_valid.hdf5
+    max_capacity: 10000000
+    num_data_workers: 4
+
+  eval:
+    mode: dataset
+    action_mode: joint_f
+    rollout_horizon: 10
+    num_rollouts: 1024
+    dataset_path: ./data/datasets/Anymal-C-Native/dataset_zero_action_valid.hdf5
+
+inputs:
+  low_dim: [
+    states_embedding,
+    contact_normals,
+    contact_points_1,
+    contact_depths,
+    joint_f,
+    gravity_dir
+  ]
+
+network:
+  normalize_input: True
+  normalize_output: True
+
+  encoder:
+    low_dim:
+      layer_sizes: []
+      activation: relu
+      layernorm: False
+
+  transformer:
+    block_size: 32
+    n_layer: 6
+    n_head: 12
+    n_embd: 384
+    dropout: 0.0
+    bias: False
+
+  model:
+    output_tanh: False
+    mlp:
+      layer_sizes: [64]
+      activation: relu
+      layernorm: False
