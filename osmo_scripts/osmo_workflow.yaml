@@ -1,0 +1,121 @@
+workflow:
+  name: {{ workflow_name }}
+  resources:
+    default:
+      cpu: {{ num_cpu }}
+      gpu: {{ num_gpu }}
+      memory: {{ memory }}
+      storage: {{ storage }}
+      platform: {{ platform }}
+
+  tasks:
+  - name: virtual-node
+    image: {{ image }}
+    environment:
+      ACCEPT_EULA: "Y"
+      OMNI_KIT_ALLOW_ROOT: "1"
+      PRIVACY_CONSENT: "Y"
+    command:
+    - /bin/bash
+    args:
+    - /tmp/entry.sh
+    # credentials:
+    #   wandb:
+    #     WANDB_API_KEY: wandb_api_key
+{% if code_url or data_url %}
+    inputs:
+{% if code_url %}
+    - url: {{ code_url }}
+{% endif %}
+{% if data_url %}
+    - url: {{ data_url }}
+{% endif %}
+{% endif %}
+    files:
+    - path: /tmp/init.sh
+      localpath: {{ init_sh_localpath }}
+    - path: /tmp/main_scripts.sh
+      localpath: {{ main_scripts_localpath }}
+    - path: /tmp/entry.sh
+      contents: |-
+        set -ex
+        export WORKFLOW_ID="{{workflow_id}}"
+        export OUTPUT_LOCAL_PATH={{ output_local_path }}
+        echo 'export WORKFLOW_ID="{{workflow_id}}"' >> ~/.bashrc
+        echo 'export OUTPUT_LOCAL_PATH={{ output_local_path }}' >> ~/.bashrc
+
+        # The nvcr.io/nvidia/isaac-sim image bundles Python under /isaac-sim/python.sh
+        # but doesn't expose `python` / `python3` on PATH. Create exec-wrapper shims
+        # (NOT symlinks — python.sh resolves its sidecar setup_python_env.sh from
+        # $(dirname $0) and breaks if invoked via a symlinked path).
+        ISAACSIM_PYTHON=/isaac-sim/python.sh
+        if [ -x "$ISAACSIM_PYTHON" ]; then
+            mkdir -p /tmp/shims
+            printf '#!/bin/bash\nexec "%s" "$@"\n' "$ISAACSIM_PYTHON" > /tmp/shims/python3
+            cp /tmp/shims/python3 /tmp/shims/python
+            chmod +x /tmp/shims/python3 /tmp/shims/python
+            export PATH="/tmp/shims:$PATH"
+        fi
+
+        # Fetch IsaacLab-NeRD into a writable source directory. Prefer GitHub
+        # clone when code_git_url is set; otherwise copy an uploaded code tree.
+        mkdir -p $HOME/code
+{% if code_git_url %}
+        git clone "{{ code_git_url }}" $HOME/code/IsaacLab-NeRD
+        cd $HOME/code/IsaacLab-NeRD
+{% if code_git_ref %}
+        git checkout "{{ code_git_ref }}"
+{% endif %}
+{% elif code_url %}
+        if [ -d /osmo/data/input/0/IsaacLab-NeRD ]; then
+            cp -r /osmo/data/input/0/IsaacLab-NeRD $HOME/code/
+        else
+            echo "[FATAL] Uploaded code input must contain an IsaacLab-NeRD directory."
+            exit 1
+        fi
+{% else %}
+        echo "[FATAL] Set code_git_url or code_url so the workflow can fetch IsaacLab-NeRD."
+        exit 1
+{% endif %}
+
+{% if data_url %}
+        # Optional pre-generated dataset input. Cartpole workflows usually
+        # generate data in main_scripts.sh, so this block can be skipped.
+{% if code_url %}
+        DATA_INPUT_DIR=/osmo/data/input/1
+{% else %}
+        DATA_INPUT_DIR=/osmo/data/input/0
+{% endif %}
+        mkdir -p $HOME/code/IsaacLab-NeRD/data
+        ln -sfn "$DATA_INPUT_DIR" $HOME/code/IsaacLab-NeRD/data/datasets
+{% endif %}
+
+        # Per-run output directory (uploaded to {{ output_url }} at end, if set).
+        mkdir -p {{ output_local_path }}
+
+        bash /tmp/init.sh
+        bash /tmp/main_scripts.sh
+{% if output_url %}
+
+        # Tail Swift archival upload (skipped when output_url is empty,
+        # e.g. generate_data.py --skip-swift-archive).
+        echo "=== Uploading outputs from {{ output_local_path }} to {{ output_url }} ==="
+        osmo data upload {{ output_url }} {{ output_local_path }}
+{% endif %}
+
+default-values:
+  workflow_name: anymal-c-fixed-ground
+  image: nvcr.io/nvidia/isaac-lab:3.0.0-beta2
+  num_cpu: 8
+  num_gpu: 1
+  memory: 32Gi
+  storage: 64Gi
+  platform: ovx-l40s
+  code_url: ""
+  code_git_url: "https://github.com/yufengsjtu/IsaacLab-NeRD.git"
+  code_git_ref: "isaaclab_neural"
+  data_url: ""
+  output_url: s3://isaaclab-neural/isaaclab-neural/anymal-c-fixed-ground
+  output_local_path: /tmp/runs/output
+  init_sh_localpath: ./init.sh
+  main_scripts_localpath: ./main_scripts.sh
