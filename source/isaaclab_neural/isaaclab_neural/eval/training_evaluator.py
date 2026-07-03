@@ -256,7 +256,8 @@ class TrainingRolloutEvaluator:
         env = self.neural_env.unwrapped
         action = action.to(device=self.device, dtype=torch.float32)
         env.step(action)
-        self.neural_env.neural_adapter.sync(update_history=True)
+        # The solver step already appends the pre-step state to sequence history.
+        self.neural_env.neural_adapter.sync(update_history=False)
         return self.neural_env.neural_adapter.states_torch.detach().clone()
 
     def _step_joint_f(self, joint_f: torch.Tensor) -> torch.Tensor:
@@ -268,7 +269,8 @@ class TrainingRolloutEvaluator:
         env = adapter.isaaclab_env
         if hasattr(env, "scene"):
             env.scene.update(dt=getattr(env, "physics_dt", 0.0))
-        adapter.sync(update_history=True)
+        # The solver step already appends the pre-step state to sequence history.
+        adapter.sync(update_history=False)
         return adapter.states_torch.detach().clone()
 
     def calculate_error_metrics(self, target_next_states: torch.Tensor, rollout_states: torch.Tensor):
