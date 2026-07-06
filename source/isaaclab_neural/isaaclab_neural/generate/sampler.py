@@ -75,12 +75,12 @@ class ActionTrajectorySampler:
         return buffers
 
     def _copy_before_step(self, buffers: dict[str, Any], step: int) -> None:
-        inputs = self.adapter.neural_inputs()
+        inputs = self.adapter.raw_neural_inputs()
         self._copy_input(buffers["states"][:, step], inputs["states"])
         self._copy_input(buffers["root_body_q"][:, step], inputs["root_body_q"])
 
     def _copy_after_step(self, buffers: dict[str, Any], step: int, action: torch.Tensor) -> None:
-        inputs = self.adapter.neural_inputs()
+        inputs = self.adapter.raw_neural_inputs()
         self._copy_input(buffers["next_states"][:, step], inputs["states"])
         self._copy_input(buffers["joint_f"][:, step], inputs["joint_f"])
         if "actions" in buffers:

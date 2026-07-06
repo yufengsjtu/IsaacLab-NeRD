@@ -339,3 +339,7 @@ class DataGenerationAdapter:
     def neural_inputs(self):
         """Current neural-model input tensors."""
         return self.solver.get_neural_model_inputs()
+
+    def raw_neural_inputs(self):
+        """Current raw Newton tensors before neural-model preprocessing."""
+        return self.solver.get_raw_neural_model_inputs()

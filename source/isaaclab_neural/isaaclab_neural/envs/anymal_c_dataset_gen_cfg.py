@@ -89,4 +89,10 @@ class AnymalCDatasetGenFlatEnvCfg(AnymalCFlatEnvCfg):
             ),
         )
 
+        # Replacing the whole "legs" actuator cfg resets joint armature to the
+        # DCMotor default; restore the preset-resolved armature (newton=0.01) set
+        # by super() so data-gen physics matches the deployment env
+        # (Anymal-C-Velocity-Flat), which NeRD is trained against.
+        armature = self.scene.robot.actuators["legs"].armature
         self.scene.robot.actuators["legs"] = deepcopy(ANYDRIVE_3_SIMPLE_ACTUATOR_CFG)
+        self.scene.robot.actuators["legs"].armature = armature

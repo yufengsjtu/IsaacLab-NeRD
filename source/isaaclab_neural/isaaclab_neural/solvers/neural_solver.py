@@ -501,6 +501,22 @@ class NeuralSolver(SolverBase):
     Prepare the inputs for the neural model inference.
     """
 
+    def get_raw_neural_model_inputs(self):
+        # assemble the model inputs in world frame without preprocessing. Dataset
+        # generation writes these raw tensors so training can apply preprocessing
+        # exactly once, matching online inference.
+        model_inputs = {
+            "root_body_q": self.root_body_q,
+            "states": self.states,
+            "joint_f": self.joint_f,
+            "gravity_dir": self.gravity_dir,
+            **self.contacts
+        }
+        for k in model_inputs.keys():
+            model_inputs[k] = model_inputs[k].unsqueeze(1) # (num_envs, T, dim)
+
+        return model_inputs
+
     def get_neural_model_inputs(self):
         # assemble the model inputs in world frame
         model_inputs = {
