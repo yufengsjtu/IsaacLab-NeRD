@@ -1,0 +1,48 @@
+workflow:
+  base_name: cartpole-fixed-ground
+  dataset_subdir: cartpole-fixed-ground
+
+resources:
+  num_gpu: 1
+  num_cpu: 15
+  memory: 64Gi
+  storage: 256Gi
+  platform: ovx-l40s
+
+experiment:
+  env_name: Cartpole
+  robot_name: Cartpole
+  data_gen_task: Isaac-Cartpole-v0
+  deployment_task: Isaac-Cartpole-v0
+  train_task: Isaac-Cartpole-NeRD-v0
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Cartpole/transformer.yaml
+  train_preset: ""
+  num_gpus: 1
+  contact_mode: fixed_ground
+  sample_mode: joint_f
+  initial_states_source: sample
+  states_frame: world
+  train_transitions: 1000000
+  valid_transitions: 100000
+  data_gen_num_envs: 256
+  train_num_envs: 256
+  trajectory_length: 100
+  dataset_specs:
+    - filename: dataset_train.hdf5
+      seed: 0
+      split: train
+      task_kind: default
+      zero_actions: false
+      use_policy: false
+    - filename: dataset_valid.hdf5
+      seed: 1
+      split: valid
+      task_kind: default
+      zero_actions: false
+      use_policy: false
+    - filename: dataset_passive_valid.hdf5
+      seed: 2
+      split: valid
+      task_kind: default
+      zero_actions: true
+      use_policy: false

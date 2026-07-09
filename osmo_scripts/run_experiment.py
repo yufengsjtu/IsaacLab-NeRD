@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+"""Run an OSMO experiment from a declarative preset."""
+
+from __future__ import annotations
+
+import argparse
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+from lib.simple_yaml import load_yaml
+
+
+@dataclass
+class DatasetSpec:
+    filename: str
+    seed: int
+    split: str
+    task_kind: str
+    zero_actions: bool
+    use_policy: bool
+
+
+class Tee:
+    """Write output to multiple streams."""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, data: str):
+        for stream in self._streams:
+            stream.write(data)
+            stream.flush()
+
+    def flush(self):
+        for stream in self._streams:
+            stream.flush()
+
+
+def load_preset(name: str, preset_file: str | None = None) -> dict:
+    path = Path(preset_file) if preset_file else Path(__file__).resolve().parent / "presets" / f"{name}.yaml"
+    if not path.is_file():
+        raise FileNotFoundError(f"Preset {name!r} not found at {path}")
+
+    preset = load_yaml(path)
+    if not isinstance(preset, dict):
+        raise ValueError(f"Preset file {path} did not contain a mapping.")
+    return preset
+
+
+def parse_dataset_specs(experiment: dict) -> list[DatasetSpec]:
+    specs = []
+    for item in experiment.get("dataset_specs", []):
+        specs.append(
+            DatasetSpec(
+                filename=str(item["filename"]),
+                seed=int(item["seed"]),
+                split=str(item.get("split", "valid")),
+                task_kind=str(item.get("task_kind", "default")),
+                zero_actions=bool(item.get("zero_actions", False)),
+                use_policy=bool(item.get("use_policy", False)),
+            )
+        )
+    if not specs:
+        raise ValueError("Preset must define at least one dataset spec.")
+    return specs
+
+
+def required_dataset_files(experiment: dict, specs: list[DatasetSpec]) -> list[str]:
+    policy_checkpoint = experiment.get("policy_checkpoint", "")
+    required_files = []
+    for spec in specs:
+        if spec.use_policy and policy_checkpoint and not Path(policy_checkpoint).is_file():
+            continue
+        required_files.append(spec.filename)
+    return required_files
+
+
+def dataset_cache_complete(candidate_dir: Path, required_files: list[str]) -> bool:
+    return all((candidate_dir / filename).is_file() for filename in required_files)
+
+
+def load_dataset_cache_from_input(input_root: Path, dataset_subdir: str, env_name: str, local_env_dir: Path, required_files: list[str]) -> bool:
+    if not input_root.is_dir():
+        print(f"Dataset input path does not exist: {input_root}")
+        return False
+
+    candidates = (
+        input_root / dataset_subdir / env_name,
+        input_root / dataset_subdir,
+        input_root / env_name,
+        input_root,
+    )
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        files = sorted(candidate.glob("*.hdf5"))
+        if not files:
+            continue
+
+        if local_env_dir.exists():
+            shutil.rmtree(local_env_dir)
+        local_env_dir.mkdir(parents=True, exist_ok=True)
+        for file in files:
+            shutil.copy2(file, local_env_dir / file.name)
+        if dataset_cache_complete(local_env_dir, required_files):
+            print(f"Loaded datasets for {env_name} from NV-Datasets input: {candidate}")
+            return True
+
+    print(f"NV-Datasets input did not contain the required datasets for {env_name} under {dataset_subdir}.")
+    return False
+
+
+def stage_generated_datasets(
+    *,
+    local_env_dir: Path,
+    dataset_subdir: str,
+    env_name: str,
+    nvdataset_data_dataset: str,
+    nvdataset_data_description: str,
+):
+    files = sorted(local_env_dir.glob("*.hdf5"))
+    if not files:
+        print(f"No generated HDF5 datasets found under {local_env_dir} to stage.")
+        return
+
+    if nvdataset_data_dataset:
+        from lib import nvdataset_io
+
+        upload_root = Path("/tmp/nvdatasets/generated_dataset_upload")
+        upload_dir = upload_root / dataset_subdir / env_name
+        if upload_root.exists():
+            shutil.rmtree(upload_root)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        for file in files:
+            shutil.copy2(file, upload_dir / file.name)
+        print(f"Uploading generated datasets to NV-Datasets dataset {nvdataset_data_dataset}/{dataset_subdir}.")
+        nvdataset_io.upload_directory(
+            name=nvdataset_data_dataset,
+            source_dir=upload_root,
+            description=nvdataset_data_description,
+        )
+    else:
+        print("No NV-Datasets data dataset configured; generated HDF5 files remain only in the pod-local dataset dir.")
+
+
+def contact_args(experiment: dict) -> list[str]:
+    args = ["--contact-mode", str(experiment.get("contact_mode", "fixed_ground"))]
+    if experiment.get("contact_mode") == "newton_native":
+        args += [
+            "--num-contacts-per-env",
+            str(experiment.get("num_contacts_per_env", 64)),
+            "--contact-packing-policy",
+            str(experiment.get("contact_packing_policy", "penetration_priority")),
+        ]
+    return args
+
+
+def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -> list[str] | None:
+    policy_checkpoint = str(experiment.get("policy_checkpoint", ""))
+    if spec.use_policy:
+        if not policy_checkpoint or not Path(policy_checkpoint).is_file():
+            print(f"Skipping policy validation dataset; checkpoint not found: {policy_checkpoint}")
+            return None
+        sample_mode = "policy"
+    else:
+        sample_mode = str(experiment.get("sample_mode", "action"))
+
+    transitions = experiment["train_transitions"] if spec.split == "train" else experiment["valid_transitions"]
+    task = experiment.get("deployment_task") if spec.task_kind == "deployment" else experiment.get("data_gen_task")
+
+    args = [
+        "-m",
+        "isaaclab_neural.generate.generate_dataset",
+        "--task",
+        str(task),
+        "--dataset-dir",
+        str(dataset_dir),
+        "--dataset-name",
+        spec.filename,
+        "--env-name",
+        str(experiment["env_name"]),
+        "--robot-name",
+        str(experiment["robot_name"]),
+        "--sample-mode",
+        sample_mode,
+        "--initial-states-source",
+        str(experiment.get("initial_states_source", "env")),
+        *contact_args(experiment),
+        "--num-envs",
+        str(experiment["data_gen_num_envs"]),
+        "--num-transitions",
+        str(transitions),
+        "--trajectory-length",
+        str(experiment["trajectory_length"]),
+        "--seed",
+        str(spec.seed),
+        "--headless",
+        "--force-overwrite",
+    ]
+
+    if experiment.get("states_frame"):
+        args += ["--states-frame", str(experiment["states_frame"])]
+    if experiment.get("write_chunk_transitions"):
+        args += ["--write-chunk-transitions", str(experiment["write_chunk_transitions"])]
+    if spec.zero_actions:
+        args.append("--zero-actions")
+    if spec.use_policy:
+        args += ["--policy-checkpoint", policy_checkpoint]
+    if experiment.get("randomize_pd_gains") and spec.task_kind == "default" and not spec.zero_actions:
+        args += ["--randomize-pd-gains", "--kp-min", "30.0", "--kp-max", "200.0", "--kd-min", "0.0", "--kd-max", "4.0"]
+    return args
+
+
+def generate_all_datasets(experiment: dict, specs: list[DatasetSpec], dataset_dir: Path):
+    for spec in specs:
+        args = build_dataset_args(experiment, spec, dataset_dir)
+        if args is not None:
+            subprocess.run([sys.executable, *args], check=True)
+
+
+def run_training(experiment: dict, output_root: Path):
+    train_args = [
+        "--task",
+        str(experiment["train_task"]),
+        "--cfg",
+        str(experiment["train_cfg"]),
+        "--logdir",
+        str(output_root / str(experiment["env_name"])),
+        "--num-envs",
+        str(experiment["train_num_envs"]),
+        "--seed",
+        "0",
+        "--headless",
+        "--skip-check-log-override",
+    ]
+    if experiment.get("update_dataset_statistics"):
+        train_args.append("--update-dataset-statistics")
+    if experiment.get("train_preset"):
+        train_args.append(f"presets={experiment['train_preset']}")
+
+    num_gpus = int(experiment.get("num_gpus", 1))
+    if num_gpus > 1:
+        command = [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nproc_per_node",
+            str(num_gpus),
+            "-m",
+            "isaaclab_neural.train.train",
+            *train_args,
+        ]
+    else:
+        command = [sys.executable, "-m", "isaaclab_neural.train.train", *train_args]
+    subprocess.run(command, check=True)
+
+
+def start_tensorboard(output_root: Path, port: int):
+    log_file = (output_root / "tensorboard.log").open("w", encoding="utf-8")
+    process = subprocess.Popen(
+        [sys.executable, "-m", "tensorboard.main", "--logdir", str(output_root), "--host", "0.0.0.0", "--port", str(port)],
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+    )
+    (output_root / "tensorboard.pid").write_text(f"{process.pid}\n", encoding="utf-8")
+    print(f"TensorBoard started on port {port} with logdir {output_root}")
+
+
+def run(args: argparse.Namespace):
+    preset = load_preset(args.preset, args.preset_file)
+    experiment = preset["experiment"]
+    specs = parse_dataset_specs(experiment)
+    output_root = Path(args.output_root)
+    dataset_dir = Path(args.dataset_dir)
+    local_env_dir = dataset_dir / str(experiment["env_name"])
+    required_files = required_dataset_files(experiment, specs)
+
+    print(f"Workflow base name: {args.workflow_base_name}")
+    print(f"Dataset subdirectory: {args.dataset_subdir}")
+    print(f"Environment: {experiment['env_name']}")
+    print(f"Data generation envs: {experiment['data_gen_num_envs']}")
+    print(f"Training envs per rank: {experiment['train_num_envs']}")
+    print(f"Training config: {experiment['train_cfg']}")
+
+    start_tensorboard(output_root, args.tensorboard_port)
+
+    datasets_available = False
+    if args.dataset_cache_mode != "off" and args.dataset_input_path:
+        datasets_available = load_dataset_cache_from_input(
+            input_root=Path(args.dataset_input_path),
+            dataset_subdir=args.dataset_subdir,
+            env_name=str(experiment["env_name"]),
+            local_env_dir=local_env_dir,
+            required_files=required_files,
+        )
+        if not datasets_available:
+            print(f"NV-Datasets input cache unavailable for {experiment['env_name']}; generating datasets locally.")
+            if args.dataset_cache_mode == "require":
+                raise RuntimeError("DATASET_CACHE_MODE=require but required datasets were not found in NV-Datasets input.")
+    elif args.dataset_cache_mode == "require":
+        raise RuntimeError("DATASET_CACHE_MODE=require but DATASET_INPUT_PATH is empty.")
+
+    if not datasets_available:
+        generate_all_datasets(experiment, specs, dataset_dir)
+        stage_generated_datasets(
+            local_env_dir=local_env_dir,
+            dataset_subdir=args.dataset_subdir,
+            env_name=str(experiment["env_name"]),
+            nvdataset_data_dataset=args.nvdataset_data_dataset,
+            nvdataset_data_description=args.nvdataset_data_description,
+        )
+
+    run_training(experiment, output_root)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--preset", required=True)
+    parser.add_argument("--preset-file")
+    parser.add_argument("--workflow-base-name", required=True)
+    parser.add_argument("--dataset-subdir", required=True)
+    parser.add_argument("--dataset-cache-mode", default="auto", choices=("auto", "require", "off"))
+    parser.add_argument("--dataset-input-path", default="")
+    parser.add_argument("--nvdataset-data-dataset", default="")
+    parser.add_argument("--nvdataset-data-description", default="IsaacLab-NeRD generated HDF5 datasets.")
+    parser.add_argument("--output-root", default="/tmp/runs/output")
+    parser.add_argument("--dataset-dir", default="./data/datasets")
+    parser.add_argument("--tensorboard-port", type=int, default=6006)
+    args = parser.parse_args()
+
+    output_root = Path(args.output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    log_path = output_root / "main_scripts.log"
+    with log_path.open("a", encoding="utf-8") as log_file:
+        tee_stdout = Tee(sys.stdout, log_file)
+        tee_stderr = Tee(sys.stderr, log_file)
+        with redirect_stdout(tee_stdout), redirect_stderr(tee_stderr):
+            run(args)
+
+
+if __name__ == "__main__":
+    main()
