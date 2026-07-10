@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 env:
   env_name: Anymal-C-Native
   num_envs: 512
@@ -13,7 +18,6 @@ env:
     contact_mode: newton_native
     num_contacts_per_env: 64
     contact_packing_policy: penetration_priority
-    use_cuda_graph: false
 
 algorithm:
   name: SequenceModelTrainer
@@ -42,8 +46,9 @@ algorithm:
       exp_trajectory: ./data/datasets/Anymal-C-Native/dataset_valid.hdf5
       zero_action_trajectory: ./data/datasets/Anymal-C-Native/dataset_zero_action_valid.hdf5
       lstm_actuator_zero_action_trajectory: ./data/datasets/Anymal-C-Native/dataset_lstm_actuator_zero_action_valid.hdf5
-    max_capacity: 10000000
-    num_data_workers: 4
+    max_capacity: 20000000
+    load_mode: eager
+    num_data_workers: 8
 
   eval:
     mode: dataset
@@ -56,6 +61,7 @@ inputs:
   low_dim: [
     states_embedding,
     contact_normals,
+    contact_points_0,
     contact_points_1,
     contact_depths,
     joint_f,

@@ -18,11 +18,11 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
-import torch
-
 import isaaclab_neural.envs  # noqa: F401 - registers built-in NeRD eval tasks
+import torch
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 from isaaclab_neural.utils.checkpoint import get_cfg_from_checkpoint, load_checkpoint
+
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 
@@ -61,6 +61,7 @@ def build_solver_cfg(args: argparse.Namespace) -> NerdSolverCfg | None:
     checkpoint = load_checkpoint(args.checkpoint, device="cpu")
     cfg = get_cfg_from_checkpoint(checkpoint, args.checkpoint)
     neural_solver_cfg = dict(cfg["env"]["neural_solver_cfg"])
+    neural_solver_cfg.pop("use_cuda_graph", None)
     neural_solver_cfg["neural_model_path"] = args.checkpoint
     solver_cfg = NerdSolverCfg(**neural_solver_cfg)
     apply_solver_overrides(solver_cfg, args)

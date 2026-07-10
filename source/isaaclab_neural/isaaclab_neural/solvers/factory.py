@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
 import inspect
@@ -10,7 +15,6 @@ import torch
 from .neural_solver import NeuralSolver
 from .rnn_neural_solver import RNNNeuralSolver
 from .transformer_neural_solver import TransformerNeuralSolver
-
 
 _NEURAL_SOLVER_CLASSES = {
     "NeuralSolver": NeuralSolver,
@@ -29,8 +33,7 @@ def _valid_solver_args(solver_cls: type[NeuralSolver]) -> set[str]:
     }
 
     accepts_kwargs = any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in solver_sig.parameters.values()
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in solver_sig.parameters.values()
     )
     if accepts_kwargs:
         base_sig = inspect.signature(NeuralSolver.__init__)
@@ -75,14 +78,13 @@ def create_neural_solver(
     cfg_dict.pop("contact_fingerprint", None)
     cfg_dict.pop("validate_contact_fingerprint", None)
     cfg_dict.pop("contact_packing_policy", None)
-    cfg_dict.pop("use_cuda_graph", None)
+    cfg_dict.pop("use_cuda_graph", None)  # legacy checkpoints; lives on NerdNewtonCfg
     cfg_dict.pop("num_contacts_per_env", None)
     solver_cls_name = cfg_dict.pop("name", cfg_dict.pop("neural_solver_name", "NeuralSolver"))
     solver_cls = _NEURAL_SOLVER_CLASSES.get(solver_cls_name)
     if solver_cls is None:
         raise NotImplementedError(
-            f"Unknown neural solver type: {solver_cls_name}. "
-            f"Available: {list(_NEURAL_SOLVER_CLASSES.keys())}"
+            f"Unknown neural solver type: {solver_cls_name}. Available: {list(_NEURAL_SOLVER_CLASSES.keys())}"
         )
 
     cfg_dict.update(overrides)

@@ -8,13 +8,14 @@
 from __future__ import annotations
 
 import isaaclab.envs.mdp as base_mdp
-import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils.configclass import configclass
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
+
+import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c.flat_env_cfg import AnymalCFlatEnvCfg
 
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
@@ -53,7 +54,7 @@ class ObservationsCfg:
     policy: PolicyCfg = PolicyCfg()
 
 
-DEFAULT_ANYMAL_C_FLAT_NERD_MODEL_PATH = "/home/rowany/workspace/pre-trained_models/Anymal-C/nn/final_model.pt"
+DEFAULT_ANYMAL_C_FLAT_NERD_MODEL_PATH = "./pre-trained_models/Anymal-C/nn/final_model.pt"
 ROOT_HEIGHT_MINIMUM = 0.4
 
 
@@ -66,14 +67,14 @@ class NerdAnymalCFlatEnvCfg(AnymalCFlatEnvCfg):
     def __post_init__(self) -> None:
         super().__post_init__()
         # Disable contact-sensor related reward/termination terms (not working with NeRD solver)
-        self.terminations.base_contact = None
-        self.rewards.feet_air_time = None
-        self.rewards.undesired_contacts = None
+        self.terminations.base_contact = None  # type: ignore[assignment]
+        self.rewards.feet_air_time = None  # type: ignore[assignment]
+        self.rewards.undesired_contacts = None  # type: ignore[assignment]
         # Disable random pushing event
-        self.events.push_robot = None
+        self.events.push_robot = None  # type: ignore[assignment]
 
         # Add root-height termination
-        self.terminations.low_root_height = DoneTerm(
+        self.terminations.low_root_height = DoneTerm(  # type: ignore[attr-defined]
             func=base_mdp.root_height_below_minimum,
             params={
                 "minimum_height": ROOT_HEIGHT_MINIMUM,
@@ -96,7 +97,6 @@ class NerdAnymalCFlatEnvCfg(AnymalCFlatEnvCfg):
                 states_embedding_type="identical",
                 prediction_type="relative",
                 orientation_prediction_parameterization="quaternion",
-                use_cuda_graph=False,
             ),
             num_substeps=1,
             debug_mode=False,

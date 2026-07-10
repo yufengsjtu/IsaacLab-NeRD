@@ -1,8 +1,13 @@
-import torch
-import warp as wp
-import newton
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
 
 from typing import Literal
+
+import newton
+import torch
+import warp as wp
 
 from isaaclab_neural.contacts.packing import ContactPackingPolicy, get_contact_order
 from isaaclab_neural.utils import torch_utils
@@ -37,9 +42,7 @@ class NewtonContactAdapter:
 
         self.shape_body = model.shape_body.numpy()
         self.bodies_per_env = int(model.body_count // model.world_count)
-        self.body_world = (
-            model.body_world.numpy() if hasattr(model, "body_world") else None
-        )
+        self.body_world = model.body_world.numpy() if hasattr(model, "body_world") else None
 
         self.contact_masks = torch.zeros(
             (self.num_envs, self.num_contacts_per_env),
@@ -102,7 +105,9 @@ class NewtonContactAdapter:
         raw = self._read_raw_contacts(contacts, contact_count, state)
         order = get_contact_order(raw, self.packing_policy)
         write_counts = torch.zeros(
-            self.num_envs, dtype=torch.long, device=self.device,
+            self.num_envs,
+            dtype=torch.long,
+            device=self.device,
         )
 
         for contact_idx in order.tolist():
@@ -121,7 +126,7 @@ class NewtonContactAdapter:
             self.contact_depths[env_id, slot_id] = raw["depth"][contact_idx]
             self.contact_thicknesses_0[env_id, slot_id] = raw["thickness0"][contact_idx]
             self.contact_thicknesses_1[env_id, slot_id] = raw["thickness1"][contact_idx]
-            self.contact_points_0[env_id, slot_id].copy_(raw["point0"][contact_idx])
+            self.contact_points_0[env_id, slot_id].copy_(raw["point0_world"][contact_idx])
             self.contact_points_1[env_id, slot_id].copy_(raw["point1_world"][contact_idx])
 
             write_counts[env_id] += 1
@@ -148,8 +153,9 @@ class NewtonContactAdapter:
             "packing_policy": self.packing_policy,
             "thickness_rule": "native_margin",
             "depth_rule": "support_distance_along_normal",
+            "contact_points_0_frame": "world",
             "contact_points_1_frame": "world",
-            "adapter_version": 3,
+            "adapter_version": 4,
         }
 
     def _contact_count(self, contacts: newton.Contacts) -> int:

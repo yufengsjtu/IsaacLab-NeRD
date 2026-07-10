@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from isaaclab.utils.configclass import configclass
 from isaaclab_newton.physics.newton_manager_cfg import NewtonSolverCfg
+
+from isaaclab.utils.configclass import configclass
 
 if TYPE_CHECKING:
     from .nerd_newton_manager import NewtonNerdManager
@@ -99,11 +100,4 @@ class NerdSolverCfg(NewtonSolverCfg):
     """Minimum contact depth threshold used when computing contact masks.
 
     If ``None``, ``NeuralSolver`` uses its package default.
-    """
-
-    use_cuda_graph: bool = False
-    """Whether the NeRD simulate path may be captured in a CUDA graph.
-
-    Defaults to ``False`` because torch model execution and dynamic native
-    contact packing often require an explicit validation pass before graphing.
     """

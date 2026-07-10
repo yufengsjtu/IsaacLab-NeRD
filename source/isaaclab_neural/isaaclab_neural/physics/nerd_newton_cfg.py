@@ -7,8 +7,9 @@
 
 from __future__ import annotations
 
-from isaaclab.utils.configclass import configclass
 from isaaclab_newton.physics.newton_manager_cfg import NewtonCfg
+
+from isaaclab.utils.configclass import configclass
 
 from .nerd_solver_cfg import NerdSolverCfg
 
@@ -25,4 +26,9 @@ class NerdNewtonCfg(NewtonCfg):
     """NeRD solver configuration."""
 
     use_cuda_graph: bool = False
-    """Whether to capture NeRD simulation in a CUDA graph."""
+    """Whether to capture the upstream Newton simulation in a CUDA graph.
+
+    This only affects pure Newton physics. When an active NeRD neural solver is
+    used, :class:`NewtonNerdManager` forces this to ``False`` because NeRD physics
+    steps include PyTorch and cannot be captured in a Warp CUDA graph.
+    """

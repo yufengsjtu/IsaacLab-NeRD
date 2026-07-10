@@ -1,7 +1,12 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 env:
   env_name: Cartpole
   num_envs: 512
-  neural_solver_cfg: 
+  neural_solver_cfg:
     name: TransformerNeuralSolver
     states_frame: world
     anchor_frame_step: every
@@ -11,7 +16,6 @@ env:
     num_states_history: 10     # number of states and actions to pass into model. Default: 1 means use current state and action
     min_contact_event_threshold: 0.12
     contact_mode: fixed_ground
-    use_cuda_graph: false
 
 algorithm:
   name: SequenceModelTrainer
@@ -36,12 +40,13 @@ algorithm:
 
   dataset:
     train_dataset_path: ./data/datasets/Cartpole/dataset_train.hdf5
-    valid_datasets: 
+    valid_datasets:
       exp_trajectory: ./data/datasets/Cartpole/dataset_valid.hdf5
       passive_trajectory: ./data/datasets/Cartpole/dataset_passive_valid.hdf5
     max_capacity: 10000000
+    load_mode: eager
     num_data_workers: 4
-  
+
   eval:
     mode: dataset
     action_mode: joint_f
@@ -55,11 +60,11 @@ inputs:
     states_embedding,
     joint_f,
   ]
-  
+
 network:
   normalize_input: True
   normalize_output: True
-  
+
   encoder:
     low_dim:
       layer_sizes: []
@@ -76,7 +81,7 @@ network:
 
   model:
     output_tanh: False
-    mlp: 
+    mlp:
       layer_sizes: [64]
       activation: relu
       layernorm: False

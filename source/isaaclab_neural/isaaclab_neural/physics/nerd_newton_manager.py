@@ -7,11 +7,15 @@
 
 from __future__ import annotations
 
+import logging
+
 import torch
 import warp as wp
+from isaaclab_newton.physics import NewtonManager
 
 from isaaclab.physics import PhysicsEvent, PhysicsManager
-from isaaclab_newton.physics import NewtonManager
+
+logger = logging.getLogger(__name__)
 
 
 class NewtonNerdManager(NewtonManager):
@@ -37,6 +41,7 @@ class NewtonNerdManager(NewtonManager):
         "_collision_pipeline",
         "_use_single_state",
         "_graph",
+        "_graph_capture_pending",
         "_usdrt_stage",
         "_model_changes",
         "_views",
@@ -82,8 +87,34 @@ class NewtonNerdManager(NewtonManager):
         cls._sync_upstream_newton_state()
 
     @classmethod
+    def _disable_cuda_graph_for_nerd(cls) -> None:
+        """NeRD neural solver steps include PyTorch and cannot use upstream CUDA graphs."""
+        cfg = PhysicsManager._cfg
+        if cfg is None or not cfg.use_cuda_graph:
+            return
+        cfg.use_cuda_graph = False
+        cls._graph = None
+        cls._graph_capture_pending = False
+        logger.warning("use_cuda_graph is not supported with NeRD neural solvers; running physics eagerly.")
+        cls._sync_upstream_newton_state()
+
+    @classmethod
+    def _capture_or_defer_graph(cls) -> None:
+        if cls._nerd_active:
+            cls._disable_cuda_graph_for_nerd()
+            return
+        super()._capture_or_defer_graph()
+
+    @classmethod
+    def _capture_relaxed_graph(cls, device: str):
+        if cls._nerd_active:
+            cls._sync_upstream_newton_state()
+            return None
+        return super()._capture_relaxed_graph(device)
+
+    @classmethod
     def _load_nerd_neural_model(cls, cfg_dict: dict, neural_solver=None):
-        neural_model_path = cfg_dict.get("neural_model_path", None)
+        neural_model_path = cfg_dict.get("neural_model_path")
         if neural_model_path is None:
             return None
 
@@ -161,6 +192,7 @@ class NewtonNerdManager(NewtonManager):
         if neural_model is not None:
             NewtonManager._solver.set_neural_solver_model(neural_model)
             NewtonManager._solver.eval()
+        cls._disable_cuda_graph_for_nerd()
         cls._sync_upstream_newton_state()
 
     @classmethod
@@ -192,6 +224,7 @@ class NewtonNerdManager(NewtonManager):
             return
 
         physics_dt = cls._solver_dt * cls._num_substeps
+        contacts = cls._contacts
         for _ in range(cls._decimation):
             contacts = cls._prepare_nerd_contacts()
 

@@ -8,19 +8,22 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sys
+from datetime import timedelta
+from pathlib import Path
 
+import torch
+import torch.distributed as dist
 import yaml
+
+from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import isaaclab_neural.envs  # noqa: F401 - registers built-in NeRD tasks
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
-from isaaclab_neural.train.arguments import get_parser
 from isaaclab_neural.train import MultiStepTrainer, MultiStepTrainerNew, SequenceModelTrainer, VanillaTrainer
+from isaaclab_neural.train.arguments import get_parser
 from isaaclab_neural.utils.checkpoint import get_cfg_from_checkpoint, load_checkpoint
 from isaaclab_neural.utils.python_utils import get_time_stamp, handle_cfg_overrides, print_warning, set_random_seed
-from isaaclab_tasks.utils.hydra import hydra_task_config
-
 
 ALGORITHMS = {
     "VanillaTrainer": VanillaTrainer,
@@ -28,6 +31,30 @@ ALGORITHMS = {
     "MultiStepTrainer": MultiStepTrainer,
     "MultiStepTrainerNew": MultiStepTrainerNew,
 }
+
+
+def configure_distributed(args) -> None:
+    """Configure CUDA device and process group when launched with torchrun."""
+    args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    args.rank = int(os.environ.get("RANK", 0))
+    args.world_size = int(os.environ.get("WORLD_SIZE", 1))
+    args.distributed = args.world_size > 1
+
+    if not args.distributed:
+        return
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("Distributed training requires CUDA devices.")
+    torch.cuda.set_device(args.local_rank)
+    args.device = f"cuda:{args.local_rank}"
+    timeout_seconds = int(os.environ.get("TORCH_DISTRIBUTED_TIMEOUT_SECONDS", "3600"))
+    dist.init_process_group(backend="nccl", timeout=timedelta(seconds=timeout_seconds))
+
+
+def cleanup_distributed() -> None:
+    """Tear down the torch distributed process group if it was initialized."""
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def configure_env(env_cfg, args) -> None:
@@ -46,9 +73,9 @@ def build_launch_cfg(env_cfg):
     if not isinstance(physics_cfg, NerdNewtonCfg):
         return env_cfg
 
-    from isaaclab_newton.physics.newton_manager_cfg import NewtonCfg
-
     import copy
+
+    from isaaclab_newton.physics.newton_manager_cfg import NewtonCfg
 
     launch_cfg = copy.deepcopy(env_cfg)
     launch_cfg.sim.physics = NewtonCfg(
@@ -61,7 +88,7 @@ def build_launch_cfg(env_cfg):
 
 def load_training_cfg(args):
     """Load training YAML and merge checkpoint/CLI overrides."""
-    with open(Path(args.cfg).expanduser(), "r") as cfg_file:
+    with open(Path(args.cfg).expanduser()) as cfg_file:
         cfg = yaml.load(cfg_file, Loader=yaml.SafeLoader)
 
     checkpoint = None
@@ -74,6 +101,7 @@ def load_training_cfg(args):
                 f"the environment name in checkpoint {checkpoint_cfg['env']['env_name']}"
             )
         cfg["env"]["neural_solver_cfg"].update(checkpoint_cfg["env"]["neural_solver_cfg"])
+        cfg["env"]["neural_solver_cfg"].pop("use_cuda_graph", None)
         cfg["inputs"] = checkpoint_cfg["inputs"]
         cfg["network"] = checkpoint_cfg["network"]
 
@@ -113,14 +141,18 @@ def validate_cfg(cfg) -> None:
 
 
 args_cli, hydra_args = get_parser().parse_known_args()
+configure_distributed(args_cli)
 sys.argv = [sys.argv[0]] + hydra_args
+
 
 @hydra_task_config(args_cli.task, "")
 def main(env_cfg, _agent_cfg=None) -> None:
     cfg, checkpoint = load_training_cfg(args_cli)
     validate_cfg(cfg)
     configure_env(env_cfg, args_cli)
-    solver_cfg = NerdSolverCfg(**cfg["env"].get("neural_solver_cfg", {}))
+    neural_solver_cfg = dict(cfg["env"].get("neural_solver_cfg", {}))
+    neural_solver_cfg.pop("use_cuda_graph", None)
+    solver_cfg = NerdSolverCfg(**neural_solver_cfg)
 
     from isaaclab_tasks.utils import launch_simulation
 
@@ -146,4 +178,7 @@ def main(env_cfg, _agent_cfg=None) -> None:
 
 if __name__ == "__main__":
     set_random_seed(args_cli.seed)
-    main()  # type: ignore[call-arg]
+    try:
+        main()  # type: ignore[call-arg]
+    finally:
+        cleanup_distributed()

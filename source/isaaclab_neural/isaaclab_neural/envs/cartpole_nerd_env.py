@@ -8,14 +8,14 @@
 from __future__ import annotations
 
 from isaaclab.utils.configclass import configclass
+
 from isaaclab_tasks.manager_based.classic.cartpole.cartpole_env_cfg import CartpoleEnvCfg
 
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 
 from .neural_env_wrapper import NerdManagerBasedRLEnv
 
-
-DEFAULT_CARTPOLE_NERD_MODEL_PATH = "/home/rowany/workspace/pre-trained_models/Cartpole/nn/final_model.pt"
+DEFAULT_CARTPOLE_NERD_MODEL_PATH = "./pre-trained_models/Cartpole/nn/final_model.pt"
 
 
 @configclass
@@ -36,7 +36,6 @@ class NerdCartpoleEnvCfg(CartpoleEnvCfg):
                 anchor_frame_step="every",
                 prediction_type="relative",
                 orientation_prediction_parameterization="quaternion",
-                use_cuda_graph=False,
             ),
             num_substeps=1,
             debug_mode=False,

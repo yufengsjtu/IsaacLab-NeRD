@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2024 NVIDIA CORPORATION.  All rights reserved.
 # NVIDIA CORPORATION and its licensors retain all intellectual property
 # and proprietary rights in and to this software, related documentation
@@ -5,29 +10,27 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
-import numpy as np
-import warp as wp
 from contextlib import nullcontext
 
-import newton
+import numpy as np
+import warp as wp
+from newton import Contacts, Control, JointType, Model, State
 from newton.solvers import SolverBase
-from newton import Control, Model, State, Contacts
-from newton import JointType
 
 from isaaclab_neural.contacts.newton_contact_adapter import NewtonContactAdapter
+from isaaclab_neural.utils import newton_utils, warp_utils
 from isaaclab_neural.utils.newton_utils import base_joint_type
-from isaaclab_neural.utils import warp_utils
-from isaaclab_neural.utils import newton_utils
+
 CONTACT_DEPTH_UPPER_RATIO = 4.0
 MIN_CONTACT_EVENT_THRESHOLD = 0.12
-from isaaclab_neural.utils import torch_utils
+from typing import Literal
 
 import torch
 
-from typing import Literal, Optional
-
-
 from isaaclab_neural.solvers.kernels import determine_angular_dofs
+from isaaclab_neural.utils import torch_utils
+
+
 class NeuralSolver(SolverBase):
     """
     An integrator that uses a neural network to predict the next state.
@@ -37,19 +40,19 @@ class NeuralSolver(SolverBase):
 
     def __init__(
         self,
-        name = 'NeuralSolver',
+        name="NeuralSolver",
         model: Model = None,
         contacts: Contacts = None,
-        neural_model: Optional[torch.nn.Module] = None,
+        neural_model: torch.nn.Module | None = None,
         num_contacts_per_env: int = 0,
-        states_frame: Optional[str] = 'body',
-        anchor_frame_step: Optional[str] = 'every',
-        states_embedding_type: Optional[str] = None,
+        states_frame: str | None = "body",
+        anchor_frame_step: str | None = "every",
+        states_embedding_type: str | None = None,
         prediction_type: str = "relative",
         orientation_prediction_parameterization: str = "quaternion",
         min_contact_event_threshold: float = None,
         contact_mode: Literal["fixed_ground", "newton_native"] = "fixed_ground",
-        contact_adapter: Optional[NewtonContactAdapter] = None,
+        contact_adapter: NewtonContactAdapter | None = None,
     ):
         """
         Args:
@@ -110,9 +113,7 @@ class NeuralSolver(SolverBase):
         self.contact_mode = contact_mode
         self.contact_adapter = contact_adapter
         if self.contact_mode == "newton_native" and self.contact_adapter is None:
-            raise ValueError(
-                "NeuralSolver contact_mode='newton_native' requires a NewtonContactAdapter."
-            )
+            raise ValueError("NeuralSolver contact_mode='newton_native' requires a NewtonContactAdapter.")
         if self.contact_mode not in ["fixed_ground", "newton_native"]:
             raise ValueError(f"Unsupported NeuralSolver contact_mode: {self.contact_mode}")
 
@@ -122,15 +123,9 @@ class NeuralSolver(SolverBase):
             assert q_starts[i] - j == self.dof_q_per_env
 
         # initialize model input variables
-        self.root_body_q = torch.empty(
-            (self.num_envs, 7), device=self.torch_device
-        )
-        self.states = torch.empty(
-            (self.num_envs, self.state_dim), device=self.torch_device
-        )
-        self.joint_f = torch.empty(
-            (self.num_envs, self.joint_f_dim), device=self.torch_device
-        )
+        self.root_body_q = torch.empty((self.num_envs, 7), device=self.torch_device)
+        self.states = torch.empty((self.num_envs, self.state_dim), device=self.torch_device)
+        self.joint_f = torch.empty((self.num_envs, self.joint_f_dim), device=self.torch_device)
         if self.contact_mode == "fixed_ground":
             if contacts is None:
                 self.contacts = self._empty_contacts()
@@ -139,9 +134,7 @@ class NeuralSolver(SolverBase):
         else:
             self.contacts = self.contact_adapter.to_neural_inputs()
 
-        self.gravity_dir = torch.zeros(
-            (self.num_envs, 3), device=self.torch_device
-        )
+        self.gravity_dir = torch.zeros((self.num_envs, 3), device=self.torch_device)
         self.gravity_dir[:, self.model.up_axis] = -1.0
 
         self._build_dof_types()
@@ -166,21 +159,9 @@ class NeuralSolver(SolverBase):
 
     def _build_dof_types(self):
         # compute information about the joint dofs
-        self.joint_q_end_wp = wp.empty(
-            self.num_joints_per_env,
-            dtype=int,
-            device=self.device
-        )
-        self.is_angular_dof_wp = wp.empty(
-            self.dof_q_per_env,
-            dtype=bool,
-            device=self.device
-        )
-        self.is_continuous_dof_wp = wp.zeros(
-            self.state_dim,
-            dtype=bool,
-            device=self.device
-        )
+        self.joint_q_end_wp = wp.empty(self.num_joints_per_env, dtype=int, device=self.device)
+        self.is_angular_dof_wp = wp.empty(self.dof_q_per_env, dtype=bool, device=self.device)
+        self.is_continuous_dof_wp = wp.zeros(self.state_dim, dtype=bool, device=self.device)
         # determine which dofs are angular and continuous
         wp.launch(
             determine_angular_dofs,
@@ -192,16 +173,13 @@ class NeuralSolver(SolverBase):
                 self.model.joint_limit_lower,
                 self.model.joint_limit_upper,
             ],
-            outputs=[
-                self.joint_q_end_wp,
-                self.is_angular_dof_wp,
-                self.is_continuous_dof_wp],
+            outputs=[self.joint_q_end_wp, self.is_angular_dof_wp, self.is_continuous_dof_wp],
             device=self.model.device,
         )
 
-        self.joint_q_start = self.model.joint_q_start.numpy()[:self.num_joints_per_env]
+        self.joint_q_start = self.model.joint_q_start.numpy()[: self.num_joints_per_env]
         self.joint_q_end = self.joint_q_end_wp.numpy()
-        self.joint_types = self.model.joint_type.numpy()[:self.num_joints_per_env]
+        self.joint_types = self.model.joint_type.numpy()[: self.num_joints_per_env]
         self.is_angular_dof = self.is_angular_dof_wp.numpy()
         self.is_continuous_dof = self.is_continuous_dof_wp.numpy()
         # Type of the first non-FIXED joint — i.e., the "base" joint after
@@ -209,6 +187,7 @@ class NeuralSolver(SolverBase):
         self.base_joint_type = base_joint_type(self.joint_types)
 
     """Compute the dimension of the input state embedding. """
+
     def _init_state_embedding(self):
         if self.states_embedding_type is None or self.states_embedding_type == "identical":
             self.state_embedding_dim = self.state_dim
@@ -217,13 +196,12 @@ class NeuralSolver(SolverBase):
         else:
             raise NotImplementedError
 
-        self.states_embedding = torch.zeros(
-            (self.num_envs, self.state_embedding_dim), device=self.torch_device
-        )
+        self.states_embedding = torch.zeros((self.num_envs, self.state_embedding_dim), device=self.torch_device)
 
     """Compute the dimension of the prediction output."""
+
     def _init_prediction(self):
-        if self.prediction_type == 'absolute' or self.prediction_type == 'relative':
+        if self.prediction_type == "absolute" or self.prediction_type == "relative":
             num_regular_dofs, num_sperical_joints = 0, 0
             for i in range(self.num_joints_per_env):
                 if self.joint_types[i] == JointType.FREE:
@@ -233,15 +211,15 @@ class NeuralSolver(SolverBase):
                     num_sperical_joints += 1
                 else:
                     num_regular_dofs += self.joint_q_end[i] - self.joint_q_start[i]
-            if self.orientation_prediction_parameterization == 'quaternion':
+            if self.orientation_prediction_parameterization == "quaternion":
                 self.prediction_dim = num_regular_dofs + num_sperical_joints * 4 + self.dof_qd_per_env
-            elif self.orientation_prediction_parameterization == 'exponential':
+            elif self.orientation_prediction_parameterization == "exponential":
                 self.prediction_dim = num_regular_dofs + num_sperical_joints * 3 + self.dof_qd_per_env
-            elif self.orientation_prediction_parameterization == 'naive':
+            elif self.orientation_prediction_parameterization == "naive":
                 self.prediction_dim = num_regular_dofs + num_sperical_joints * 4 + self.dof_qd_per_env
             else:
                 raise NotImplementedError
-        elif self.prediction_type == 'acceleration':
+        elif self.prediction_type == "acceleration":
             self.prediction_dim = self.dof_qd_per_env
         else:
             raise NotImplementedError
@@ -264,7 +242,6 @@ class NeuralSolver(SolverBase):
                 subclass consistency.
         """
         del env_ids
-        pass
 
     def sync_from_newton(
         self,
@@ -299,8 +276,7 @@ class NeuralSolver(SolverBase):
         dt: float = 0.01,
     ):
         assert self.neural_model is not None, (
-            "Cannot simulate via neural integrator as "
-            "a neural model has not been setup yet."
+            "Cannot simulate via neural integrator as a neural model has not been setup yet."
         )
         self._update_states(state_in, contacts, control.joint_f)
 
@@ -317,18 +293,13 @@ class NeuralSolver(SolverBase):
             # get the inputs for neural model
             model_inputs = self.get_neural_model_inputs()
             # compute the prediction using neural model, shape (num_envs, 1, dim)
-            prediction = self.neural_model.forward(model_inputs, single_step = True)
+            prediction = self.neural_model.forward(model_inputs, single_step=True)
 
             # convert the prediction to next states
             cur_states = model_inputs["states"][:, -1, :]
-            next_states = self.convert_prediction_to_next_states(
-                cur_states, prediction.squeeze(1), dt
-            )
+            next_states = self.convert_prediction_to_next_states(cur_states, prediction.squeeze(1), dt)
 
-            next_states_world = self.convert_states_back_to_world(
-                model_inputs["root_body_q"],
-                next_states
-            )
+            next_states_world = self.convert_states_back_to_world(model_inputs["root_body_q"], next_states)
 
             # copy next states to state_out
             self.wrap2PI(next_states_world)
@@ -345,12 +316,9 @@ class NeuralSolver(SolverBase):
     def _update_states(self, newton_states: State, contacts: Contacts, joint_f):
         self._acquire_states_to_torch(newton_states, self.states)
         self.wrap2PI(self.states)
-        self.root_body_q = wp.to_torch(
-            newton_states.body_q
-        )[0::self.num_bodies_per_env, :]
+        self.root_body_q = wp.to_torch(newton_states.body_q)[0 :: self.num_bodies_per_env, :]
         if self.joint_f_dim > 0:
-            self.joint_f = wp.to_torch(joint_f).view(
-                self.num_envs, self.joint_f_dim)
+            self.joint_f = wp.to_torch(joint_f).view(self.num_envs, self.joint_f_dim)
         if self.contact_mode == "fixed_ground":
             self.contacts = self._get_contacts_for_neural_model_input(contacts)
         else:
@@ -359,55 +327,52 @@ class NeuralSolver(SolverBase):
 
     def get_contact_masks(
         self,
-        contact_depths, # (num_envs, (T), num_contacts_per_env)
-        contact_thickness0, # (num_envs, (T), num_contacts_per_env)
-        contact_thickness1 # (num_envs, (T), num_contacts_per_env)
+        contact_depths,  # (num_envs, (T), num_contacts_per_env)
+        contact_thickness0,  # (num_envs, (T), num_contacts_per_env)
+        contact_thickness1,  # (num_envs, (T), num_contacts_per_env)
     ):
-        # compute the threhold to a detect contact event
+        # compute the threshold to detect a contact event
         contact_event_threshold = CONTACT_DEPTH_UPPER_RATIO * (contact_thickness0 + contact_thickness1)
         contact_event_threshold = torch.where(
             contact_event_threshold < self.min_contact_event_threshold,
             self.min_contact_event_threshold,
-            contact_event_threshold
+            contact_event_threshold,
         )
 
-        contact_masks = (contact_depths < contact_event_threshold) # (num_envs, (T), num_contacts_per_env)
+        contact_masks = contact_depths < contact_event_threshold  # (num_envs, (T), num_contacts_per_env)
 
         return contact_masks
 
     """
     Get abstract contact representation for neural network input
     """
+
     def _get_contacts_for_neural_model_input(self, contacts: Contacts):
-        contact_normals = wp.to_torch(
-            contacts.rigid_contact_normal
-        ).view(self.num_envs, self.num_contacts_per_env * 3).clone()
-
-        contact_depths = wp.to_torch(
-            contacts.rigid_contact_depth
-        ).view(self.num_envs, self.num_contacts_per_env).clone()
-
-        contact_thickness0 = wp.to_torch(
-            contacts.rigid_contact_thickness0
-        ).view(self.num_envs, self.num_contacts_per_env).clone()
-
-        contact_thickness1 = wp.to_torch(
-            contacts.rigid_contact_thickness1
-        ).view(self.num_envs, self.num_contacts_per_env).clone()
-
-        contact_points_0 = wp.to_torch(
-            contacts.rigid_contact_point0
-        ).view(self.num_envs, self.num_contacts_per_env * 3).clone()
-
-        contact_points_1 = wp.to_torch(
-            contacts.rigid_contact_point1
-        ).view(self.num_envs, self.num_contacts_per_env * 3).clone()
-
-        contact_masks = self.get_contact_masks(
-            contact_depths,
-            contact_thickness0,
-            contact_thickness1
+        contact_normals = (
+            wp.to_torch(contacts.rigid_contact_normal).view(self.num_envs, self.num_contacts_per_env * 3).clone()
         )
+
+        contact_depths = (
+            wp.to_torch(contacts.rigid_contact_depth).view(self.num_envs, self.num_contacts_per_env).clone()
+        )
+
+        contact_thickness0 = (
+            wp.to_torch(contacts.rigid_contact_thickness0).view(self.num_envs, self.num_contacts_per_env).clone()
+        )
+
+        contact_thickness1 = (
+            wp.to_torch(contacts.rigid_contact_thickness1).view(self.num_envs, self.num_contacts_per_env).clone()
+        )
+
+        contact_points_0 = (
+            wp.to_torch(contacts.rigid_contact_point0).view(self.num_envs, self.num_contacts_per_env * 3).clone()
+        )
+
+        contact_points_1 = (
+            wp.to_torch(contacts.rigid_contact_point1).view(self.num_envs, self.num_contacts_per_env * 3).clone()
+        )
+
+        contact_masks = self.get_contact_masks(contact_depths, contact_thickness0, contact_thickness1)
 
         return {
             "contact_masks": contact_masks,
@@ -416,7 +381,7 @@ class NeuralSolver(SolverBase):
             "contact_thicknesses_0": contact_thickness0,
             "contact_thicknesses_1": contact_thickness1,
             "contact_points_0": contact_points_0,
-            "contact_points_1": contact_points_1
+            "contact_points_1": contact_points_1,
         }
 
     def _empty_contacts(self):
@@ -454,16 +419,18 @@ class NeuralSolver(SolverBase):
         (
             model_inputs["states"],
             model_inputs["next_states"],
+            model_inputs["contact_points_0"],
             model_inputs["contact_points_1"],
             model_inputs["contact_normals"],
-            model_inputs["gravity_dir"]
+            model_inputs["gravity_dir"],
         ) = self.convert_coordinate_frame(
             model_inputs["root_body_q"],
             model_inputs["states"],
             model_inputs.get("next_states", None),
+            model_inputs.get("contact_points_0", None),
             model_inputs.get("contact_points_1", None),
             model_inputs.get("contact_normals", None),
-            model_inputs.get("gravity_dir", None)
+            model_inputs.get("gravity_dir", None),
         )
 
         # post processing
@@ -472,27 +439,20 @@ class NeuralSolver(SolverBase):
             self.wrap2PI(model_inputs["next_states"])
 
         if "states_embedding" in model_inputs:
-            self.embed_states(
-                model_inputs["states"],
-                model_inputs["states_embedding"]
-            )
+            self.embed_states(model_inputs["states"], model_inputs["states_embedding"])
         else:
-            model_inputs["states_embedding"] = self.embed_states(
-                model_inputs["states"]
-            )
+            model_inputs["states_embedding"] = self.embed_states(model_inputs["states"])
 
         # Apply contact mask: zero features for inactive anchors.
         if model_inputs["contact_points_1"] is not None:
-            mask = model_inputs['contact_masks'].unsqueeze(-1)  # (B, T, C, 1) bool
+            mask = model_inputs["contact_masks"].unsqueeze(-1)  # (B, T, C, 1) bool
             for key in model_inputs.keys():
-                if key.startswith('contact_') and key != 'contact_masks':
+                if key.startswith("contact_") and key != "contact_masks":
                     shape = model_inputs[key].shape
                     model_inputs[key] = torch.where(
                         mask,
-                        model_inputs[key].view(
-                            shape[0], shape[1], self.num_contacts_per_env, -1
-                        ),
-                        0.,
+                        model_inputs[key].view(shape[0], shape[1], self.num_contacts_per_env, -1),
+                        0.0,
                     ).view(shape)
 
         return model_inputs
@@ -510,10 +470,10 @@ class NeuralSolver(SolverBase):
             "states": self.states,
             "joint_f": self.joint_f,
             "gravity_dir": self.gravity_dir,
-            **self.contacts
+            **self.contacts,
         }
         for k in model_inputs.keys():
-            model_inputs[k] = model_inputs[k].unsqueeze(1) # (num_envs, T, dim)
+            model_inputs[k] = model_inputs[k].unsqueeze(1)  # (num_envs, T, dim)
 
         return model_inputs
 
@@ -525,10 +485,10 @@ class NeuralSolver(SolverBase):
             "states_embedding": self.states_embedding,
             "joint_f": self.joint_f,
             "gravity_dir": self.gravity_dir,
-            **self.contacts
+            **self.contacts,
         }
         for k in model_inputs.keys():
-            model_inputs[k] = model_inputs[k].unsqueeze(1) # (num_envs, T, dim)
+            model_inputs[k] = model_inputs[k].unsqueeze(1)  # (num_envs, T, dim)
 
         processed_model_inputs = self.process_neural_model_inputs(model_inputs)
 
@@ -538,15 +498,13 @@ class NeuralSolver(SolverBase):
     Fix continuous angular dofs in the states vector (in-place operation).
     """
 
-    def wrap2PI(self, states, is_continuous_dof = None):
+    def wrap2PI(self, states, is_continuous_dof=None):
         if is_continuous_dof is None:
             is_continuous_dof = self.is_continuous_dof
         if not is_continuous_dof.any():
             return
         assert states.shape[-1] == is_continuous_dof.shape[0]
-        wrap_delta = torch.floor(
-            (states[..., is_continuous_dof] + np.pi) / (2 * np.pi)
-        ) * (2 * np.pi)
+        wrap_delta = torch.floor((states[..., is_continuous_dof] + np.pi) / (2 * np.pi)) * (2 * np.pi)
         states[..., is_continuous_dof] -= wrap_delta
 
     def wrap2PI_differentiable(self, states, is_continuous_dof=None):
@@ -580,10 +538,7 @@ class NeuralSolver(SolverBase):
         continuous_positions = states[..., is_continuous_dof]
 
         # Differentiable wrapping: atan2(sin(x), cos(x))
-        wrapped_angles = torch.atan2(
-            torch.sin(continuous_positions),
-            torch.cos(continuous_positions)
-        )
+        wrapped_angles = torch.atan2(torch.sin(continuous_positions), torch.cos(continuous_positions))
 
         # Assign to the copy (safe out-of-place operation)
         wrapped_states[..., is_continuous_dof] = wrapped_angles
@@ -630,7 +585,8 @@ class NeuralSolver(SolverBase):
     Raises:
         NotImplementedError: If the prediction type is not supported.
     """
-    def convert_prediction_to_next_states(self, states, prediction, dt = None):
+
+    def convert_prediction_to_next_states(self, states, prediction, dt=None):
         next_states = torch.empty_like(states)
 
         if self.prediction_type in ["absolute", "relative"]:
@@ -642,44 +598,37 @@ class NeuralSolver(SolverBase):
                 joint_dof_start = self.joint_q_start[joint_id]
                 if self.joint_types[joint_id] == JointType.FREE:
                     # position dofs
-                    prediction_dof_offset += \
-                        self._convert_prediction_to_next_states_regular_dofs(
-                            states[..., joint_dof_start:joint_dof_start + 3],
-                            prediction[..., prediction_dof_offset:],
-                            next_states[..., joint_dof_start:joint_dof_start + 3]
-                        )
+                    prediction_dof_offset += self._convert_prediction_to_next_states_regular_dofs(
+                        states[..., joint_dof_start : joint_dof_start + 3],
+                        prediction[..., prediction_dof_offset:],
+                        next_states[..., joint_dof_start : joint_dof_start + 3],
+                    )
                     # 3d orientation dofs
-                    prediction_dof_offset += \
-                        self._convert_prediction_to_next_states_orientation_dofs(
-                            states[..., joint_dof_start + 3:joint_dof_start + 7],
-                            prediction[..., prediction_dof_offset:],
-                            next_states[..., joint_dof_start + 3:joint_dof_start + 7]
-                        )
+                    prediction_dof_offset += self._convert_prediction_to_next_states_orientation_dofs(
+                        states[..., joint_dof_start + 3 : joint_dof_start + 7],
+                        prediction[..., prediction_dof_offset:],
+                        next_states[..., joint_dof_start + 3 : joint_dof_start + 7],
+                    )
                 elif self.joint_types[joint_id] == JointType.BALL:
-                    prediction_dof_offset += \
-                        self._convert_prediction_to_next_states_orientation_dofs(
-                            states[..., joint_dof_start:joint_dof_start + 4],
-                            prediction[..., prediction_dof_offset:],
-                            next_states[..., joint_dof_start:joint_dof_start + 4]
-                        )
+                    prediction_dof_offset += self._convert_prediction_to_next_states_orientation_dofs(
+                        states[..., joint_dof_start : joint_dof_start + 4],
+                        prediction[..., prediction_dof_offset:],
+                        next_states[..., joint_dof_start : joint_dof_start + 4],
+                    )
                 else:
                     joint_dof_end = self.joint_q_end[joint_id]
-                    prediction_dof_offset += \
-                        self._convert_prediction_to_next_states_regular_dofs(
-                            states[..., joint_dof_start:joint_dof_end],
-                            prediction[..., prediction_dof_offset:],
-                            next_states[..., joint_dof_start:joint_dof_end]
-                        )
+                    prediction_dof_offset += self._convert_prediction_to_next_states_regular_dofs(
+                        states[..., joint_dof_start:joint_dof_end],
+                        prediction[..., prediction_dof_offset:],
+                        next_states[..., joint_dof_start:joint_dof_end],
+                    )
 
             # Compute velocity components of the next states
             if self.prediction_type == "absolute":
-                next_states[..., self.dof_q_per_env:].copy_(
-                    prediction[..., prediction_dof_offset:]
-                )
+                next_states[..., self.dof_q_per_env :].copy_(prediction[..., prediction_dof_offset:])
             elif self.prediction_type == "relative":
-                next_states[..., self.dof_q_per_env:] = (
-                    states[..., self.dof_q_per_env:] +
-                    prediction[..., prediction_dof_offset:]
+                next_states[..., self.dof_q_per_env :] = (
+                    states[..., self.dof_q_per_env :] + prediction[..., prediction_dof_offset:]
                 )
             else:
                 raise NotImplementedError
@@ -708,18 +657,14 @@ class NeuralSolver(SolverBase):
     Assume prediction is index from zero, prediction.shape[-1] might be longer
         than states.shape[-1], but only the first prediction_dims will be used.
     """
-    def _convert_prediction_to_next_states_regular_dofs(
-        self,
-        states,
-        prediction,
-        next_states
-    ):
+
+    def _convert_prediction_to_next_states_regular_dofs(self, states, prediction, next_states):
         assert states.shape[-1] == next_states.shape[-1]
         dofs = states.shape[-1]
-        if self.prediction_type == 'absolute':
+        if self.prediction_type == "absolute":
             next_states.copy_(prediction[..., :dofs])
             return dofs
-        elif self.prediction_type == 'relative':
+        elif self.prediction_type == "relative":
             next_states.copy_(states + prediction[..., :dofs])
             return dofs
         else:
@@ -740,33 +685,29 @@ class NeuralSolver(SolverBase):
     Assume prediction is index from zero, prediction.shape[-1] might be longer
         than states.shape[-1], but only the first prediction_dim will be used.
     """
-    def _convert_prediction_to_next_states_orientation_dofs(
-        self,
-        states,
-        prediction,
-        next_states
-    ):
+
+    def _convert_prediction_to_next_states_orientation_dofs(self, states, prediction, next_states):
         assert states.shape[-1] == 4 and next_states.shape[-1] == 4
 
         # Parse the prediction into quaternion
         prediction_dofs = None
-        if self.orientation_prediction_parameterization == 'naive':
+        if (
+            self.orientation_prediction_parameterization == "naive"
+            or self.orientation_prediction_parameterization == "quaternion"
+        ):
             predicted_quaternion = prediction[..., :4]
             prediction_dofs = 4
-        elif self.orientation_prediction_parameterization == 'quaternion':
-            predicted_quaternion = prediction[..., :4]
-            prediction_dofs = 4
-        elif self.orientation_prediction_parameterization == 'exponential':
+        elif self.orientation_prediction_parameterization == "exponential":
             predicted_quaternion = torch_utils.exponential_coord_to_quat(prediction[..., :3])
             prediction_dofs = 3
         else:
             raise NotImplementedError
 
         # Apply quaternion/delta quaternion to the states to acquire next_states
-        if self.prediction_type == 'absolute':
+        if self.prediction_type == "absolute":
             raw_next_quaternion = predicted_quaternion
-        elif self.prediction_type == 'relative':
-            if self.orientation_prediction_parameterization == 'naive':
+        elif self.prediction_type == "relative":
+            if self.orientation_prediction_parameterization == "naive":
                 raw_next_quaternion = states + predicted_quaternion
             else:
                 # raw_next_quaternion = torch_utils.quat_mul(states, predicted_quaternion)
@@ -779,53 +720,44 @@ class NeuralSolver(SolverBase):
 
         return prediction_dofs
 
-    def compute_acceleration_from_pos(
-        self,
-        states,
-        next_states,
-        dt
-    ):
+    def compute_acceleration_from_pos(self, states, next_states, dt):
         # WARNING: This helper still assumes the old spatial-twist free-root layout
         # ([omega, nu]) even though current Newton states use [lin_vel, ang_vel].
         # Keep acceleration prediction disabled until this is updated.
         acceleration = torch.empty(
-            (*states.shape[:-1], self.dof_qd_per_env),
-            dtype = states.dtype,
-            device = self.torch_device
+            (*states.shape[:-1], self.dof_qd_per_env), dtype=states.dtype, device=self.torch_device
         )
 
-        vel = states[..., self.dof_q_per_env:]
+        vel = states[..., self.dof_q_per_env :]
 
         acc_dof_offset = 0
         for joint_id in range(self.num_joints_per_env):
             joint_dof_start = self.joint_q_start[joint_id]
             if self.joint_types[joint_id] == JointType.FREE:
-                p0 = states[..., joint_dof_start:joint_dof_start + 3]
-                q0 = states[..., joint_dof_start + 3: joint_dof_start + 7]
-                p1 = next_states[..., joint_dof_start:joint_dof_start + 3]
-                q1 = next_states[..., joint_dof_start + 3: joint_dof_start + 7]
-                omega_0 = vel[..., acc_dof_offset:acc_dof_offset + 3]
-                nu_0 = vel[..., acc_dof_offset + 3:acc_dof_offset + 6]
+                p0 = states[..., joint_dof_start : joint_dof_start + 3]
+                q0 = states[..., joint_dof_start + 3 : joint_dof_start + 7]
+                p1 = next_states[..., joint_dof_start : joint_dof_start + 3]
+                q1 = next_states[..., joint_dof_start + 3 : joint_dof_start + 7]
+                omega_0 = vel[..., acc_dof_offset : acc_dof_offset + 3]
+                nu_0 = vel[..., acc_dof_offset + 3 : acc_dof_offset + 6]
 
                 delta_q = torch_utils.delta_quat(q0, q1)
                 omega_1 = torch_utils.quat_to_exponential_coord(delta_q) / dt
-                nu_1 = (p1 - p0 - torch.cross(omega_1, p0, dim = -1) * dt) / dt
-                acceleration[..., acc_dof_offset:acc_dof_offset + 3] = (omega_1 - omega_0) / dt
-                acceleration[..., acc_dof_offset + 3:acc_dof_offset + 6] = (nu_1 - nu_0) / dt
+                nu_1 = (p1 - p0 - torch.cross(omega_1, p0, dim=-1) * dt) / dt
+                acceleration[..., acc_dof_offset : acc_dof_offset + 3] = (omega_1 - omega_0) / dt
+                acceleration[..., acc_dof_offset + 3 : acc_dof_offset + 6] = (nu_1 - nu_0) / dt
                 acc_dof_offset += 6
             elif self.joint_types[joint_id] == JointType.BALL:
                 raise NotImplementedError
             else:
                 joint_dof_end = self.joint_q_end[joint_id]
                 joint_dofs = joint_dof_end - joint_dof_start
-                delta_states = next_states[..., joint_dof_start:joint_dof_end] \
-                    - states[..., joint_dof_start:joint_dof_end]
-                self.wrap2PI(
-                    delta_states,
-                    self.is_continuous_dof[joint_dof_start:joint_dof_end]
+                delta_states = (
+                    next_states[..., joint_dof_start:joint_dof_end] - states[..., joint_dof_start:joint_dof_end]
                 )
-                acceleration[..., acc_dof_offset:acc_dof_offset + joint_dofs] = (
-                    delta_states - vel[..., acc_dof_offset:acc_dof_offset + joint_dofs] * dt
+                self.wrap2PI(delta_states, self.is_continuous_dof[joint_dof_start:joint_dof_end])
+                acceleration[..., acc_dof_offset : acc_dof_offset + joint_dofs] = (
+                    delta_states - vel[..., acc_dof_offset : acc_dof_offset + joint_dofs] * dt
                 ) / (dt * dt)
                 acc_dof_offset += joint_dofs
 
@@ -833,15 +765,13 @@ class NeuralSolver(SolverBase):
 
     def convert_next_states_to_prediction(
         self,
-        states, # (B, (T), dof_states)
-        next_states, # (B, (T), dof_states)
-        dt = None,
-        prediction_type = None
+        states,  # (B, (T), dof_states)
+        next_states,  # (B, (T), dof_states)
+        dt=None,
+        prediction_type=None,
     ):
         prediction = torch.empty(
-            (*states.shape[:-1], self.prediction_dim),
-            dtype = states.dtype,
-            device = self.torch_device
+            (*states.shape[:-1], self.prediction_dim), dtype=states.dtype, device=self.torch_device
         )
 
         if prediction_type is None:
@@ -854,58 +784,50 @@ class NeuralSolver(SolverBase):
             for joint_id in range(self.num_joints_per_env):
                 joint_dof_start = self.joint_q_start[joint_id]
                 if self.joint_types[joint_id] == JointType.FREE:
-                    prediction_dof_offset += \
-                        self._convert_next_states_to_prediction_regular_dofs(
-                            states[..., joint_dof_start:joint_dof_start + 3],
-                            next_states[..., joint_dof_start:joint_dof_start + 3],
-                            self.is_continuous_dof[joint_dof_start:joint_dof_start + 3],
-                            prediction[..., prediction_dof_offset:],
-                            prediction_type
-                        )
-                    prediction_dof_offset += \
-                        self._convert_next_states_to_prediction_orientation_dofs(
-                            states[..., joint_dof_start + 3:joint_dof_start + 7],
-                            next_states[..., joint_dof_start + 3:joint_dof_start + 7],
-                            prediction[..., prediction_dof_offset:],
-                            prediction_type
-                        )
+                    prediction_dof_offset += self._convert_next_states_to_prediction_regular_dofs(
+                        states[..., joint_dof_start : joint_dof_start + 3],
+                        next_states[..., joint_dof_start : joint_dof_start + 3],
+                        self.is_continuous_dof[joint_dof_start : joint_dof_start + 3],
+                        prediction[..., prediction_dof_offset:],
+                        prediction_type,
+                    )
+                    prediction_dof_offset += self._convert_next_states_to_prediction_orientation_dofs(
+                        states[..., joint_dof_start + 3 : joint_dof_start + 7],
+                        next_states[..., joint_dof_start + 3 : joint_dof_start + 7],
+                        prediction[..., prediction_dof_offset:],
+                        prediction_type,
+                    )
                 elif self.joint_types[joint_id] == JointType.BALL:
-                    prediction_dof_offset += \
-                        self._convert_next_states_to_prediction_orientation_dofs(
-                            states[..., joint_dof_start:joint_dof_start + 4],
-                            next_states[..., joint_dof_start:joint_dof_start + 4],
-                            prediction[..., prediction_dof_offset:],
-                            prediction_type
-                        )
+                    prediction_dof_offset += self._convert_next_states_to_prediction_orientation_dofs(
+                        states[..., joint_dof_start : joint_dof_start + 4],
+                        next_states[..., joint_dof_start : joint_dof_start + 4],
+                        prediction[..., prediction_dof_offset:],
+                        prediction_type,
+                    )
                 else:
                     joint_dof_end = self.joint_q_end[joint_id]
-                    prediction_dof_offset += \
-                        self._convert_next_states_to_prediction_regular_dofs(
-                            states[..., joint_dof_start:joint_dof_end],
-                            next_states[..., joint_dof_start:joint_dof_end],
-                            self.is_continuous_dof[joint_dof_start:joint_dof_end],
-                            prediction[..., prediction_dof_offset:],
-                            prediction_type
-                        )
+                    prediction_dof_offset += self._convert_next_states_to_prediction_regular_dofs(
+                        states[..., joint_dof_start:joint_dof_end],
+                        next_states[..., joint_dof_start:joint_dof_end],
+                        self.is_continuous_dof[joint_dof_start:joint_dof_end],
+                        prediction[..., prediction_dof_offset:],
+                        prediction_type,
+                    )
 
             # Compute velocity components of the prediction
             if prediction_type == "absolute":
-                prediction[..., prediction_dof_offset:].copy_(
-                    next_states[..., self.dof_q_per_env:]
-                )
+                prediction[..., prediction_dof_offset:].copy_(next_states[..., self.dof_q_per_env :])
             elif prediction_type == "relative":
                 prediction[..., prediction_dof_offset:] = (
-                    next_states[..., self.dof_q_per_env:] -
-                    states[..., self.dof_q_per_env:]
+                    next_states[..., self.dof_q_per_env :] - states[..., self.dof_q_per_env :]
                 )
             else:
                 raise NotImplementedError
         elif prediction_type == "acceleration":
             # NOTE: For acceleration prediction, we only use velocity to compute the acceleration
-            # The converted acceleration is not used in loss computation, but only used for computing the target mean/std
-            prediction.copy_(
-                (next_states[..., self.dof_q_per_env:] - states[..., self.dof_q_per_env:]) / dt
-            )
+            # The converted acceleration is only used for computing the target mean/std,
+            # not in loss computation.
+            prediction.copy_((next_states[..., self.dof_q_per_env :] - states[..., self.dof_q_per_env :]) / dt)
         else:
             raise NotImplementedError
 
@@ -929,13 +851,9 @@ class NeuralSolver(SolverBase):
         than states.shape[-1], but only the first prediction_dim will be used.
     The converted prediction is saved in predction[0:prediction_dim]
     """
+
     def _convert_next_states_to_prediction_regular_dofs(
-        self,
-        states,
-        next_states,
-        is_continuous_dof,
-        prediction,
-        prediction_type=None
+        self, states, next_states, is_continuous_dof, prediction, prediction_type=None
     ):
         if prediction_type is None:
             prediction_type = self.prediction_type
@@ -943,10 +861,10 @@ class NeuralSolver(SolverBase):
         assert states.shape[-1] == next_states.shape[-1]
         dofs = states.shape[-1]
 
-        if prediction_type == 'absolute':
+        if prediction_type == "absolute":
             prediction[..., :dofs].copy_(next_states)
             return dofs
-        elif prediction_type == 'relative':
+        elif prediction_type == "relative":
             prediction[..., :dofs].copy_(next_states - states)
             self.wrap2PI(prediction[..., :dofs], is_continuous_dof)
             return dofs
@@ -968,85 +886,88 @@ class NeuralSolver(SolverBase):
     Assume prediction is index from zero.
     The converted prediction is saved in predction[0:prediction_dim]
     """
+
     def _convert_next_states_to_prediction_orientation_dofs(
-        self,
-        states,
-        next_states,
-        prediction,
-        prediction_type=None
+        self, states, next_states, prediction, prediction_type=None
     ):
         if prediction_type is None:
             prediction_type = self.prediction_type
 
         assert states.shape[-1] == 4 and next_states.shape[-1] == 4
 
-        if prediction_type == 'absolute':
+        if prediction_type == "absolute":
             target_quaternion = next_states
-        elif prediction_type == 'relative':
-            if self.orientation_prediction_parameterization == 'naive':
+        elif prediction_type == "relative":
+            if self.orientation_prediction_parameterization == "naive":
                 target_quaternion = next_states - states
             else:
-                target_quaternion = torch_utils.delta_quat(
-                    states,
-                    next_states,
-                    frame='world'
-                )
+                target_quaternion = torch_utils.delta_quat(states, next_states, frame="world")
 
-        if self.orientation_prediction_parameterization == 'naive':
+        if (
+            self.orientation_prediction_parameterization == "naive"
+            or self.orientation_prediction_parameterization == "quaternion"
+        ):
             prediction[..., :4].copy_(target_quaternion)
             return 4
-        elif self.orientation_prediction_parameterization == 'quaternion':
-            prediction[..., :4].copy_(target_quaternion)
-            return 4
-        elif self.orientation_prediction_parameterization == 'exponential':
-            prediction[..., :3].copy_(
-                torch_utils.quat_to_exponential_coord(target_quaternion)
-            )
+        elif self.orientation_prediction_parameterization == "exponential":
+            prediction[..., :3].copy_(torch_utils.quat_to_exponential_coord(target_quaternion))
             return 3
         else:
             raise NotImplementedError
 
     def _convert_contacts_w2b(
         self,
-        root_body_q, # (B, T, num_contacts, 7)
-        contact_points_1, # (B, T, num_contacts * 3)
-        contact_normals, # (B, T, num_contacts * 3)
-        translation_only
+        root_body_q,  # (B, T, num_contacts, 7)
+        contact_points_0,  # (B, T, num_contacts * 3)
+        contact_points_1,  # (B, T, num_contacts * 3)
+        contact_normals,  # (B, T, num_contacts * 3)
+        translation_only,
     ):
         shape = contact_points_1.shape
         root_body_q = root_body_q.reshape(-1, 7)
+        if contact_points_0 is not None:
+            contact_points_0 = contact_points_0.reshape(-1, 3)
         contact_points_1 = contact_points_1.reshape(-1, 3)
         contact_normals = contact_normals.reshape(-1, 3)
 
         body_frame_pos = root_body_q[:, :3]
         if translation_only:
             body_frame_quat = torch.zeros_like(root_body_q[:, 3:7])
-            body_frame_quat[:, 3] = 1.
+            body_frame_quat[:, 3] = 1.0
         else:
             body_frame_quat = root_body_q[:, 3:7]
 
+        if contact_points_0 is not None:
+            assert contact_points_0.shape[0] == root_body_q.shape[0]
+            contact_points_0_body = torch_utils.transform_point_inverse(
+                body_frame_pos, body_frame_quat, contact_points_0
+            ).view(*shape)
+        else:
+            contact_points_0_body = None
+
         assert contact_points_1.shape[0] == root_body_q.shape[0]
         contact_points_1_body = torch_utils.transform_point_inverse(
-            body_frame_pos, body_frame_quat, contact_points_1).view(*shape)
+            body_frame_pos, body_frame_quat, contact_points_1
+        ).view(*shape)
 
         assert contact_normals.shape[0] == root_body_q.shape[0]
         if translation_only:
             contact_normals_body = contact_normals.view(*shape)
         else:
-            contact_normals_body = torch_utils.quat_rotate_inverse(
-                body_frame_quat, contact_normals).view(*shape)
+            contact_normals_body = torch_utils.quat_rotate_inverse(body_frame_quat, contact_normals).view(*shape)
 
-        return contact_points_1_body, contact_normals_body
+        return contact_points_0_body, contact_points_1_body, contact_normals_body
 
     """
     Convert the states from world frame to body frame defined by root_body_q.
     Only convert the root joint states if applicable.
     """
+
     def _convert_states_w2b(
         self,
-        root_body_q, # (B, T, 7)
-        states, # (B, T, dof_states)
-        translation_only
+        root_body_q,  # (B, T, 7)
+        states,  # (B, T, dof_states)
+        translation_only,
     ):
         shape = states.shape
         root_body_q = root_body_q.reshape(-1, 7)
@@ -1055,7 +976,7 @@ class NeuralSolver(SolverBase):
         body_frame_pos = root_body_q[:, :3]
         if translation_only:
             body_frame_quat = torch.zeros_like(root_body_q[:, 3:7])
-            body_frame_quat[:, 3] = 1.
+            body_frame_quat[:, 3] = 1.0
         else:
             body_frame_quat = root_body_q[:, 3:7]
 
@@ -1063,30 +984,25 @@ class NeuralSolver(SolverBase):
 
         if self.base_joint_type == JointType.FREE:
             # velocity representation is [lin_vel, ang_vel]
-            (
-                pos_body,
-                quat_body,
-                lin_vel_body,
-                ang_vel_body
-            ) = torch_utils.convert_states_w2b(
-                    body_frame_pos,
-                    body_frame_quat,
-                    p = states[:, 0:3],
-                    quat = states[:, 3:7],
-                    lin_vel = states[:, self.dof_q_per_env:self.dof_q_per_env + 3],
-                    ang_vel = states[:, self.dof_q_per_env + 3:self.dof_q_per_env + 6]
-                )
-            root_vel_body = torch.cat([lin_vel_body, ang_vel_body], dim = -1)
+            (pos_body, quat_body, lin_vel_body, ang_vel_body) = torch_utils.convert_states_w2b(
+                body_frame_pos,
+                body_frame_quat,
+                p=states[:, 0:3],
+                quat=states[:, 3:7],
+                lin_vel=states[:, self.dof_q_per_env : self.dof_q_per_env + 3],
+                ang_vel=states[:, self.dof_q_per_env + 3 : self.dof_q_per_env + 6],
+            )
+            root_vel_body = torch.cat([lin_vel_body, ang_vel_body], dim=-1)
             quat_body_normalized = torch_utils.normalize(quat_body)
             states_body = torch.cat(
                 [
                     pos_body,
                     quat_body_normalized,
-                    states[:, 7:self.dof_q_per_env],
+                    states[:, 7 : self.dof_q_per_env],
                     root_vel_body,
-                    states[:, self.dof_q_per_env + 6:]
+                    states[:, self.dof_q_per_env + 6 :],
                 ],
-                dim = 1
+                dim=1,
             )
         else:
             states_body = states.clone()
@@ -1095,9 +1011,9 @@ class NeuralSolver(SolverBase):
 
     def _convert_gravity_w2b(
         self,
-        root_body_q, # (B, T, 7)
-        gravity_dir, # (B, T, 3)
-        translation_only
+        root_body_q,  # (B, T, 7)
+        gravity_dir,  # (B, T, 3)
+        translation_only,
     ):
         if translation_only:
             return gravity_dir
@@ -1109,25 +1025,25 @@ class NeuralSolver(SolverBase):
         body_frame_quat = root_body_q[:, 3:7]
 
         assert gravity_dir.shape[0] == body_frame_quat.shape[0]
-        gravity_dir_body = torch_utils.quat_rotate_inverse(
-            body_frame_quat, gravity_dir).view(*shape)
+        gravity_dir_body = torch_utils.quat_rotate_inverse(body_frame_quat, gravity_dir).view(*shape)
 
         return gravity_dir_body
 
     def convert_coordinate_frame(
         self,
-        root_body_q, # (B, T, 7)
-        states, # (B, T, dof_states)
-        next_states, # (B, T, dof_states), can be None
-        contact_points_1, # (B, T, num_contacts * 3)
-        contact_normals, # (B, T, num_contacts * 3)
-        gravity_dir, # (B, T, 3)
+        root_body_q,  # (B, T, 7)
+        states,  # (B, T, dof_states)
+        next_states,  # (B, T, dof_states), can be None
+        contact_points_0,  # (B, T, num_contacts * 3)
+        contact_points_1,  # (B, T, num_contacts * 3)
+        contact_normals,  # (B, T, num_contacts * 3)
+        gravity_dir,  # (B, T, 3)
     ):
         assert len(states.shape) == 3
 
-        if self.states_frame == 'world':
-            return states, next_states, contact_points_1, contact_normals, gravity_dir
-        elif self.states_frame == 'body' or self.states_frame == 'body_translation_only':
+        if self.states_frame == "world":
+            return states, next_states, contact_points_0, contact_points_1, contact_normals, gravity_dir
+        elif self.states_frame == "body" or self.states_frame == "body_translation_only":
             B, T = states.shape[0], states.shape[1]
 
             if self.anchor_frame_step == "first":
@@ -1141,30 +1057,25 @@ class NeuralSolver(SolverBase):
 
             # convert contacts
             if contact_points_1 is not None:
-                contact_points_1_body, contact_normals_body = \
-                    self._convert_contacts_w2b(
-                        anchor_frame_body_q.view(B, T, 1, 7).expand(
-                            B, T, self.num_contacts_per_env, 7
-                        ),
-                        contact_points_1,
-                        contact_normals,
-                        translation_only = (self.states_frame == "body_translation_only")
-                    )
+                contact_points_0_body, contact_points_1_body, contact_normals_body = self._convert_contacts_w2b(
+                    anchor_frame_body_q.view(B, T, 1, 7).expand(B, T, self.num_contacts_per_env, 7),
+                    contact_points_0,
+                    contact_points_1,
+                    contact_normals,
+                    translation_only=(self.states_frame == "body_translation_only"),
+                )
             else:
+                contact_points_0_body = None
                 contact_points_1_body = None
                 contact_normals_body = None
 
             # convert states
             states_body = self._convert_states_w2b(
-                anchor_frame_body_q,
-                states,
-                translation_only = (self.states_frame == "body_translation_only")
+                anchor_frame_body_q, states, translation_only=(self.states_frame == "body_translation_only")
             )
             if next_states is not None:
                 next_states_body = self._convert_states_w2b(
-                    anchor_frame_body_q,
-                    next_states,
-                    translation_only = (self.states_frame == "body_translation_only")
+                    anchor_frame_body_q, next_states, translation_only=(self.states_frame == "body_translation_only")
                 )
             else:
                 next_states_body = None
@@ -1172,9 +1083,7 @@ class NeuralSolver(SolverBase):
             # convert gravity
             if gravity_dir is not None:
                 gravity_dir_body = self._convert_gravity_w2b(
-                    anchor_frame_body_q,
-                    gravity_dir,
-                    translation_only = (self.states_frame == "body_translation_only")
+                    anchor_frame_body_q, gravity_dir, translation_only=(self.states_frame == "body_translation_only")
                 )
             else:
                 gravity_dir_body = None
@@ -1182,17 +1091,18 @@ class NeuralSolver(SolverBase):
             return (
                 states_body,
                 next_states_body,
+                contact_points_0_body,
                 contact_points_1_body,
                 contact_normals_body,
-                gravity_dir_body
+                gravity_dir_body,
             )
         else:
             raise NotImplementedError
 
     def convert_states_back_to_world(
         self,
-        root_body_q, # (B, T, 7)
-        states # (B, dof_states)
+        root_body_q,  # (B, T, 7)
+        states,  # (B, dof_states)
     ):
         if self.states_frame == "world":
             return states.clone()
@@ -1213,42 +1123,38 @@ class NeuralSolver(SolverBase):
                 anchor_frame_quat = anchor_frame_q[:, 3:7]
             elif self.states_frame == "body_translation_only":
                 anchor_frame_quat = torch.zeros_like(anchor_frame_q[:, 3:7])
-                anchor_frame_quat[:, 3] = 1.
+                anchor_frame_quat[:, 3] = 1.0
 
             assert states.shape[0] == anchor_frame_q.shape[0]
 
             # only need to convert the states of the FREE base joint
             if self.base_joint_type == JointType.FREE:
                 # velocity representation is [lin_vel, ang_vel]
-                (
-                    pos_world,
-                    quat_world,
-                    lin_vel_world,
-                    ang_vel_world
-                ) = torch_utils.convert_states_b2w(
-                        anchor_frame_pos,
-                        anchor_frame_quat,
-                        p = states[:, 0:3],
-                        quat = states[:, 3:7],
-                        lin_vel = states[:, self.dof_q_per_env:self.dof_q_per_env + 3],
-                        ang_vel = states[:, self.dof_q_per_env + 3:self.dof_q_per_env + 6]
-                    )
-                root_vel_world = torch.cat([lin_vel_world, ang_vel_world], dim = -1)
+                (pos_world, quat_world, lin_vel_world, ang_vel_world) = torch_utils.convert_states_b2w(
+                    anchor_frame_pos,
+                    anchor_frame_quat,
+                    p=states[:, 0:3],
+                    quat=states[:, 3:7],
+                    lin_vel=states[:, self.dof_q_per_env : self.dof_q_per_env + 3],
+                    ang_vel=states[:, self.dof_q_per_env + 3 : self.dof_q_per_env + 6],
+                )
+                root_vel_world = torch.cat([lin_vel_world, ang_vel_world], dim=-1)
                 quat_world_normalized = torch_utils.normalize(quat_world)
                 states_world = torch.cat(
                     [
                         pos_world,
                         quat_world_normalized,
-                        states[:, 7:self.dof_q_per_env],
+                        states[:, 7 : self.dof_q_per_env],
                         root_vel_world,
-                        states[:, self.dof_q_per_env + 6:]
+                        states[:, self.dof_q_per_env + 6 :],
                     ],
-                    dim = 1
+                    dim=1,
                 )
             else:
                 states_world = states.clone()
 
             return states_world.view(*shape)
+        raise NotImplementedError(f"Unsupported states frame: {self.states_frame}")
 
     """
     Embeds the given states into a new representation based on states_embedding_type.
@@ -1264,21 +1170,16 @@ class NeuralSolver(SolverBase):
     Raises:
         NotImplementedError: If the states_embedding_type is not supported.
     """
+
     def embed_states(self, states, states_embedding=None):
-        if (
-            self.states_embedding_type is None
-            or self.states_embedding_type == "identical"
-        ):
+        if self.states_embedding_type is None or self.states_embedding_type == "identical":
             if states_embedding is not None:
                 states_embedding.copy_(states)
-            else:
-                return states.clone()
+                return states_embedding
+            return states.clone()
         elif self.states_embedding_type == "sinusoidal":
             if states_embedding is None:
-                states_embedding = torch.zeros(
-                    (*states.shape[:-1], self.state_embedding_dim),
-                    device = states.device
-                )
+                states_embedding = torch.zeros((*states.shape[:-1], self.state_embedding_dim), device=states.device)
             idx = 0
             for dof_idx in range(len(self.is_angular_dof)):
                 if not self.is_angular_dof[dof_idx]:

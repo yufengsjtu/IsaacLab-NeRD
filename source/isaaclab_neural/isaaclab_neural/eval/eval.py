@@ -27,11 +27,11 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-import torch
-
 import isaaclab_neural.envs  # noqa: F401 - registers built-in NeRD eval tasks
+import torch
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 from isaaclab_neural.utils.checkpoint import get_cfg_from_checkpoint, load_checkpoint
+
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 
@@ -51,6 +51,19 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--seed", type=int, default=0, help="Environment seed.")
     parser.add_argument("--contact-mode", choices=["fixed_ground", "newton_native"], default=None)
     parser.add_argument("--num-contacts-per-env", type=int, default=None)
+    parser.add_argument(
+        "--use-cuda-graph",
+        choices=["true", "false"],
+        default=None,
+        help=(
+            "Override the upstream Newton CUDA graph preference. Has no effect for NeRD "
+            "neural solvers, which always run physics eagerly."
+        ),
+    )
+    parser.add_argument("--video", action="store_true", default=False, help="Record eval rollout video.")
+    parser.add_argument("--video-length", "--video_length", dest="video_length", type=int, default=400)
+    parser.add_argument("--video-interval", "--video_interval", dest="video_interval", type=int, default=2000)
+    parser.add_argument("--video-dir", "--video_dir", dest="video_dir", type=str, default="./videos/eval")
 
     from isaaclab_tasks.utils import add_launcher_args
 
@@ -65,17 +78,35 @@ def apply_solver_overrides(solver_cfg: NerdSolverCfg, args: argparse.Namespace) 
         solver_cfg.num_contacts_per_env = args.num_contacts_per_env
 
 
-def build_solver_cfg(args: argparse.Namespace) -> NerdSolverCfg | None:
+def apply_cuda_graph_override(
+    env_cfg,
+    args: argparse.Namespace,
+    *,
+    legacy_use_cuda_graph: bool | None = None,
+) -> None:
+    """Apply ``--use-cuda-graph`` to the physics config, matching upstream ``NewtonCfg``."""
+    physics_cfg = getattr(getattr(env_cfg, "sim", None), "physics", None)
+    if not isinstance(physics_cfg, NerdNewtonCfg):
+        return
+
+    if args.use_cuda_graph is not None:
+        physics_cfg.use_cuda_graph = args.use_cuda_graph == "true"
+    elif legacy_use_cuda_graph is not None:
+        physics_cfg.use_cuda_graph = legacy_use_cuda_graph
+
+
+def build_solver_cfg(args: argparse.Namespace) -> tuple[NerdSolverCfg | None, bool | None]:
     if args.checkpoint is None:
-        return None
+        return None, None
 
     checkpoint = load_checkpoint(args.checkpoint, device="cpu")
     cfg = get_cfg_from_checkpoint(checkpoint, args.checkpoint)
     neural_solver_cfg = dict(cfg["env"]["neural_solver_cfg"])
+    legacy_use_cuda_graph = neural_solver_cfg.pop("use_cuda_graph", None)
     neural_solver_cfg["neural_model_path"] = args.checkpoint
     solver_cfg = NerdSolverCfg(**neural_solver_cfg)
     apply_solver_overrides(solver_cfg, args)
-    return solver_cfg
+    return solver_cfg, legacy_use_cuda_graph
 
 
 def configure_env(env_cfg, args: argparse.Namespace) -> None:
@@ -113,8 +144,9 @@ def build_launch_cfg(env_cfg):
 def zero_action(env) -> torch.Tensor:
     shape = env.action_space.shape
     if len(shape) == 1:
-        shape = (getattr(env, "num_envs", 1), shape[0])
-    return torch.zeros(shape, device=getattr(env, "device", "cpu"), dtype=torch.float32)
+        shape = (getattr(env.unwrapped, "num_envs", getattr(env, "num_envs", 1)), shape[0])
+    device = getattr(env.unwrapped, "device", getattr(env, "device", "cpu"))
+    return torch.zeros(shape, device=device, dtype=torch.float32)
 
 
 def summarize_step(result) -> str:
@@ -175,8 +207,9 @@ def normalize_runner_cfg(agent_cfg, *, device: str):
 
 
 def build_policy_env(env, agent_cfg, checkpoint_path: str, device: str):
-    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
     from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+
+    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 
     runner_cfg, class_name, clip_actions, runner_device = normalize_runner_cfg(agent_cfg, device=device)
     wrapped_env = RslRlVecEnvWrapper(env, clip_actions=clip_actions)
@@ -200,6 +233,28 @@ def reset_policy(policy, runner, dones: torch.Tensor) -> None:
         policy_state = getattr(getattr(runner, "alg", None), "actor_critic", None)
     if policy_state is not None and hasattr(policy_state, "reset"):
         policy_state.reset(dones)
+
+
+def wrap_record_video(env, args: argparse.Namespace):
+    """Wrap the environment with Gymnasium's video recorder when requested."""
+    if not args.video:
+        return env
+    if args.video_length <= 0:
+        raise ValueError("--video-length must be positive.")
+    if args.video_interval <= 0:
+        raise ValueError("--video-interval must be positive.")
+
+    import gymnasium as gym
+
+    video_folder = str(Path(args.video_dir).expanduser())
+    print(f"[video] recording eval rollout to: {video_folder}")
+    return gym.wrappers.RecordVideo(
+        env,
+        video_folder=video_folder,
+        step_trigger=lambda step: step % args.video_interval == 0,
+        video_length=args.video_length,
+        disable_logger=True,
+    )
 
 
 def run_zero_action(env, args: argparse.Namespace) -> None:
@@ -241,7 +296,8 @@ sys.argv = [sys.argv[0]] + hydra_args
 @hydra_task_config(args_cli.task, args_cli.policy_agent if args_cli.policy_checkpoint is not None else "")
 def main(env_cfg, agent_cfg) -> None:
     configure_env(env_cfg, args_cli)
-    solver_cfg = build_solver_cfg(args_cli)
+    solver_cfg, legacy_use_cuda_graph = build_solver_cfg(args_cli)
+    apply_cuda_graph_override(env_cfg, args_cli, legacy_use_cuda_graph=legacy_use_cuda_graph)
 
     from isaaclab_tasks.utils import launch_simulation
 
@@ -249,9 +305,11 @@ def main(env_cfg, agent_cfg) -> None:
         import gymnasium as gym
 
         gym_kwargs = {"cfg": env_cfg, "device": args_cli.device}
+        if args_cli.video:
+            gym_kwargs["render_mode"] = "rgb_array"
         if solver_cfg is not None:
             gym_kwargs["solver_cfg"] = solver_cfg
-        env = gym.make(args_cli.task, **gym_kwargs).unwrapped
+        env = wrap_record_video(gym.make(args_cli.task, **gym_kwargs), args_cli)
 
         if args_cli.policy_checkpoint is None:
             run_zero_action(env, args_cli)

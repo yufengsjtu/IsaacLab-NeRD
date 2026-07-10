@@ -10,19 +10,26 @@ from __future__ import annotations
 import inspect
 import math
 import os
-from pathlib import Path
 import shutil
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
-from newton import JointType
 import numpy as np
 import torch
+import torch.distributed as dist
+import yaml
+from newton import JointType
+from torch.nn.parallel import DistributedDataParallel
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
-import yaml
 
-from isaaclab_neural.data import BatchTransitionDataset, TrajectoryDataset, collate_fn_BatchTransitionDataset
+from isaaclab_neural.data import (
+    collate_fn_BatchTransitionDataset,
+    create_batch_transition_dataset,
+    create_trajectory_dataset,
+)
 from isaaclab_neural.eval.training_evaluator import TrainingRolloutEvaluator
 from isaaclab_neural.models.models import ModelMixedInput
 from isaaclab_neural.utils.checkpoint import reconstruct_model_from_checkpoint, save_checkpoint
@@ -82,6 +89,11 @@ class VanillaTrainer:
         self.cfg = cfg
         self.seed = algo_cfg.get("seed", 0)
         self.device = device
+        self.is_distributed = bool(cli_cfg.get("distributed", False))
+        self.rank = int(cli_cfg.get("rank", 0))
+        self.local_rank = int(cli_cfg.get("local_rank", 0))
+        self.world_size = int(cli_cfg.get("world_size", 1))
+        self.is_main_process = self.rank == 0
         set_random_seed(self.seed)
         self.rng = np.random.default_rng(seed=self.seed)
 
@@ -89,7 +101,10 @@ class VanillaTrainer:
         self.neural_solver = self.neural_env.solver_neural
         self.neural_env.neural_adapter.sync(update_history=False)
 
-        if cfg["env"]["neural_solver_cfg"].get("states_frame") == "body" and "gravity_dir" not in cfg["inputs"]["low_dim"]:
+        if (
+            cfg["env"]["neural_solver_cfg"].get("states_frame") == "body"
+            and "gravity_dir" not in cfg["inputs"]["low_dim"]
+        ):
             cfg["inputs"]["low_dim"].append("gravity_dir")
             print_warning("gravity_dir not included in low_dim inputs, added it automatically.")
 
@@ -104,16 +119,20 @@ class VanillaTrainer:
                 device=self.device,
             )
         else:
-            self.neural_model = reconstruct_model_from_checkpoint(self._checkpoint, self.neural_solver, device=self.device)
+            self.neural_model = reconstruct_model_from_checkpoint(
+                self._checkpoint, self.neural_solver, device=self.device
+            )
 
-        print("Model = \n", self.neural_model)
-        print("# Model Parameters = ", num_params_torch_model(self.neural_model))
+        if self.is_main_process:
+            print("Model = \n", self.neural_model)
+            print("# Model Parameters = ", num_params_torch_model(self.neural_model))
         self.neural_solver.set_neural_solver_model(self.neural_model)
 
         self.batch_size = int(algo_cfg["batch_size"])
         self.num_valid_batches = int(algo_cfg.get("num_valid_batches", 50))
         self.student_forcing_enabled = False
         self.dataset_max_capacity = algo_cfg["dataset"].get("max_capacity", 100_000_000)
+        self.dataset_load_mode = algo_cfg["dataset"].get("load_mode", "eager")
         self.num_data_workers = algo_cfg["dataset"].get("num_data_workers", 4)
         self.train_dataset = None
         self.valid_datasets = {}
@@ -123,12 +142,9 @@ class VanillaTrainer:
         if cli_cfg["train"]:
             self.num_epochs = int(algo_cfg["num_epochs"])
             self.num_iters_per_epoch = int(algo_cfg.get("num_iters_per_epoch", -1))
-            self._init_optimizer(algo_cfg)
             self.start_epoch = 0
             self.best_valid_losses = {}
             self.best_eval_error = np.inf
-            if self._checkpoint is not None and self._checkpoint.get("version", 1) >= 2:
-                self._restore_training_state()
 
             if (
                 algo_cfg.get("update_dataset_statistics", True)
@@ -137,11 +153,9 @@ class VanillaTrainer:
                 or not hasattr(self.neural_model, "output_rms")
                 or not hasattr(self, "loss_weights")
             ):
-                print_info("Computing dataset statistics...")
-                self.compute_dataset_statistics(self.train_dataset)
-                print_info("Finished computing dataset statistics...")
-                self.neural_model.set_input_rms(self.dataset_rms)
-                self.neural_model.set_output_rms(self.dataset_rms["prediction_target"])
+                self.compute_or_sync_dataset_statistics(self.train_dataset)
+                self.neural_model_unwrapped.set_input_rms(self.dataset_rms)
+                self.neural_model_unwrapped.set_output_rms(self.dataset_rms["prediction_target"])
                 self.loss_weights = (
                     1.0 / torch.sqrt(self.dataset_rms["relative_states"].var + 1e-5)
                     if algo_cfg.get("weighted_loss", True)
@@ -150,54 +164,129 @@ class VanillaTrainer:
             else:
                 print_info("Using dataset statistics from checkpoint...")
 
+            self._wrap_distributed_model()
+            self._init_optimizer(algo_cfg)
+            if self._checkpoint is not None and self._checkpoint.get("version", 1) >= 2:
+                self._restore_training_state()
+
             self._checkpoint = None
             self.truncate_grad = algo_cfg.get("truncate_grad", False)
             self.grad_norm = algo_cfg.get("grad_norm", 1.0)
             self._init_logging(cli_cfg)
-            with open(os.path.join(self.log_dir, "cfg.yaml"), "w") as cfg_file:
-                yaml.dump(cfg, cfg_file)
+            if self.is_main_process:
+                with open(os.path.join(self.log_dir, "cfg.yaml"), "w") as cfg_file:
+                    yaml.dump(cfg, cfg_file)
 
             self._init_evaluator(algo_cfg, cli_cfg)
 
+    @property
+    def neural_model_unwrapped(self):
+        """Return the underlying model module, unwrapping DDP when active."""
+        if isinstance(self.neural_model, DistributedDataParallel):
+            return self.neural_model.module
+        return self.neural_model
+
+    def _forward_model(self, data: dict[str, torch.Tensor], train: bool, **kwargs):
+        """Run model forward, avoiding DDP collectives for rank-local validation."""
+        model = self.neural_model if train else self.neural_model_unwrapped
+        return model(data, **kwargs)
+
+    def _wrap_distributed_model(self) -> None:
+        if not self.is_distributed:
+            return
+        self.neural_model = DistributedDataParallel(
+            self.neural_model,
+            device_ids=[self.local_rank],
+            output_device=self.local_rank,
+        )
+
+    def _distributed_mean(self, value: float) -> float:
+        if not self.is_distributed:
+            return value
+        value_tensor = torch.tensor(value, device=self.device, dtype=torch.float32)
+        dist.all_reduce(value_tensor, op=dist.ReduceOp.SUM)
+        value_tensor /= self.world_size
+        return float(value_tensor.cpu())
+
+    def _distributed_mean_dict(self, values: dict[str, float]) -> dict[str, float]:
+        if not self.is_distributed:
+            return values
+        return {key: self._distributed_mean(value) for key, value in values.items()}
+
+    def _serialize_dataset_rms(self) -> dict[str, dict[str, Any]]:
+        """Return CPU tensors for broadcasting dataset RMS state."""
+        return {
+            key: {
+                "shape": tuple(rms.mean.shape),
+                "mean": rms.mean.detach().cpu(),
+                "var": rms.var.detach().cpu(),
+                "count": rms.count.detach().cpu(),
+            }
+            for key, rms in self.dataset_rms.items()
+        }
+
+    def _load_dataset_rms_state(self, state: dict[str, dict[str, Any]]) -> None:
+        """Create dataset RMS modules from broadcast state."""
+        self.dataset_rms = {}
+        for key, rms_state in state.items():
+            rms = RunningMeanStd(shape=tuple(rms_state["shape"]), device=self.device)
+            rms.load_state_dict(
+                {
+                    "mean": rms_state["mean"].to(self.device),
+                    "var": rms_state["var"].to(self.device),
+                    "count": rms_state["count"].to(self.device),
+                }
+            )
+            self.dataset_rms[key] = rms
+
     def _restore_training_state(self) -> None:
-        if "optimizer_state_dict" in self._checkpoint:
-            self.optimizer.load_state_dict(self._checkpoint["optimizer_state_dict"])
+        checkpoint = self._checkpoint
+        if checkpoint is None:
+            raise RuntimeError("Cannot restore training state without a checkpoint.")
+        if "optimizer_state_dict" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             print_info("Restored optimizer state from checkpoint.")
-        if "epoch" in self._checkpoint:
-            self.start_epoch = self._checkpoint["epoch"] + 1
+        if "epoch" in checkpoint:
+            self.start_epoch = checkpoint["epoch"] + 1
             print_info(f"Resuming from epoch {self.start_epoch}.")
-        if "best_valid_losses" in self._checkpoint:
-            self.best_valid_losses = self._checkpoint["best_valid_losses"]
-        if "best_eval_error" in self._checkpoint:
-            self.best_eval_error = self._checkpoint["best_eval_error"]
-        if "loss_weights" in self._checkpoint:
-            self.loss_weights = self._checkpoint["loss_weights"].to(self.device)
+        if "best_valid_losses" in checkpoint:
+            self.best_valid_losses = checkpoint["best_valid_losses"]
+        if "best_eval_error" in checkpoint:
+            self.best_eval_error = checkpoint["best_eval_error"]
+        if "loss_weights" in checkpoint:
+            self.loss_weights = checkpoint["loss_weights"].to(self.device)
         print_info("Restored model and training state from checkpoint.")
 
     def _init_logging(self, cli_cfg: dict[str, Any]) -> None:
         self.log_dir = cli_cfg["logdir"]
-        if os.path.exists(self.log_dir) and not cli_cfg["skip_check_log_override"]:
-            ans = input(f"Logging Directory {self.log_dir} exists, overwrite? [y/n]")
-            if ans == "y":
+        if self.is_main_process and os.path.exists(self.log_dir) and not cli_cfg["skip_check_log_override"]:
+            answer = input(f"Logging Directory {self.log_dir} exists, overwrite? [y/n]")
+            if answer == "y":
                 shutil.rmtree(self.log_dir)
             else:
                 raise RuntimeError(f"Refusing to overwrite log directory: {self.log_dir}")
-        os.makedirs(self.log_dir, exist_ok=True)
+        if self.is_main_process:
+            os.makedirs(self.log_dir, exist_ok=True)
         self.model_log_dir = os.path.join(self.log_dir, "nn")
         self.summary_log_dir = os.path.join(self.log_dir, "summaries")
-        os.makedirs(self.model_log_dir, exist_ok=True)
-        os.makedirs(self.summary_log_dir, exist_ok=True)
+        if self.is_main_process:
+            os.makedirs(self.model_log_dir, exist_ok=True)
+            os.makedirs(self.summary_log_dir, exist_ok=True)
+        if self.is_distributed:
+            dist.barrier()
 
         self.logger = Logger()
-        self.logger.init_tensorboard(self.summary_log_dir)
-        if cli_cfg["enable_wandb"]:
+        if self.is_main_process:
+            self.logger.init_tensorboard(self.summary_log_dir)
+        if self.is_main_process and cli_cfg["enable_wandb"]:
             self.logger.init_wandb(wandb_project=cli_cfg["wandb_project_name"], wandb_name=cli_cfg["wandb_exp_name"])
 
         self.save_interval = cli_cfg.get("save_interval", 50)
         self.log_interval = cli_cfg.get("log_interval", 1)
-        Path(self.model_log_dir, "saved_best_eval_model_epochs.txt").touch()
-        for valid_dataset_name in self.valid_datasets:
-            Path(self.model_log_dir, f"saved_best_valid_{valid_dataset_name}_model_epochs.txt").touch()
+        if self.is_main_process:
+            Path(self.model_log_dir, "saved_best_eval_model_epochs.txt").touch()
+            for valid_dataset_name in self.valid_datasets:
+                Path(self.model_log_dir, f"saved_best_valid_{valid_dataset_name}_model_epochs.txt").touch()
 
     def _init_evaluator(self, algo_cfg: dict[str, Any], cli_cfg: dict[str, Any]) -> None:
         eval_cfg = algo_cfg.get("eval", {})
@@ -261,15 +350,17 @@ class VanillaTrainer:
             self.optimizer = torch.optim.Adam(self.neural_model.parameters(), lr=self.lr_start, betas=self.betas)
 
     def get_datasets(self, train_dataset_path, valid_datasets_cfg) -> None:
-        self.train_dataset = BatchTransitionDataset(
+        self.train_dataset = create_batch_transition_dataset(
+            load_mode=self.dataset_load_mode,
             batch_size=self.batch_size,
             hdf5_dataset_path=train_dataset_path,
             max_capacity=self.dataset_max_capacity,
             device=self.device,
         )
-        if valid_datasets_cfg is not None:
+        if valid_datasets_cfg is not None and (not self.is_distributed or self.is_main_process):
             for valid_dataset_name, valid_dataset_path in valid_datasets_cfg.items():
-                self.valid_datasets[valid_dataset_name] = BatchTransitionDataset(
+                self.valid_datasets[valid_dataset_name] = create_batch_transition_dataset(
+                    load_mode=self.dataset_load_mode,
                     batch_size=self.batch_size,
                     hdf5_dataset_path=valid_dataset_path,
                     device=self.device,
@@ -300,6 +391,26 @@ class VanillaTrainer:
                     self.dataset_rms[key] = RunningMeanStd(shape=value.shape[2:], device=self.device)
                 if key != "contact_masks":
                     self.dataset_rms[key].update(value, batch_dim=True, time_dim=True)
+
+    def get_student_forcing_probability(self, epoch: int) -> float:
+        """Return the student forcing probability for trainers that support it."""
+        raise NotImplementedError("Student forcing is not supported by this trainer.")
+
+    def compute_or_sync_dataset_statistics(self, dataset) -> None:
+        """Compute dataset statistics once, then share them with DDP ranks."""
+        rms_state: list[dict[str, dict[str, Any]] | None] = [None]
+        if self.is_main_process:
+            print_info("Computing dataset statistics...")
+            self.compute_dataset_statistics(dataset)
+            print_info("Finished computing dataset statistics...")
+            rms_state[0] = self._serialize_dataset_rms()
+
+        if self.is_distributed:
+            dist.broadcast_object_list(rms_state, src=0)
+            if not self.is_main_process:
+                if rms_state[0] is None:
+                    raise RuntimeError("Failed to receive dataset statistics from rank 0.")
+                self._load_dataset_rms_state(rms_state[0])
 
     def get_scheduled_learning_rate(self, iteration: int, total_iterations: int) -> float:
         if self.lr_schedule == "constant":
@@ -333,10 +444,10 @@ class VanillaTrainer:
         return data
 
     def compute_loss(self, data: dict[str, torch.Tensor], train: bool):
-        if self.neural_model.is_rnn:
-            self.neural_model.init_rnn(self.batch_size)
+        if self.neural_model_unwrapped.is_rnn:
+            self.neural_model_unwrapped.init_rnn(self.batch_size)
         prediction_target = data["prediction_target"]
-        prediction = self.neural_model(data)
+        prediction = self._forward_model(data, train)
         loss = self.loss_func(prediction * self.loss_weights, prediction_target * self.loss_weights)
 
         with torch.no_grad():
@@ -369,21 +480,29 @@ class VanillaTrainer:
             }
         return loss, loss_itemized
 
-    def one_epoch(self, train: bool, dataloader, dataloader_iter, num_batches: int, shuffle: bool = False):
+    def one_epoch(
+        self,
+        train: bool,
+        dataloader,
+        dataloader_iter,
+        num_batches: int,
+        shuffle: bool = False,
+        distributed_reduce: bool = True,
+    ):
         self.neural_model.train(train)
-        sum_loss = 0.0
-        sum_loss_itemized = {}
+        sum_loss = torch.tensor(0.0, device=self.device)
+        sum_loss_itemized: dict[str, float] = {}
         grad_info = {"grad_norm_before_clip": 0.0} if train else {}
         if train and self.truncate_grad:
             grad_info["grad_norm_after_clip"] = 0.0
 
         with torch.set_grad_enabled(train):
-            for _ in tqdm(range(num_batches)):
+            for _ in tqdm(range(num_batches), disable=not self.is_main_process):
                 with TimeProfiler(self.time_report, "dataloader"):
                     try:
                         data = next(dataloader_iter)
                     except StopIteration:
-                        if shuffle:
+                        if shuffle and self.train_dataset is not None:
                             self.train_dataset.shuffle()
                         dataloader_iter = iter(dataloader)
                         data = next(dataloader_iter)
@@ -398,11 +517,13 @@ class VanillaTrainer:
                     if train:
                         loss.backward()
                         with torch.no_grad():
-                            grad_norm_before_clip = grad_norm(self.neural_model.parameters())
+                            grad_norm_before_clip = float(grad_norm(self.neural_model.parameters()).detach().cpu())
                             grad_info["grad_norm_before_clip"] += grad_norm_before_clip
                             if self.truncate_grad:
                                 clip_grad_norm_(self.neural_model.parameters(), self.grad_norm)
-                                grad_info["grad_norm_after_clip"] += grad_norm(self.neural_model.parameters())
+                                grad_info["grad_norm_after_clip"] += float(
+                                    grad_norm(self.neural_model.parameters()).detach().cpu()
+                                )
                         self.optimizer.step()
 
                 with TimeProfiler(self.time_report, "other"):
@@ -415,38 +536,59 @@ class VanillaTrainer:
         if train:
             for key in grad_info:
                 grad_info[key] /= num_batches
+        if distributed_reduce:
+            avg_loss = self._distributed_mean(avg_loss)
+            avg_loss_itemized = self._distributed_mean_dict(avg_loss_itemized)
+            grad_info = self._distributed_mean_dict(grad_info)
         return avg_loss, avg_loss_itemized, grad_info
 
     def train(self) -> None:
+        if self.train_dataset is None:
+            raise RuntimeError("Training dataset has not been initialized.")
+        train_sampler = (
+            DistributedSampler(
+                cast(Any, self.train_dataset),
+                num_replicas=self.world_size,
+                rank=self.rank,
+                shuffle=True,
+                drop_last=True,
+            )
+            if self.is_distributed
+            else None
+        )
         train_loader = DataLoader(
-            dataset=self.train_dataset,
+            dataset=cast(Any, self.train_dataset),
             batch_size=self.batch_size,
             collate_fn=self.collate_fn,
-            shuffle=True,
+            shuffle=train_sampler is None,
+            sampler=train_sampler,
             num_workers=self.num_data_workers,
             drop_last=True,
         )
-        train_loader_iter = iter(train_loader)
         self.num_train_batches = len(train_loader) if self.num_iters_per_epoch == -1 else self.num_iters_per_epoch
 
         valid_loaders = {}
         valid_loader_iters = {}
-        for valid_dataset_name, valid_dataset in self.valid_datasets.items():
-            valid_loaders[valid_dataset_name] = DataLoader(
-                dataset=valid_dataset,
-                batch_size=self.batch_size,
-                collate_fn=self.collate_fn,
-                shuffle=True,
-                num_workers=self.num_data_workers,
-                drop_last=True,
-            )
-            valid_loader_iters[valid_dataset_name] = iter(valid_loaders[valid_dataset_name])
-            self.best_valid_losses.setdefault(valid_dataset_name, np.inf)
+        if self.is_main_process:
+            for valid_dataset_name, valid_dataset in self.valid_datasets.items():
+                valid_loaders[valid_dataset_name] = DataLoader(
+                    dataset=valid_dataset,
+                    batch_size=self.batch_size,
+                    collate_fn=self.collate_fn,
+                    shuffle=True,
+                    num_workers=self.num_data_workers,
+                    drop_last=True,
+                )
+                valid_loader_iters[valid_dataset_name] = iter(valid_loaders[valid_dataset_name])
+                self.best_valid_losses.setdefault(valid_dataset_name, np.inf)
 
         self.time_report = TimeReport(cuda_synchronize=False)
         self.time_report.add_timers(["epoch", "other", "dataloader", "compute_loss", "backward", "eval"])
         for epoch in range(self.start_epoch, self.num_epochs):
             self.current_epoch = epoch
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            train_loader_iter = iter(train_loader)
             self.time_report.reset_timer()
             with TimeProfiler(self.time_report, "epoch"):
                 self.lr = self.get_scheduled_learning_rate(epoch, self.num_epochs)
@@ -465,37 +607,55 @@ class VanillaTrainer:
                     shuffle=True,
                 )
                 avg_valid_losses, avg_valid_losses_itemized = {}, {}
-                for valid_dataset_name in self.valid_datasets:
-                    avg_valid_losses[valid_dataset_name], avg_valid_losses_itemized[valid_dataset_name], _ = self.one_epoch(
-                        train=False,
-                        dataloader=valid_loaders[valid_dataset_name],
-                        dataloader_iter=valid_loader_iters[valid_dataset_name],
-                        num_batches=min(self.num_valid_batches, len(valid_loaders[valid_dataset_name])),
-                    )
+                if self.is_main_process:
+                    for valid_dataset_name in self.valid_datasets:
+                        avg_valid_losses[valid_dataset_name], avg_valid_losses_itemized[valid_dataset_name], _ = (
+                            self.one_epoch(
+                                train=False,
+                                dataloader=valid_loaders[valid_dataset_name],
+                                dataloader_iter=valid_loader_iters[valid_dataset_name],
+                                num_batches=min(self.num_valid_batches, len(valid_loaders[valid_dataset_name])),
+                                distributed_reduce=False,
+                            )
+                        )
                 with TimeProfiler(self.time_report, "eval"):
-                    if self.eval_interval > 0 and (epoch + 1) % self.eval_interval == 0:
+                    if self.is_main_process and self.eval_interval > 0 and (epoch + 1) % self.eval_interval == 0:
                         self.eval(epoch)
+                    if self.is_distributed:
+                        dist.barrier()
 
-            if epoch % self.log_interval == 0:
+            if self.is_main_process and epoch % self.log_interval == 0:
                 self._log_training_epoch_summary(
-                    epoch, avg_train_loss, avg_train_loss_itemized, avg_valid_losses, avg_valid_losses_itemized, grad_info
+                    epoch,
+                    avg_train_loss,
+                    avg_train_loss_itemized,
+                    avg_valid_losses,
+                    avg_valid_losses_itemized,
+                    grad_info,
                 )
-            self.logger.flush()
-            if self.save_interval > 0 and (epoch + 1) % self.save_interval == 0:
+            if self.is_main_process:
+                self.logger.flush()
+            if self.is_main_process and self.save_interval > 0 and (epoch + 1) % self.save_interval == 0:
                 self.save_model(f"model_epoch{epoch}")
             for valid_dataset_name in self.valid_datasets:
-                if avg_valid_losses[valid_dataset_name] < self.best_valid_losses[valid_dataset_name]:
+                if (
+                    self.is_main_process
+                    and avg_valid_losses[valid_dataset_name] < self.best_valid_losses[valid_dataset_name]
+                ):
                     self.best_valid_losses[valid_dataset_name] = avg_valid_losses[valid_dataset_name]
                     self.save_model(f"best_valid_{valid_dataset_name}_model")
-                    with open(os.path.join(self.model_log_dir, f"saved_best_valid_{valid_dataset_name}_model_epochs.txt"), "a") as fp:
+                    with open(
+                        os.path.join(self.model_log_dir, f"saved_best_valid_{valid_dataset_name}_model_epochs.txt"), "a"
+                    ) as fp:
                         fp.write(f"{epoch}\n")
                     print_ok(
                         f"Save Best Valid {valid_dataset_name} Model at Epoch {epoch} "
                         f"with loss {avg_valid_losses[valid_dataset_name]:.8f}."
                     )
 
-        self.save_model("final_model")
-        self.logger.finish()
+        if self.is_main_process:
+            self.save_model("final_model")
+            self.logger.finish()
 
     def _log_training_epoch_summary(
         self,
@@ -535,7 +695,7 @@ class VanillaTrainer:
         if self.evaluator is None:
             return
 
-        self.neural_model.eval()
+        self.neural_model_unwrapped.eval()
         print_info("-" * 100)
         print_info("Evaluating")
         if self.action_mode == "action":
@@ -609,7 +769,7 @@ class VanillaTrainer:
             training_state["loss_weights"] = self.loss_weights
         save_checkpoint(
             path=os.path.join(self.model_log_dir, f"{filename}.pt"),
-            model=self.neural_model,
+            model=self.neural_model_unwrapped,
             robot_name=self.neural_env.robot_name,
             cfg=self.cfg,
             **training_state,
@@ -624,14 +784,16 @@ class SequenceModelTrainer(VanillaTrainer):
         super().__init__(neural_env, cfg, checkpoint, device)
 
     def get_datasets(self, train_dataset_path, valid_datasets_cfg) -> None:
-        self.train_dataset = TrajectoryDataset(
+        self.train_dataset = create_trajectory_dataset(
+            load_mode=self.dataset_load_mode,
             sample_sequence_length=self.sample_sequence_length,
             hdf5_dataset_path=train_dataset_path,
             max_capacity=self.dataset_max_capacity,
         )
-        if valid_datasets_cfg is not None:
+        if valid_datasets_cfg is not None and (not self.is_distributed or self.is_main_process):
             for valid_dataset_name, valid_dataset_path in valid_datasets_cfg.items():
-                self.valid_datasets[valid_dataset_name] = TrajectoryDataset(
+                self.valid_datasets[valid_dataset_name] = create_trajectory_dataset(
+                    load_mode=self.dataset_load_mode,
                     sample_sequence_length=self.sample_sequence_length,
                     hdf5_dataset_path=valid_dataset_path,
                 )
@@ -666,14 +828,22 @@ class MultiStepTrainer(SequenceModelTrainer):
             return self.student_forcing_start_prob
         if epoch >= self.student_forcing_end_epoch:
             return self.student_forcing_end_prob
-        progress = (epoch - self.student_forcing_start_epoch) / (self.student_forcing_end_epoch - self.student_forcing_start_epoch)
+        progress = (epoch - self.student_forcing_start_epoch) / (
+            self.student_forcing_end_epoch - self.student_forcing_start_epoch
+        )
         if self.student_forcing_schedule == "linear":
-            return self.student_forcing_start_prob + progress * (self.student_forcing_end_prob - self.student_forcing_start_prob)
+            return self.student_forcing_start_prob + progress * (
+                self.student_forcing_end_prob - self.student_forcing_start_prob
+            )
         if self.student_forcing_schedule == "exponential":
-            return self.student_forcing_start_prob + progress**2 * (self.student_forcing_end_prob - self.student_forcing_start_prob)
+            return self.student_forcing_start_prob + progress**2 * (
+                self.student_forcing_end_prob - self.student_forcing_start_prob
+            )
         if self.student_forcing_schedule == "sigmoid":
             sigmoid = 1 / (1 + math.exp(-(progress - 0.5) * 12))
-            return self.student_forcing_start_prob + sigmoid * (self.student_forcing_end_prob - self.student_forcing_start_prob)
+            return self.student_forcing_start_prob + sigmoid * (
+                self.student_forcing_end_prob - self.student_forcing_start_prob
+            )
         raise ValueError(f"Unknown schedule: {self.student_forcing_schedule}")
 
     def compute_loss(self, data, train):
@@ -681,8 +851,8 @@ class MultiStepTrainer(SequenceModelTrainer):
         device = data["states_w"].device
         if not hasattr(self, "p_student"):
             self.p_student = self.get_student_forcing_probability(self.current_epoch)
-        if self.neural_model.is_rnn:
-            self.neural_model.init_rnn(batch_size)
+        if self.neural_model_unwrapped.is_rnn:
+            self.neural_model_unwrapped.init_rnn(batch_size)
 
         total_loss = 0.0
         input_states_w = data["states_w"][:, 0:1, :].clone()
@@ -692,10 +862,11 @@ class MultiStepTrainer(SequenceModelTrainer):
                 root_body_q = torch.cat([input_states_w[..., :3], input_states_w[..., 3:7]], dim=-1)
             else:
                 root_body_q = torch.zeros((batch_size, time_index + 1, 7), device=device)
-            input_states_model, _, _, _, input_gravity_dir_model = self.neural_solver.convert_coordinate_frame(
+            input_states_model, _, _, _, _, input_gravity_dir_model = self.neural_solver.convert_coordinate_frame(
                 root_body_q=root_body_q,
                 states=input_states_w,
                 next_states=None,
+                contact_points_0=None,
                 contact_points_1=None,
                 contact_normals=None,
                 gravity_dir=data["gravity_dir_w"][:, : time_index + 1, :],
@@ -706,11 +877,19 @@ class MultiStepTrainer(SequenceModelTrainer):
                 "gravity_dir": input_gravity_dir_model,
                 "root_body_q": root_body_q,
             }
-            exclude_keys = {"states", "states_embedding", "gravity_dir", "root_body_q", "states_w", "next_states_w", "gravity_dir_w"}
+            exclude_keys = {
+                "states",
+                "states_embedding",
+                "gravity_dir",
+                "root_body_q",
+                "states_w",
+                "next_states_w",
+                "gravity_dir_w",
+            }
             for key, value in data.items():
                 if key not in exclude_keys:
                     model_inputs[key] = value[:, : time_index + 1, :]
-            prediction = self.neural_model(model_inputs, single_step=True)
+            prediction = self._forward_model(model_inputs, train, single_step=True)
             predicted_next_state_model = self.neural_solver.convert_prediction_to_next_states(
                 states=input_states_model[:, -1, :],
                 prediction=prediction.squeeze(1),
@@ -728,7 +907,9 @@ class MultiStepTrainer(SequenceModelTrainer):
             all_predicted_next_states_w.append(predicted_next_state_w.detach())
             if time_index < seq_length - 1:
                 use_student = torch.rand(batch_size, device=device) < self.p_student
-                next_state_w = torch.where(use_student.view(-1, 1), predicted_next_state_w, data["states_w"][:, time_index + 1, :])
+                next_state_w = torch.where(
+                    use_student.view(-1, 1), predicted_next_state_w, data["states_w"][:, time_index + 1, :]
+                )
                 input_states_w = torch.cat([input_states_w, next_state_w.unsqueeze(1)], dim=1)
 
         loss = total_loss / seq_length
@@ -777,8 +958,8 @@ class MultiStepTrainerNew(MultiStepTrainer):
             self.p_student = self.get_student_forcing_probability(self.current_epoch)
         if self.p_student < 1e-6:
             return VanillaTrainer.compute_loss(self, data, train)
-        if self.neural_model.is_rnn:
-            self.neural_model.init_rnn(batch_size)
+        if self.neural_model_unwrapped.is_rnn:
+            self.neural_model_unwrapped.init_rnn(batch_size)
 
         total_loss = 0.0
         input_states = data["states"][:, 0:1, :].clone()
@@ -793,7 +974,7 @@ class MultiStepTrainerNew(MultiStepTrainer):
                 if key not in {"states", "states_embedding"}:
                     model_inputs[key] = value[:, : time_index + 1, :]
 
-            prediction = self.neural_model(model_inputs, single_step=True)
+            prediction = self._forward_model(model_inputs, train, single_step=True)
             predicted_next_states = self.neural_solver.convert_prediction_to_next_states(
                 states=input_states[:, -1, :],
                 prediction=prediction.squeeze(1),

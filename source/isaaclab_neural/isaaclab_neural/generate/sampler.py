@@ -60,16 +60,30 @@ class ActionTrajectorySampler:
                     dtype=torch.bool,
                     device=self.data_device,
                 ),
-                "contact_normals": torch.empty((num_envs, trajectory_length, num_contacts_per_env * 3), device=self.data_device),
-                "contact_depths": torch.empty((num_envs, trajectory_length, num_contacts_per_env), device=self.data_device),
-                "contact_points_0": torch.empty((num_envs, trajectory_length, num_contacts_per_env * 3), device=self.data_device),
-                "contact_points_1": torch.empty((num_envs, trajectory_length, num_contacts_per_env * 3), device=self.data_device),
-                "contact_thicknesses_0": torch.empty((num_envs, trajectory_length, num_contacts_per_env), device=self.data_device),
-                "contact_thicknesses_1": torch.empty((num_envs, trajectory_length, num_contacts_per_env), device=self.data_device),
+                "contact_normals": torch.empty(
+                    (num_envs, trajectory_length, num_contacts_per_env * 3), device=self.data_device
+                ),
+                "contact_depths": torch.empty(
+                    (num_envs, trajectory_length, num_contacts_per_env), device=self.data_device
+                ),
+                "contact_points_0": torch.empty(
+                    (num_envs, trajectory_length, num_contacts_per_env * 3), device=self.data_device
+                ),
+                "contact_points_1": torch.empty(
+                    (num_envs, trajectory_length, num_contacts_per_env * 3), device=self.data_device
+                ),
+                "contact_thicknesses_0": torch.empty(
+                    (num_envs, trajectory_length, num_contacts_per_env), device=self.data_device
+                ),
+                "contact_thicknesses_1": torch.empty(
+                    (num_envs, trajectory_length, num_contacts_per_env), device=self.data_device
+                ),
             },
         }
         if record_actions:
-            buffers["actions"] = torch.empty((num_envs, trajectory_length, self.adapter.action_dim), device=self.data_device)
+            buffers["actions"] = torch.empty(
+                (num_envs, trajectory_length, self.adapter.action_dim), device=self.data_device
+            )
         up_axis = int(getattr(self.adapter.model, "up_axis", 2))
         buffers["gravity_dir"][:, :, up_axis] = -1.0
         return buffers
@@ -78,6 +92,9 @@ class ActionTrajectorySampler:
         inputs = self.adapter.raw_neural_inputs()
         self._copy_input(buffers["states"][:, step], inputs["states"])
         self._copy_input(buffers["root_body_q"][:, step], inputs["root_body_q"])
+        contacts = buffers["contacts"]
+        for key in contacts:
+            self._copy_input(contacts[key][:, step], inputs[key])
 
     def _copy_after_step(self, buffers: dict[str, Any], step: int, action: torch.Tensor) -> None:
         inputs = self.adapter.raw_neural_inputs()
@@ -85,10 +102,6 @@ class ActionTrajectorySampler:
         self._copy_input(buffers["joint_f"][:, step], inputs["joint_f"])
         if "actions" in buffers:
             buffers["actions"][:, step].copy_(action.to(self.data_device))
-
-        contacts = buffers["contacts"]
-        for key in contacts:
-            self._copy_input(contacts[key][:, step], inputs[key])
 
     def _copy_input(self, destination: torch.Tensor, source: torch.Tensor) -> None:
         """Copy a solver input tensor into a per-step rollout buffer."""
@@ -176,11 +189,18 @@ class ActionTrajectorySampler:
                 self._copy_before_step(batch, step)
                 self._pre_step_hook(step)
                 control = step_fn(step)
-                self._copy_after_step(batch, step, control if record_actions else torch.empty(0, device=self.adapter.device))
+                self._copy_after_step(
+                    batch, step, control if record_actions else torch.empty(0, device=self.adapter.device)
+                )
                 if render and hasattr(self.adapter.env, "render"):
                     self.adapter.env.render()
 
             valid_transitions = self._append_valid_trajectories(batch, rollout_batches)
+            if valid_transitions == 0:
+                raise RuntimeError(
+                    "Dataset generation produced no valid transitions for a full rollout batch. "
+                    "Check the sampling ranges, initial states, and contact configuration."
+                )
             total_transitions += valid_transitions
             progress_bar.update(valid_transitions)
 
@@ -329,5 +349,3 @@ class ActionTrajectorySampler:
 
 
 TrajectorySampler = ActionTrajectorySampler
-
-from isaaclab_neural.generate.samplers import AnymalCTrajectorySampler, CartpoleTrajectorySampler
