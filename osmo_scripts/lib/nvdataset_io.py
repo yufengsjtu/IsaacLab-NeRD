@@ -1,13 +1,16 @@
-#!/usr/bin/env python3
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """NV-Datasets helpers used by local submit scripts and OSMO jobs."""
 
 from __future__ import annotations
 
 import argparse
-import os
-from pathlib import Path
 import shutil
 import tempfile
+from pathlib import Path
 
 
 def _load_or_create_dataset(client, name: str, description: str = ""):
@@ -35,51 +38,80 @@ def _replace_dataset(client, name: str, description: str = ""):
 
 
 def _cache_dataset(dataset, output_dir: Path, prefix: str = ""):
-    """Cache a dataset locally, trying prefix-aware SDK signatures first."""
+    """Cache a dataset locally without removing unrelated output files."""
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix = prefix.strip("/")
 
-    if prefix:
-        for kwargs in ({"prefix": prefix}, {"path": prefix}, {"dataset_path": prefix}):
-            try:
-                dataset.cache_local(str(output_dir), **kwargs)
-                return
-            except TypeError:
-                continue
-        for kwargs in (
-            {"prefix": prefix, "output_dir": str(output_dir)},
-            {"path": prefix, "output_dir": str(output_dir)},
-            {"dataset_path": prefix, "output_dir": str(output_dir)},
-        ):
-            try:
-                dataset.cache_local(**kwargs)
-                return
-            except TypeError:
-                continue
-
-    dataset.cache_local(str(output_dir))
-    if prefix:
-        _prune_to_prefix(output_dir, prefix)
-
-
-def _prune_to_prefix(output_dir: Path, prefix: str):
-    keep_dir = output_dir / prefix
-    if not keep_dir.exists():
+    if not prefix:
+        dataset.cache_local(str(output_dir))
         return
 
-    with tempfile.TemporaryDirectory() as temp_dir_name:
+    prefix_path = Path(prefix)
+    if prefix_path.is_absolute() or ".." in prefix_path.parts:
+        raise ValueError(f"Dataset prefix must be a safe relative path, got {prefix!r}.")
+
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".nvdataset-", dir=output_dir.parent) as temp_dir_name:
         temp_dir = Path(temp_dir_name)
-        staged_keep_dir = temp_dir / prefix
-        staged_keep_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(keep_dir), str(staged_keep_dir))
+        prefix_cached = _cache_dataset_prefix(dataset, temp_dir, prefix)
+        move_staged_path = True
+        if prefix_cached:
+            staged_path = temp_dir / prefix
+            if not staged_path.exists():
+                # Prefix-aware SDKs may place the selected contents directly
+                # in the requested output directory.
+                staged_path = temp_dir
+                move_staged_path = False
+        else:
+            print(
+                f"NV-Datasets SDK does not support prefix downloads; "
+                f"caching the full dataset temporarily before selecting {prefix!r}."
+            )
+            dataset.cache_local(str(temp_dir))
+            staged_path = temp_dir / prefix
 
-        for entry in output_dir.iterdir():
-            if entry.is_dir():
-                shutil.rmtree(entry)
-            else:
-                entry.unlink()
+        if not staged_path.exists():
+            raise FileNotFoundError(f"Dataset prefix {prefix!r} was not found in the downloaded dataset.")
+        _merge_cached_path(staged_path, output_dir / prefix, move_when_new=move_staged_path)
 
-        shutil.move(str(temp_dir / prefix.split("/")[0]), str(output_dir / prefix.split("/")[0]))
+
+def _cache_dataset_prefix(dataset, temp_dir: Path, prefix: str) -> bool:
+    """Try prefix-aware SDK signatures, returning whether one is supported."""
+    for kwargs in ({"prefix": prefix}, {"path": prefix}, {"dataset_path": prefix}):
+        try:
+            dataset.cache_local(str(temp_dir), **kwargs)
+            return True
+        except TypeError:
+            continue
+    for kwargs in (
+        {"prefix": prefix, "output_dir": str(temp_dir)},
+        {"path": prefix, "output_dir": str(temp_dir)},
+        {"dataset_path": prefix, "output_dir": str(temp_dir)},
+    ):
+        try:
+            dataset.cache_local(**kwargs)
+            return True
+        except TypeError:
+            continue
+    return False
+
+
+def _merge_cached_path(source: Path, destination: Path, *, move_when_new: bool = True) -> None:
+    """Merge one cached file or directory into the destination."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir():
+        if destination.exists():
+            if not destination.is_dir():
+                raise FileExistsError(f"Cannot merge directory into existing file: {destination}")
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+        elif move_when_new:
+            shutil.move(str(source), str(destination))
+        else:
+            shutil.copytree(source, destination)
+    else:
+        if destination.exists() and destination.is_dir():
+            raise IsADirectoryError(f"Cannot replace existing directory with file: {destination}")
+        shutil.copy2(source, destination)
 
 
 def download_dataset(name: str, output_dir: Path, snapshot: str = "", prefix: str = ""):
