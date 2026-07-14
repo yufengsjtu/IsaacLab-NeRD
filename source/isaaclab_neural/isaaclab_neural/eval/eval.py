@@ -301,6 +301,8 @@ def main(env_cfg, agent_cfg) -> None:
 
     from isaaclab_tasks.utils import launch_simulation
 
+    from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
+
     with launch_simulation(build_launch_cfg(env_cfg), args_cli):
         import gymnasium as gym
 
@@ -309,7 +311,8 @@ def main(env_cfg, agent_cfg) -> None:
             gym_kwargs["render_mode"] = "rgb_array"
         if solver_cfg is not None:
             gym_kwargs["solver_cfg"] = solver_cfg
-        env = wrap_record_video(gym.make(args_cli.task, **gym_kwargs), args_cli)
+        with newton_material_binding_api_autofix():
+            env = wrap_record_video(gym.make(args_cli.task, **gym_kwargs), args_cli)
 
         if args_cli.policy_checkpoint is None:
             run_zero_action(env, args_cli)

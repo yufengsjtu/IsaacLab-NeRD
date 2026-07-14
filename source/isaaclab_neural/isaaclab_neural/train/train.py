@@ -156,11 +156,14 @@ def main(env_cfg, _agent_cfg=None) -> None:
 
     from isaaclab_tasks.utils import launch_simulation
 
+    from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
+
     with launch_simulation(build_launch_cfg(env_cfg), args_cli):
         import gymnasium as gym
 
-        env = gym.make(args_cli.task, cfg=env_cfg, device=args_cli.device, solver_cfg=solver_cfg).unwrapped
-        env.reset()
+        with newton_material_binding_api_autofix():
+            env = gym.make(args_cli.task, cfg=env_cfg, device=args_cli.device, solver_cfg=solver_cfg).unwrapped
+            env.reset()
         algorithm_name = cfg["algorithm"].get("name", "VanillaTrainer")
         algorithm_cls = ALGORITHMS.get(algorithm_name)
         if algorithm_cls is None:
