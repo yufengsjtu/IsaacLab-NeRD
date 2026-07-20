@@ -75,12 +75,6 @@ class NerdSolverCfg(NewtonSolverCfg):
     contact_packing_policy: ContactPackingPolicy = "penetration_priority"
     """Policy for ordering Newton native contacts before packing into fixed slots."""
 
-    contact_fingerprint: dict | str | None = None
-    """Expected contact fingerprint metadata for dataset/runtime compatibility checks."""
-
-    validate_contact_fingerprint: bool = True
-    """Whether runtime contact metadata should be checked against ``contact_fingerprint`` when provided."""
-
     states_frame: Literal["world", "body", "body_translation_only"] = "body"
     """Frame used to express neural-model states."""
 

@@ -75,8 +75,6 @@ def create_neural_solver(
     cfg_dict.pop("solver_type", None)
     cfg_dict.pop("neural_model_path", None)
     cfg_dict.pop("neural_model_cfg", None)
-    cfg_dict.pop("contact_fingerprint", None)
-    cfg_dict.pop("validate_contact_fingerprint", None)
     cfg_dict.pop("contact_packing_policy", None)
     cfg_dict.pop("use_cuda_graph", None)  # legacy checkpoints; lives on NerdNewtonCfg
     cfg_dict.pop("num_contacts_per_env", None)
