@@ -4,6 +4,10 @@
 
 import torch
 import torch.nn as nn
+from isaaclab_neural.contacts.tensor_utils import (
+    mask_inactive_contact_fields,
+    normalize_contact_field,
+)
 from isaaclab_neural.models.base_models import MLPBase, CNNBase, LSTMBase, GRUBase
 from isaaclab_neural.models.model_kan import KAN
 from isaaclab_neural.models.model_transformer import GPT, GPTConfig
@@ -50,7 +54,9 @@ class ModelMixedInput(nn.Module):
         output_dim,
         input_cfg,
         network_cfg,
-        device = 'cuda:0'
+        device = 'cuda:0',
+        *,
+        contact_mode = 'fixed_ground'
     ):
         
         super().__init__()
@@ -60,6 +66,7 @@ class ModelMixedInput(nn.Module):
         
         self.input_rms = None
         self.normalize_input = network_cfg.get('normalize_input', False)
+        self.use_native_contact_processing = contact_mode == 'newton_native'
         self.output_rms = None
         self.normalize_output = network_cfg.get('normalize_output', False)
 
@@ -260,14 +267,29 @@ class ModelMixedInput(nn.Module):
         
         if self.normalize_input:
             for obs_key in self.input_rms.keys():
-                input_dict[obs_key] = self.input_rms[obs_key].normalize(input_dict[obs_key])
+                if getattr(self, 'use_native_contact_processing', False) and obs_key.startswith('contact_'):
+                    contact_masks = input_dict.get('contact_masks')
+                    if contact_masks is None:
+                        raise ValueError("Contact RMS mode 'masked_shared' requires explicit contact_masks.")
+                    input_dict[obs_key] = normalize_contact_field(
+                        input_dict[obs_key], contact_masks, self.input_rms[obs_key]
+                    )
+                else:
+                    input_dict[obs_key] = self.input_rms[obs_key].normalize(input_dict[obs_key])
 
         if inject_noise:
             for obs_key in input_dict.keys():
+                if not torch.is_floating_point(input_dict[obs_key]):
+                    continue
                 input_dict[obs_key] = (
                     input_dict[obs_key] + 
                     torch.randn_like(input_dict[obs_key]) * 0.01
                 )
+
+        # Normalization and noise turn zero padding into nonzero values. Apply
+        # the mask again so inactive contacts remain zero at the encoder input.
+        if getattr(self, 'use_native_contact_processing', False):
+            mask_inactive_contact_fields(input_dict)
 
         features = self.extract_input_features(input_dict) # (B, T, feature_dim)
 

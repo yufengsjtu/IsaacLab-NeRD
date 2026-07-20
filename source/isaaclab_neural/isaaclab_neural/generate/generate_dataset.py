@@ -96,7 +96,10 @@ def configure_env(env_cfg, args) -> None:
 
 def build_solver_cfg(args):
     """Build a NeRD solver config used only for dataset recording."""
+    from isaaclab_neural.contacts import resolve_contact_packing_policy
     from isaaclab_neural.physics import NerdSolverCfg
+
+    packing_policy = resolve_contact_packing_policy(args.contact_mode, args.contact_packing_policy)
 
     return NerdSolverCfg(
         name="NeuralSolver",
@@ -108,8 +111,7 @@ def build_solver_cfg(args):
         min_contact_event_threshold=args.min_contact_event_threshold,
         num_contacts_per_env=args.num_contacts_per_env,
         contact_mode=args.contact_mode,
-        contact_packing_policy=args.contact_packing_policy,
-        validate_contact_fingerprint=False,
+        contact_packing_policy=packing_policy,
     )
 
 
@@ -224,7 +226,11 @@ def main(env_cfg, agent_cfg=None) -> None:
             while total_transitions < args_cli.num_transitions:
                 chunk_transitions = min(args_cli.write_chunk_transitions, args_cli.num_transitions - total_transitions)
                 rollouts = sample_rollouts(chunk_transitions)
-                append_rollouts_to_hdf5(output_path, rollouts, env_name)
+                append_rollouts_to_hdf5(
+                    output_path,
+                    rollouts,
+                    env_name,
+                )
                 written_transitions = rollouts["states"].shape[0] * rollouts["states"].shape[1]
                 total_transitions += written_transitions
                 print(
@@ -236,7 +242,14 @@ def main(env_cfg, agent_cfg=None) -> None:
                     torch.cuda.empty_cache()
         else:
             rollouts = sample_rollouts(args_cli.num_transitions)
-            write_rollouts_to_hdf5(output_path, rollouts, env_name)
+            write_rollouts_to_hdf5(
+                output_path,
+                rollouts,
+                env_name,
+            )
+        truncation_summary = adapter.contact_truncation_summary()
+        if truncation_summary is not None:
+            print(f"[contacts] truncation summary: {truncation_summary}")
         del runner
         print(f"[dataset] wrote {output_path}")
         env.close()

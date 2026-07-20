@@ -299,9 +299,9 @@ def main(env_cfg, agent_cfg) -> None:
     solver_cfg, legacy_use_cuda_graph = build_solver_cfg(args_cli)
     apply_cuda_graph_override(env_cfg, args_cli, legacy_use_cuda_graph=legacy_use_cuda_graph)
 
-    from isaaclab_tasks.utils import launch_simulation
-
     from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
+
+    from isaaclab_tasks.utils import launch_simulation
 
     with launch_simulation(build_launch_cfg(env_cfg), args_cli):
         import gymnasium as gym

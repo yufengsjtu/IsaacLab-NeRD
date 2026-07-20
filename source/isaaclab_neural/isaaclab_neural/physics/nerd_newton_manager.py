@@ -145,7 +145,11 @@ class NewtonNerdManager(NewtonManager):
 
     @classmethod
     def _build_solver(cls, model, solver_cfg) -> None:
-        from isaaclab_neural.contacts import AbstractContact, NewtonContactAdapter
+        from isaaclab_neural.contacts import (
+            AbstractContact,
+            NewtonContactAdapter,
+            resolve_contact_packing_policy,
+        )
         from isaaclab_neural.solvers import create_neural_solver
 
         cfg_dict = solver_cfg.to_dict() if hasattr(solver_cfg, "to_dict") else dict(vars(solver_cfg))
@@ -169,11 +173,15 @@ class NewtonNerdManager(NewtonManager):
                 raise ValueError(
                     "NerdSolverCfg.num_contacts_per_env must be positive when contact_mode='newton_native'."
                 )
+            packing_policy = resolve_contact_packing_policy(
+                contact_mode,
+                cfg_dict.get("contact_packing_policy"),
+            )
             contact_adapter = NewtonContactAdapter(
                 model,
                 num_contacts_per_env=num_contacts_per_env,
                 device=str(wp.device_to_torch(PhysicsManager._device)),
-                packing_policy=cfg_dict.get("contact_packing_policy", "stable_index"),
+                packing_policy=packing_policy,
             )
             cls._nerd_contact_adapter = contact_adapter
         else:

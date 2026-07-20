@@ -175,6 +175,12 @@ class DataGenerationAdapter:
         """Number of fixed contact slots per environment."""
         return int(self.solver.num_contacts_per_env)
 
+    def contact_truncation_summary(self) -> dict[str, int | float] | None:
+        """Return native contact truncation statistics when available."""
+        if self.contact_adapter is None:
+            return None
+        return self.contact_adapter.truncation_summary()
+
     def _action_shape(self) -> tuple[int, ...]:
         shape = tuple(self.env.action_space.shape)
         if len(shape) == 1:
@@ -293,7 +299,9 @@ class DataGenerationAdapter:
 
         states = initial_states.to(device=self.device, dtype=torch.float32)
         if states.shape != (self.num_envs, self.state_dim):
-            raise ValueError(f"initial_states must have shape {(self.num_envs, self.state_dim)}, got {tuple(states.shape)}.")
+            raise ValueError(
+                f"initial_states must have shape {(self.num_envs, self.state_dim)}, got {tuple(states.shape)}."
+            )
 
         self.backend.assign_solver_states(self.solver, states)
         if hasattr(self.env, "scene"):
@@ -326,7 +334,9 @@ class DataGenerationAdapter:
         """Step one physics frame with direct joint forces, bypassing actuators."""
         joint_f = joint_f.to(device=self.device, dtype=torch.float32)
         if joint_f.shape != (self.num_envs, self.joint_f_dim):
-            raise ValueError(f"joint_f must have shape {(self.num_envs, self.joint_f_dim)}, got {tuple(joint_f.shape)}.")
+            raise ValueError(
+                f"joint_f must have shape {(self.num_envs, self.joint_f_dim)}, got {tuple(joint_f.shape)}."
+            )
         self.backend.assign_joint_f(joint_f)
         self.backend.step_physics_only()
         if hasattr(self.env, "_sim_step_counter"):

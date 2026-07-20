@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import logging
 from typing import Literal
 
 import newton
@@ -11,6 +12,8 @@ import warp as wp
 
 from isaaclab_neural.contacts.packing import ContactPackingPolicy, get_contact_order
 from isaaclab_neural.utils import torch_utils
+
+logger = logging.getLogger(__name__)
 
 
 class NewtonContactAdapter:
@@ -33,16 +36,26 @@ class NewtonContactAdapter:
         self.num_envs = int(model.world_count)
         self.num_contacts_per_env = int(num_contacts_per_env)
         self.num_total_contacts = self.num_envs * self.num_contacts_per_env
-        self.packing_policy = packing_policy
+        self.packing_policy: ContactPackingPolicy = packing_policy
 
         if device is None:
             self.device = wp.device_to_torch(model.device)
         else:
             self.device = torch.device(device)
 
+        if model.shape_body is None:
+            raise ValueError("NewtonContactAdapter requires model.shape_body.")
         self.shape_body = model.shape_body.numpy()
+        self.shape_body_torch = torch.as_tensor(self.shape_body, dtype=torch.long, device=self.device)
+        self.primary_body_mask, self.contact_side_rule = self._derive_primary_body_mask()
         self.bodies_per_env = int(model.body_count // model.world_count)
-        self.body_world = model.body_world.numpy() if hasattr(model, "body_world") else None
+        self.body_world = model.body_world.numpy() if model.body_world is not None else None
+        self._contact_frames = 0
+        self._raw_contacts_total = 0
+        self._packed_contacts_total = 0
+        self._dropped_contacts_total = 0
+        self._truncated_frames = 0
+        self._truncation_warning_emitted = False
 
         self.contact_masks = torch.zeros(
             (self.num_envs, self.num_contacts_per_env),
@@ -99,6 +112,7 @@ class NewtonContactAdapter:
         self.reset_buffers()
 
         contact_count = self._contact_count(contacts)
+        self._contact_frames += 1
         if contact_count == 0:
             return
 
@@ -109,6 +123,9 @@ class NewtonContactAdapter:
             dtype=torch.long,
             device=self.device,
         )
+        frame_raw_contacts = 0
+        frame_packed_contacts = 0
+        frame_dropped_contacts = 0
 
         for contact_idx in order.tolist():
             shape0 = int(raw["shape0"][contact_idx].item())
@@ -117,19 +134,36 @@ class NewtonContactAdapter:
             if env_id < 0 or env_id >= self.num_envs:
                 continue
 
+            frame_raw_contacts += 1
             slot_id = int(write_counts[env_id].item())
             if slot_id >= self.num_contacts_per_env:
+                frame_dropped_contacts += 1
                 continue
 
             self.contact_masks[env_id, slot_id] = True
             self.contact_normals[env_id, slot_id].copy_(raw["normal"][contact_idx])
-            self.contact_depths[env_id, slot_id] = raw["depth"][contact_idx]
+            self.contact_depths[env_id, slot_id] = raw["surface_separation"][contact_idx]
             self.contact_thicknesses_0[env_id, slot_id] = raw["thickness0"][contact_idx]
             self.contact_thicknesses_1[env_id, slot_id] = raw["thickness1"][contact_idx]
             self.contact_points_0[env_id, slot_id].copy_(raw["point0_world"][contact_idx])
             self.contact_points_1[env_id, slot_id].copy_(raw["point1_world"][contact_idx])
 
             write_counts[env_id] += 1
+            frame_packed_contacts += 1
+
+        self._raw_contacts_total += frame_raw_contacts
+        self._packed_contacts_total += frame_packed_contacts
+        self._dropped_contacts_total += frame_dropped_contacts
+        if frame_dropped_contacts > 0:
+            self._truncated_frames += 1
+            if not self._truncation_warning_emitted:
+                logger.warning(
+                    "Newton-native contact packing dropped %d contacts because num_contacts_per_env=%d. "
+                    "Further truncation warnings are suppressed; inspect truncation_summary() for totals.",
+                    frame_dropped_contacts,
+                    self.num_contacts_per_env,
+                )
+                self._truncation_warning_emitted = True
 
     def to_neural_inputs(self) -> dict[str, torch.Tensor]:
         """Return cloned tensors with the same shape convention as fixed-ground contacts."""
@@ -145,23 +179,22 @@ class NewtonContactAdapter:
             "contact_points_1": self.contact_points_1.reshape(B, C * 3).clone(),
         }
 
-    def fingerprint(self) -> dict:
-        """Return metadata that must match between data collection and runtime."""
+    def truncation_summary(self) -> dict[str, int | float]:
+        """Return cumulative native contact packing statistics."""
         return {
-            "contact_mode": "newton_native",
-            "num_contacts_per_env": self.num_contacts_per_env,
-            "packing_policy": self.packing_policy,
-            "thickness_rule": "native_margin",
-            "depth_rule": "support_distance_along_normal",
-            "contact_points_0_frame": "world",
-            "contact_points_1_frame": "world",
-            "adapter_version": 4,
+            "frames": self._contact_frames,
+            "raw_contacts": self._raw_contacts_total,
+            "packed_contacts": self._packed_contacts_total,
+            "dropped_contacts": self._dropped_contacts_total,
+            "truncated_frames": self._truncated_frames,
+            "truncated_frame_ratio": self._truncated_frames / max(self._contact_frames, 1),
         }
 
     def _contact_count(self, contacts: newton.Contacts) -> int:
-        if contacts.rigid_contact_count is None:
+        count_array = contacts.rigid_contact_count
+        if count_array is None:
             return 0
-        count = int(wp.to_torch(contacts.rigid_contact_count)[0].item())
+        count = int(wp.to_torch(count_array)[0].item())  # type: ignore[arg-type]
         return min(count, int(contacts.rigid_contact_max))
 
     def _read_raw_contacts(
@@ -178,13 +211,23 @@ class NewtonContactAdapter:
 
         thickness0 = self._read_thickness(contacts, contact_count, side=0)
         thickness1 = self._read_thickness(contacts, contact_count, side=1)
-        depth, point0_world, point1_world = self._read_depth_and_world_points(
-            contact_count,
+        shape0, shape1, point0, point1, normal, thickness0, thickness1 = self._canonicalize_contact_sides(
             shape0,
             shape1,
             point0,
             point1,
             normal,
+            thickness0,
+            thickness1,
+        )
+        surface_separation, point0_world, point1_world = self._read_separation_and_world_points(
+            shape0,
+            shape1,
+            point0,
+            point1,
+            normal,
+            thickness0,
+            thickness1,
             state,
         )
 
@@ -196,10 +239,95 @@ class NewtonContactAdapter:
             "point0_world": point0_world,
             "point1_world": point1_world,
             "normal": normal,
-            "depth": depth,
+            "surface_separation": surface_separation,
             "thickness0": thickness0,
             "thickness1": thickness1,
         }
+
+    def _canonicalize_contact_sides(
+        self,
+        shape0: torch.Tensor,
+        shape1: torch.Tensor,
+        point0: torch.Tensor,
+        point1: torch.Tensor,
+        normal: torch.Tensor,
+        thickness0: torch.Tensor,
+        thickness1: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        """Put the dynamic robot side first and orient normals from side 0 to side 1."""
+        body0 = self._shape_body_ids(shape0)
+        body1 = self._shape_body_ids(shape1)
+        primary0 = self._is_primary_body(body0)
+        primary1 = self._is_primary_body(body1)
+        dynamic0 = body0 >= 0
+        dynamic1 = body1 >= 0
+
+        # Prefer the primary articulation (the controlled robot) over other
+        # dynamic bodies. Fall back to dynamic-first and then shape ordering.
+        fallback_swap = (~dynamic0 & dynamic1) | ((dynamic0 == dynamic1) & (shape0 > shape1))
+        swap = (~primary0 & primary1) | ((primary0 == primary1) & fallback_swap)
+        vector_swap = swap.unsqueeze(-1)
+
+        canonical_shape0 = torch.where(swap, shape1, shape0)
+        canonical_shape1 = torch.where(swap, shape0, shape1)
+        canonical_point0 = torch.where(vector_swap, point1, point0)
+        canonical_point1 = torch.where(vector_swap, point0, point1)
+        canonical_normal = torch.where(vector_swap, -normal, normal)
+        canonical_thickness0 = torch.where(swap, thickness1, thickness0)
+        canonical_thickness1 = torch.where(swap, thickness0, thickness1)
+        return (
+            canonical_shape0,
+            canonical_shape1,
+            canonical_point0,
+            canonical_point1,
+            canonical_normal,
+            canonical_thickness0,
+            canonical_thickness1,
+        )
+
+    def _shape_body_ids(self, shapes: torch.Tensor) -> torch.Tensor:
+        """Return owning body indices, using ``-1`` for static or invalid shapes."""
+        body_ids = torch.full(shapes.shape, -1, dtype=torch.long, device=shapes.device)
+        valid_shapes = (shapes >= 0) & (shapes < self.shape_body_torch.shape[0])
+        body_ids[valid_shapes] = self.shape_body_torch[shapes[valid_shapes].long()]
+        return body_ids
+
+    def _is_primary_body(self, body_ids: torch.Tensor) -> torch.Tensor:
+        """Return whether each body belongs to the primary articulation."""
+        result = torch.zeros_like(body_ids, dtype=torch.bool)
+        valid = (body_ids >= 0) & (body_ids < self.primary_body_mask.shape[0])
+        result[valid] = self.primary_body_mask[body_ids[valid]]
+        return result
+
+    def _derive_primary_body_mask(self) -> tuple[torch.Tensor, str]:
+        """Identify the first articulation in every world as the primary robot."""
+        articulation_array = self.model.joint_articulation
+        parent_array = self.model.joint_parent
+        child_array = self.model.joint_child
+        world_array = self.model.joint_world
+        if any(array is None for array in (articulation_array, parent_array, child_array, world_array)):
+            return torch.ones(int(self.model.body_count), dtype=torch.bool, device=self.device), "dynamic_body_first"
+
+        assert articulation_array is not None
+        assert parent_array is not None
+        assert child_array is not None
+        assert world_array is not None
+        joint_articulation = articulation_array.numpy()
+        joint_parent = parent_array.numpy()
+        joint_child = child_array.numpy()
+        joint_world = world_array.numpy()
+        primary_bodies = torch.zeros(int(self.model.body_count), dtype=torch.bool, device=self.device)
+        for world_id in range(self.num_envs):
+            world_joints = (joint_world == world_id) & (joint_articulation >= 0)
+            articulation_ids = joint_articulation[world_joints]
+            if articulation_ids.size == 0:
+                continue
+            primary_articulation = articulation_ids.min()
+            primary_joints = world_joints & (joint_articulation == primary_articulation)
+            for body_id in (*joint_parent[primary_joints].tolist(), *joint_child[primary_joints].tolist()):
+                if body_id >= 0:
+                    primary_bodies[int(body_id)] = True
+        return primary_bodies, "primary_articulation_first"
 
     def _read_thickness(
         self,
@@ -217,27 +345,29 @@ class NewtonContactAdapter:
 
         return wp.to_torch(margins)[:contact_count].to(self.device)
 
-    def _read_depth_and_world_points(
+    def _read_separation_and_world_points(
         self,
-        contact_count: int,
         shape0: torch.Tensor,
         shape1: torch.Tensor,
         point0: torch.Tensor,
         point1: torch.Tensor,
         normal: torch.Tensor,
+        thickness0: torch.Tensor,
+        thickness1: torch.Tensor,
         state: newton.State | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if state is None:
             raise ValueError(
-                "NewtonContactAdapter computes depth from geometry. "
+                "NewtonContactAdapter computes surface separation from geometry. "
                 "Pass the current Newton State to NewtonContactAdapter.update() "
-                "so world-space depth can be computed from point0/point1/normal."
+                "so world-space separation can be computed from point0/point1/normal."
             )
 
         point0_world = self._points_to_world(shape0, point0, state)
         point1_world = self._points_to_world(shape1, point1, state)
-        depth = torch.sum(normal * (point1_world - point0_world), dim=-1)
-        return depth, point0_world, point1_world
+        normal_distance = torch.sum(normal * (point1_world - point0_world), dim=-1)
+        surface_separation = normal_distance - thickness0 - thickness1
+        return surface_separation, point0_world, point1_world
 
     def _points_to_world(
         self,
@@ -245,16 +375,12 @@ class NewtonContactAdapter:
         points: torch.Tensor,
         state: newton.State,
     ) -> torch.Tensor:
+        if state.body_q is None:
+            raise ValueError("NewtonContactAdapter requires state.body_q.")
         body_q = wp.to_torch(state.body_q).to(self.device)
         points_world = points.clone()
 
-        body_ids = torch.empty(shapes.shape[0], dtype=torch.long, device=self.device)
-        for i, shape_id in enumerate(shapes.tolist()):
-            if shape_id < 0 or shape_id >= len(self.shape_body):
-                body_ids[i] = -1
-            else:
-                body_ids[i] = int(self.shape_body[int(shape_id)])
-
+        body_ids = self._shape_body_ids(shapes)
         dynamic_mask = body_ids >= 0
         if dynamic_mask.any():
             q = body_q[body_ids[dynamic_mask]]

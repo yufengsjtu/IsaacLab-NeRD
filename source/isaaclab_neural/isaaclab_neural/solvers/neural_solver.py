@@ -331,6 +331,12 @@ class NeuralSolver(SolverBase):
         contact_thickness0,  # (num_envs, (T), num_contacts_per_env)
         contact_thickness1,  # (num_envs, (T), num_contacts_per_env)
     ):
+        if self.contact_mode == "newton_native":
+            raise ValueError(
+                "Newton-native inputs require explicit contact_masks. Masks cannot be reconstructed "
+                "from signed surface separation because inactive padding and touching contacts can both be zero."
+            )
+
         # compute the threshold to detect a contact event
         contact_event_threshold = CONTACT_DEPTH_UPPER_RATIO * (contact_thickness0 + contact_thickness1)
         contact_event_threshold = torch.where(

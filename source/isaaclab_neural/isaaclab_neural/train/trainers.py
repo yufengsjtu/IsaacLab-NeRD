@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
+from isaaclab_neural.contacts.tensor_utils import MIN_CONTACT_RMS_SAMPLES, MaskedContactMoments
 from isaaclab_neural.data import (
     collate_fn_BatchTransitionDataset,
     create_batch_transition_dataset,
@@ -116,6 +117,7 @@ class VanillaTrainer:
                 output_dim=self.neural_solver.prediction_dim,
                 input_cfg=cfg["inputs"],
                 network_cfg=cfg["network"],
+                contact_mode=self.neural_solver.contact_mode,
                 device=self.device,
             )
         else:
@@ -255,6 +257,10 @@ class VanillaTrainer:
             self.best_eval_error = checkpoint["best_eval_error"]
         if "loss_weights" in checkpoint:
             self.loss_weights = checkpoint["loss_weights"].to(self.device)
+        if "contact_rms_counts" in checkpoint:
+            self.contact_rms_counts = {
+                key: value.to(self.device) for key, value in checkpoint["contact_rms_counts"].items()
+            }
         print_info("Restored model and training state from checkpoint.")
 
     def _init_logging(self, cli_cfg: dict[str, Any]) -> None:
@@ -378,6 +384,8 @@ class VanillaTrainer:
             drop_last=True,
         )
         self.dataset_rms = {}
+        self.contact_rms_counts: dict[str, torch.Tensor] = {}
+        contact_moments: dict[str, MaskedContactMoments] = {}
         for data in tqdm(dataloader):
             data = self.preprocess_data_batch(data)
             data["relative_states"] = self.neural_solver.convert_next_states_to_prediction(
@@ -386,11 +394,35 @@ class VanillaTrainer:
                 dt=self.neural_env.frame_dt,
                 prediction_type="relative",
             )
+            contact_masks = data.get("contact_masks")
             for key, value in data.items():
+                if key == "contact_masks":
+                    continue
+                use_masked_contact_rms = self.neural_solver.contact_mode == "newton_native" and key.startswith(
+                    "contact_"
+                )
+                if use_masked_contact_rms and contact_masks is None:
+                    raise ValueError("Newton-native contact RMS requires explicit contact_masks.")
+                if use_masked_contact_rms:
+                    assert contact_masks is not None
+                    if key not in contact_moments:
+                        contact_moments[key] = MaskedContactMoments.from_batch(value, contact_masks)
+                    contact_moments[key].update(value, contact_masks)
+                    continue
                 if key not in self.dataset_rms:
-                    self.dataset_rms[key] = RunningMeanStd(shape=value.shape[2:], device=self.device)
-                if key != "contact_masks":
-                    self.dataset_rms[key].update(value, batch_dim=True, time_dim=True)
+                    rms_shape = value.shape[2:]
+                    self.dataset_rms[key] = RunningMeanStd(shape=rms_shape, device=self.device)
+                self.dataset_rms[key].update(value, batch_dim=True, time_dim=True)
+        for key, moments in contact_moments.items():
+            rms, counts = moments.finalize(self.device)
+            self.dataset_rms[key] = rms
+            self.contact_rms_counts[key] = counts
+            sparse_slots = int(((counts > 0) & (counts < MIN_CONTACT_RMS_SAMPLES)).sum())
+            print_info(
+                f"Contact RMS {key}: min_count={int(counts.min())}, max_count={int(counts.max())}, "
+                f"sparse_slots={sparse_slots}/{counts.numel()} "
+                f"(pooled fallback below {MIN_CONTACT_RMS_SAMPLES} samples)."
+            )
 
     def get_student_forcing_probability(self, epoch: int) -> float:
         """Return the student forcing probability for trainers that support it."""
@@ -767,6 +799,10 @@ class VanillaTrainer:
             training_state["best_valid_losses"] = self.best_valid_losses
         if hasattr(self, "loss_weights") and isinstance(self.loss_weights, torch.Tensor):
             training_state["loss_weights"] = self.loss_weights
+        if hasattr(self, "contact_rms_counts"):
+            training_state["contact_rms_counts"] = {
+                key: value.detach().cpu() for key, value in self.contact_rms_counts.items()
+            }
         save_checkpoint(
             path=os.path.join(self.model_log_dir, f"{filename}.pt"),
             model=self.neural_model_unwrapped,

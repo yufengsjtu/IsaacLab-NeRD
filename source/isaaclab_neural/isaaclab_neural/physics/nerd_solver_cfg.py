@@ -72,7 +72,7 @@ class NerdSolverCfg(NewtonSolverCfg):
     inputs.
     """
 
-    contact_packing_policy: ContactPackingPolicy = "stable_index"
+    contact_packing_policy: ContactPackingPolicy = "penetration_priority"
     """Policy for ordering Newton native contacts before packing into fixed slots."""
 
     contact_fingerprint: dict | str | None = None

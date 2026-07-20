@@ -1,16 +1,19 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 from __future__ import annotations
 
-import os
 import importlib
+import os
 import sys
 
 import torch
 import torch.nn as nn
 import yaml
-
 from isaaclab_neural.models.models import ModelMixedInput
 from isaaclab_neural.utils.running_mean_std import RunningMeanStd
-
 
 CHECKPOINT_VERSION = 2
 
@@ -54,6 +57,7 @@ def save_checkpoint(path, model, robot_name, cfg, **training_state):
         "best_valid_losses",
         "best_eval_error",
         "loss_weights",
+        "contact_rms_counts",
     ]:
         if key in training_state:
             checkpoint[key] = training_state[key]
@@ -79,11 +83,9 @@ def get_cfg_from_checkpoint(checkpoint, model_path):
     """Extract training config from checkpoint, falling back to adjacent cfg.yaml."""
     if checkpoint.get("cfg") is not None:
         return checkpoint["cfg"]
-    train_dir = os.path.abspath(
-        os.path.join(os.path.dirname(os.path.abspath(model_path)), "../")
-    )
+    train_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(model_path)), "../"))
     cfg_path = os.path.join(train_dir, "cfg.yaml")
-    with open(cfg_path, "r") as f:
+    with open(cfg_path) as f:
         return yaml.load(f, Loader=yaml.SafeLoader)
 
 
@@ -115,6 +117,7 @@ def reconstruct_model_from_checkpoint(checkpoint, neural_solver, device="cpu"):
         output_dim=output_dim,
         input_cfg=cfg["inputs"],
         network_cfg=cfg["network"],
+        contact_mode=neural_solver.contact_mode,
         device=device,
     )
 
