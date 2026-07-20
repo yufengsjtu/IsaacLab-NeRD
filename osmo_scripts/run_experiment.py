@@ -1,15 +1,19 @@
-#!/usr/bin/env python3
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """Run an OSMO experiment from a declarative preset."""
 
 from __future__ import annotations
 
 import argparse
-from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import dataclass
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
+from pathlib import Path
 
 from lib.simple_yaml import load_yaml
 
@@ -79,11 +83,20 @@ def required_dataset_files(experiment: dict, specs: list[DatasetSpec]) -> list[s
     return required_files
 
 
-def dataset_cache_complete(candidate_dir: Path, required_files: list[str]) -> bool:
+def dataset_cache_complete(
+    candidate_dir: Path,
+    required_files: list[str],
+) -> bool:
     return all((candidate_dir / filename).is_file() for filename in required_files)
 
 
-def load_dataset_cache_from_input(input_root: Path, dataset_subdir: str, env_name: str, local_env_dir: Path, required_files: list[str]) -> bool:
+def load_dataset_cache_from_input(
+    input_root: Path,
+    dataset_subdir: str,
+    env_name: str,
+    local_env_dir: Path,
+    required_files: list[str],
+) -> bool:
     if not input_root.is_dir():
         print(f"Dataset input path does not exist: {input_root}")
         return False
@@ -222,7 +235,7 @@ def generate_all_datasets(experiment: dict, specs: list[DatasetSpec], dataset_di
             subprocess.run([sys.executable, *args], check=True)
 
 
-def run_training(experiment: dict, output_root: Path):
+def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Namespace):
     train_args = [
         "--task",
         str(experiment["train_task"]),
@@ -241,6 +254,19 @@ def run_training(experiment: dict, output_root: Path):
         train_args.append("--update-dataset-statistics")
     if experiment.get("train_preset"):
         train_args.append(f"presets={experiment['train_preset']}")
+    if wandb_args.enable_wandb:
+        train_args.append("--enable-wandb")
+        train_args += ["--wandb-project-name", wandb_args.wandb_project_name]
+        exp_name = wandb_args.wandb_exp_name
+        if not exp_name:
+            exp_name = wandb_args.workflow_base_name
+            if wandb_args.dataset_subdir:
+                exp_name = f"{exp_name}/{wandb_args.dataset_subdir}"
+        train_args += ["--wandb-exp-name", exp_name]
+        if wandb_args.wandb_entity:
+            train_args += ["--wandb-entity", wandb_args.wandb_entity]
+        if not wandb_args.wandb_save_checkpoints:
+            train_args.append("--no-wandb-save-checkpoints")
 
     num_gpus = int(experiment.get("num_gpus", 1))
     if num_gpus > 1:
@@ -263,7 +289,17 @@ def run_training(experiment: dict, output_root: Path):
 def start_tensorboard(output_root: Path, port: int):
     log_file = (output_root / "tensorboard.log").open("w", encoding="utf-8")
     process = subprocess.Popen(
-        [sys.executable, "-m", "tensorboard.main", "--logdir", str(output_root), "--host", "0.0.0.0", "--port", str(port)],
+        [
+            sys.executable,
+            "-m",
+            "tensorboard.main",
+            "--logdir",
+            str(output_root),
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(port),
+        ],
         stdout=log_file,
         stderr=subprocess.STDOUT,
     )
@@ -301,7 +337,9 @@ def run(args: argparse.Namespace):
         if not datasets_available:
             print(f"NV-Datasets input cache unavailable for {experiment['env_name']}; generating datasets locally.")
             if args.dataset_cache_mode == "require":
-                raise RuntimeError("DATASET_CACHE_MODE=require but required datasets were not found in NV-Datasets input.")
+                raise RuntimeError(
+                    "DATASET_CACHE_MODE=require but required datasets were not found in NV-Datasets input."
+                )
     elif args.dataset_cache_mode == "require":
         raise RuntimeError("DATASET_CACHE_MODE=require but DATASET_INPUT_PATH is empty.")
 
@@ -315,7 +353,7 @@ def run(args: argparse.Namespace):
             nvdataset_data_description=args.nvdataset_data_description,
         )
 
-    run_training(experiment, output_root)
+    run_training(experiment, output_root, args)
 
 
 def main():
@@ -331,6 +369,16 @@ def main():
     parser.add_argument("--output-root", default="/tmp/runs/output")
     parser.add_argument("--dataset-dir", default="./data/datasets")
     parser.add_argument("--tensorboard-port", type=int, default=6006)
+    parser.add_argument("--enable-wandb", action="store_true", help="Enable Weights & Biases logging.")
+    parser.add_argument("--wandb-project-name", default="nerd-newton")
+    parser.add_argument("--wandb-exp-name", default="")
+    parser.add_argument("--wandb-entity", default="")
+    parser.add_argument(
+        "--wandb-save-checkpoints",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Upload best checkpoints to the active W&B run.",
+    )
     args = parser.parse_args()
 
     output_root = Path(args.output_root)

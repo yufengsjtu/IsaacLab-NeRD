@@ -118,6 +118,42 @@ exit. If dataset generation ran, `run_experiment.py` uploads the generated HDF5
 datasets to `IsaacLab-NeRD-Datasets` only, not to the output dataset, to avoid
 duplicating large datasets in run outputs.
 
+#### Weights & Biases (optional)
+
+TensorBoard is always enabled. To also log to W&B from OSMO:
+
+```bash
+export WANDB_API_KEY=<your-wandb-api-key>
+./osmo_scripts/start.sh --enable-wandb --wandb-project nerd-newton
+```
+
+Optional overrides:
+
+```bash
+./osmo_scripts/start.sh \
+  --enable-wandb \
+  --wandb-project nerd-newton \
+  --wandb-exp-name anymal-native-v6 \
+  --wandb-entity <team-or-user>
+```
+
+What W&B receives when enabled:
+
+- the same scalar metrics as TensorBoard,
+- hyperparameters from the trainer config panel,
+- `cfg.yaml` as an artifact,
+- **best** checkpoints only (`best_valid_*`, `best_eval_model`) via `wandb.save`,
+- stdout/stderr from the **training subprocess** (epoch logs, grad info, etc.).
+
+What W&B does **not** receive automatically:
+
+- periodic `model_epoch{N}.pt` checkpoints,
+- dataset-generation logs from earlier in `run_experiment.py`,
+- `entry.log` / `main_scripts.log` (those stay in NV-Datasets output upload).
+
+Disable checkpoint uploads with `--no-wandb-save-checkpoints` on the training CLI,
+or pass that through `run_experiment.py` when invoking it directly.
+
 ### Local Utility Scripts
 
 This folder also includes local helpers for NV-Datasets:

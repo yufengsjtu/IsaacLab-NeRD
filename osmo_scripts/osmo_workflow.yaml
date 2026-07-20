@@ -33,6 +33,11 @@ workflow:
       NVDATASET_OUTPUT_DATASET: "{{ nvdataset_output_dataset }}"
       NVDATASET_OUTPUT_DESCRIPTION: "{{ nvdataset_output_description }}"
       NVDATASET_OUTPUT_DIR: "{{ workflow_name }}"
+      ENABLE_WANDB: "{{ enable_wandb }}"
+      WANDB_PROJECT_NAME: "{{ wandb_project_name }}"
+      WANDB_EXP_NAME: "{{ wandb_exp_name }}"
+      WANDB_ENTITY: "{{ wandb_entity }}"
+      WANDB_API_KEY: "{{ wandb_api_key }}"
     command:
     - /bin/bash
     args:
@@ -70,6 +75,11 @@ default-values:
   nvdataset_data_description: IsaacLab-NeRD generated HDF5 datasets.
   nvdataset_output_dataset: IsaacLab-NeRD-Output
   nvdataset_output_description: IsaacLab-NeRD OSMO training outputs.
+  enable_wandb: "false"
+  wandb_project_name: nerd-newton
+  wandb_exp_name: ""
+  wandb_entity: ""
+  wandb_api_key: ""
   init_sh_localpath: ./init.sh
   entrypoint_localpath: ./entrypoint.sh
   nvdataset_io_localpath: ./lib/nvdataset_io.py

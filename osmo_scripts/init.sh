@@ -21,4 +21,11 @@ if ! python3 -c "import tensorboard" 2>/dev/null; then
 fi
 python3 -m tensorboard.main --help >/dev/null
 
+if [[ "${ENABLE_WANDB:-false}" == "true" || "${ENABLE_WANDB:-0}" == "1" ]]; then
+    if ! python3 -c "import wandb" 2>/dev/null; then
+        $PIP wandb
+    fi
+    python3 -c "import wandb"
+fi
+
 echo "=== init.sh DONE ==="

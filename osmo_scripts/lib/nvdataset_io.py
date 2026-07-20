@@ -77,6 +77,20 @@ def _cache_dataset(dataset, output_dir: Path, prefix: str = ""):
 
 def _cache_dataset_prefix(dataset, temp_dir: Path, prefix: str) -> bool:
     """Try prefix-aware SDK signatures, returning whether one is supported."""
+    try:
+        import nvdataset
+
+        filters = [
+            nvdataset.types.Filter(
+                op=nvdataset.types.FilterOperator.STARTS_WITH,
+                field=nvdataset.types.Field(name="key", value=prefix),
+            )
+        ]
+        dataset.cache_local(str(temp_dir), filters=filters)
+        return True
+    except (AttributeError, TypeError):
+        pass
+
     for kwargs in ({"prefix": prefix}, {"path": prefix}, {"dataset_path": prefix}):
         try:
             dataset.cache_local(str(temp_dir), **kwargs)

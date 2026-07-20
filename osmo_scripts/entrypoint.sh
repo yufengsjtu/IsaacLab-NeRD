@@ -14,6 +14,7 @@ DATASET_CACHE_MODE="${DATASET_CACHE_MODE:-auto}"
 
 export OUTPUT_LOCAL_PATH
 export NGC_API_KEY="${NGC_API_KEY:-}"
+export WANDB_API_KEY="${WANDB_API_KEY:-}"
 
 write_shell_exports() {
     {
@@ -101,6 +102,11 @@ download_code() {
 }
 
 download_data() {
+    if [[ "$DATASET_CACHE_MODE" == "off" ]]; then
+        echo "Dataset cache mode is off; skipping NV-Datasets input download."
+        DATASET_INPUT_PATH=""
+        return
+    fi
     if [[ -z "${NVDATASET_DATA_DATASET:-}" ]]; then
         DATASET_INPUT_PATH=""
         return
@@ -163,11 +169,25 @@ run_experiment() {
     )
 
     if [[ -n "${DATASET_INPUT_PATH:-}" ]]; then
+        args+=(--dataset-input-path "$DATASET_INPUT_PATH")
+    fi
+    if [[ -n "${NVDATASET_DATA_DATASET:-}" ]]; then
         args+=(
-            --dataset-input-path "$DATASET_INPUT_PATH"
-            --nvdataset-data-dataset "${NVDATASET_DATA_DATASET:-}"
-            --nvdataset-data-description "${NVDATASET_DATA_DESCRIPTION:-}"
+          --nvdataset-data-dataset "$NVDATASET_DATA_DATASET"
+          --nvdataset-data-description "${NVDATASET_DATA_DESCRIPTION:-}"
         )
+    fi
+    if [[ "${ENABLE_WANDB:-false}" == "true" || "${ENABLE_WANDB:-0}" == "1" ]]; then
+        args+=(--enable-wandb)
+        if [[ -n "${WANDB_PROJECT_NAME:-}" ]]; then
+            args+=(--wandb-project-name "$WANDB_PROJECT_NAME")
+        fi
+        if [[ -n "${WANDB_EXP_NAME:-}" ]]; then
+            args+=(--wandb-exp-name "$WANDB_EXP_NAME")
+        fi
+        if [[ -n "${WANDB_ENTITY:-}" ]]; then
+            args+=(--wandb-entity "$WANDB_ENTITY")
+        fi
     fi
 
     cd "$PROJECT_ROOT"

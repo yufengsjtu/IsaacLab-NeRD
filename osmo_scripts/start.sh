@@ -27,9 +27,15 @@ OSMO_MEMORY_OVERRIDE=""
 OSMO_STORAGE_OVERRIDE=""
 OSMO_PLATFORM_OVERRIDE=""
 OSMO_POOL_OVERRIDE=""
+OSMO_PRIORITY_OVERRIDE=""
 
 NGC_API_KEY="${NGC_API_KEY:-}"
 NVDATASET_TENANTID="${NVDATASET_TENANTID:-}"
+ENABLE_WANDB="${ENABLE_WANDB:-0}"
+WANDB_API_KEY="${WANDB_API_KEY:-}"
+WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-nerd-newton}"
+WANDB_EXP_NAME="${WANDB_EXP_NAME:-}"
+WANDB_ENTITY="${WANDB_ENTITY:-}"
 
 usage() {
     cat <<'EOF'
@@ -50,6 +56,11 @@ Common options:
   --storage SIZE             Override preset OSMO storage resource
   --platform NAME            Override preset OSMO platform
   --pool NAME                OSMO pool passed to validate and submit
+  --priority LEVEL           Submit priority: HIGH, NORMAL, or LOW
+  --enable-wandb             Enable Weights & Biases logging in the OSMO pod
+  --wandb-project NAME       W&B project (default: nerd-newton)
+  --wandb-exp-name NAME      W&B run name (default: workflow/dataset subdir)
+  --wandb-entity NAME        Optional W&B entity or team
   --refresh-credential       Reset the OSMO generic credential before submit
   --workflow-file PATH       Override osmo_workflow.yaml path
   -- <osmo-options>          Forward extra OSMO options such as --pool to validate and submit
@@ -57,6 +68,7 @@ Common options:
 Credentials:
   NGC_API_KEY
   NVDATASET_TENANTID
+  WANDB_API_KEY              Required when using --enable-wandb
 EOF
 }
 
@@ -131,6 +143,26 @@ while (($#)); do
             OSMO_POOL_OVERRIDE="${2:?Missing value for --pool}"
             shift 2
             ;;
+        --priority)
+            OSMO_PRIORITY_OVERRIDE="${2:?Missing value for --priority}"
+            shift 2
+            ;;
+        --enable-wandb)
+            ENABLE_WANDB=1
+            shift
+            ;;
+        --wandb-project)
+            WANDB_PROJECT_NAME="${2:?Missing value for --wandb-project}"
+            shift 2
+            ;;
+        --wandb-exp-name)
+            WANDB_EXP_NAME="${2:?Missing value for --wandb-exp-name}"
+            shift 2
+            ;;
+        --wandb-entity)
+            WANDB_ENTITY="${2:?Missing value for --wandb-entity}"
+            shift 2
+            ;;
         --credential)
             NVDATASET_CREDENTIAL="${2:?Missing value for --credential}"
             shift 2
@@ -165,6 +197,10 @@ if [[ -z "$NGC_API_KEY" ]]; then
 fi
 if [[ -z "$NVDATASET_TENANTID" ]]; then
     echo "[FATAL] Set NVDATASET_TENANTID before running this script." >&2
+    exit 2
+fi
+if [[ "$ENABLE_WANDB" == "1" && -z "$WANDB_API_KEY" ]]; then
+    echo "[FATAL] Set WANDB_API_KEY before using --enable-wandb." >&2
     exit 2
 fi
 
@@ -279,9 +315,22 @@ SUBMIT_ARGS=(
     "nvdataset_output_dataset=$NVDATASET_OUTPUT_DATASET"
     "nvdataset_output_description=$NVDATASET_OUTPUT_DESCRIPTION"
 )
+if [[ "$ENABLE_WANDB" == "1" ]]; then
+    SUBMIT_ARGS+=(
+        "enable_wandb=true"
+        "wandb_project_name=$WANDB_PROJECT_NAME"
+        "wandb_exp_name=$WANDB_EXP_NAME"
+        "wandb_entity=$WANDB_ENTITY"
+        "wandb_api_key=$WANDB_API_KEY"
+    )
+fi
 OSMO_RESOURCE_ARGS=()
 if [[ -n "$OSMO_POOL_OVERRIDE" ]]; then
     OSMO_RESOURCE_ARGS+=(--pool "$OSMO_POOL_OVERRIDE")
+fi
+OSMO_SUBMIT_ONLY_ARGS=()
+if [[ -n "$OSMO_PRIORITY_OVERRIDE" ]]; then
+    OSMO_SUBMIT_ONLY_ARGS+=(--priority "$OSMO_PRIORITY_OVERRIDE")
 fi
 
 echo "=== Resolved OSMO resources: gpu=$OSMO_NUM_GPU cpu=$OSMO_NUM_CPU memory=$OSMO_MEMORY storage=$OSMO_STORAGE platform=$OSMO_PLATFORM pool=${OSMO_POOL_OVERRIDE:-<default>} ==="
@@ -290,4 +339,9 @@ echo "=== Validating OSMO workflow ==="
 osmo workflow validate "${SUBMIT_ARGS[@]}" "${OSMO_RESOURCE_ARGS[@]}" "${OSMO_ARGS[@]}" -- "$WORKFLOW_FILE"
 
 echo "=== Submitting OSMO workflow ==="
-osmo workflow submit "${SUBMIT_ARGS[@]}" "${OSMO_RESOURCE_ARGS[@]}" "${OSMO_ARGS[@]}" -- "$WORKFLOW_FILE"
+osmo workflow submit \
+    "${SUBMIT_ARGS[@]}" \
+    "${OSMO_RESOURCE_ARGS[@]}" \
+    "${OSMO_SUBMIT_ONLY_ARGS[@]}" \
+    "${OSMO_ARGS[@]}" \
+    -- "$WORKFLOW_FILE"
