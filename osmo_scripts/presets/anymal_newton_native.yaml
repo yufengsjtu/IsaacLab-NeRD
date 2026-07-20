@@ -36,7 +36,7 @@ experiment:
   trajectory_length: 400
   write_chunk_transitions: 5000000
   update_dataset_statistics: true
-  policy_checkpoint: ./pretrained/control_policy/anymal_c_flat_terrain/model_499.pt
+  policy_checkpoint: ./pretrained/control_policy/anymal_c_flat_terrain/model_299.pt
   dataset_specs:
     - filename: dataset_train.hdf5
       seed: 0
