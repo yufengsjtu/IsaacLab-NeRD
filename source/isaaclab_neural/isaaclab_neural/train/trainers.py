@@ -178,6 +178,8 @@ class VanillaTrainer:
             if self.is_main_process:
                 with open(os.path.join(self.log_dir, "cfg.yaml"), "w") as cfg_file:
                     yaml.dump(cfg, cfg_file)
+                if self.logger.wandb:
+                    self.logger.log_text_file(os.path.join(self.log_dir, "cfg.yaml"), "training_cfg")
 
             self._init_evaluator(algo_cfg, cli_cfg)
 
@@ -285,7 +287,13 @@ class VanillaTrainer:
         if self.is_main_process:
             self.logger.init_tensorboard(self.summary_log_dir)
         if self.is_main_process and cli_cfg["enable_wandb"]:
-            self.logger.init_wandb(wandb_project=cli_cfg["wandb_project_name"], wandb_name=cli_cfg["wandb_exp_name"])
+            self.logger.init_wandb(
+                wandb_project=cli_cfg["wandb_project_name"],
+                wandb_name=cli_cfg["wandb_exp_name"],
+                wandb_entity=cli_cfg.get("wandb_entity"),
+                config=self._wandb_config(),
+                save_checkpoints=cli_cfg.get("wandb_save_checkpoints", True),
+            )
 
         self.save_interval = cli_cfg.get("save_interval", 50)
         self.log_interval = cli_cfg.get("log_interval", 1)
@@ -293,6 +301,25 @@ class VanillaTrainer:
             Path(self.model_log_dir, "saved_best_eval_model_epochs.txt").touch()
             for valid_dataset_name in self.valid_datasets:
                 Path(self.model_log_dir, f"saved_best_valid_{valid_dataset_name}_model_epochs.txt").touch()
+
+    def _wandb_config(self) -> dict[str, Any]:
+        """Return a compact config dict for W&B."""
+        env_cfg = self.cfg.get("env", {})
+        algo_cfg = self.cfg.get("algorithm", {})
+        solver_cfg = env_cfg.get("neural_solver_cfg", {})
+        return {
+            "env_name": env_cfg.get("env_name"),
+            "robot_name": env_cfg.get("robot_name"),
+            "num_envs": env_cfg.get("num_envs"),
+            "contact_mode": solver_cfg.get("contact_mode"),
+            "num_contacts_per_env": solver_cfg.get("num_contacts_per_env"),
+            "algorithm": algo_cfg.get("name"),
+            "batch_size": algo_cfg.get("batch_size"),
+            "num_epochs": algo_cfg.get("num_epochs"),
+            "lr_start": algo_cfg.get("optimizer", {}).get("lr_start"),
+            "lr_end": algo_cfg.get("optimizer", {}).get("lr_end"),
+            "lr_schedule": algo_cfg.get("optimizer", {}).get("lr_schedule"),
+        }
 
     def _init_evaluator(self, algo_cfg: dict[str, Any], cli_cfg: dict[str, Any]) -> None:
         eval_cfg = algo_cfg.get("eval", {})
@@ -803,13 +830,16 @@ class VanillaTrainer:
             training_state["contact_rms_counts"] = {
                 key: value.detach().cpu() for key, value in self.contact_rms_counts.items()
             }
+        checkpoint_path = os.path.join(self.model_log_dir, f"{filename}.pt")
         save_checkpoint(
-            path=os.path.join(self.model_log_dir, f"{filename}.pt"),
+            path=checkpoint_path,
             model=self.neural_model_unwrapped,
             robot_name=self.neural_env.robot_name,
             cfg=self.cfg,
             **training_state,
         )
+        if self.is_main_process and self.logger.wandb and filename and "best" in filename:
+            self.logger.log_checkpoint(checkpoint_path)
 
 
 class SequenceModelTrainer(VanillaTrainer):

@@ -29,6 +29,13 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-wandb", action="store_true", help="Enable Weights & Biases logging.")
     parser.add_argument("--wandb-project-name", type=str, default="nerd-newton")
     parser.add_argument("--wandb-exp-name", type=str, default=None)
+    parser.add_argument("--wandb-entity", type=str, default=None, help="Optional W&B entity or team name.")
+    parser.add_argument(
+        "--wandb-save-checkpoints",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Upload best checkpoints to the active W&B run.",
+    )
     parser.add_argument("--skip-check-log-override", action="store_true")
     parser.add_argument("--cfg-overrides", default="", type=str, help="Pairs of dotted config keys and values.")
 
