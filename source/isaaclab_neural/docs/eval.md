@@ -174,6 +174,48 @@ Passing `--contact-mode newton_native --num-contacts-per-env 64` makes the CLI o
   presets=newton_mjwarp
 ```
 
+## Anymal-C Rough Newton Native
+
+Rough eval should use the rough NeRD task, a rough-native checkpoint, and a
+matching rough RSL-RL policy checkpoint. Do not evaluate the rough checkpoint
+through the flat NeRD task.
+
+### Zero-Action Smoke Eval
+
+```bash
+./isaaclab.sh -p -m isaaclab_neural.eval.eval \
+  --task Isaac-Velocity-Rough-Anymal-C-NeRD-v0 \
+  --checkpoint ./data/trained_models/Anymal-C-Rough-Native/nn/final_model.pt \
+  --num-envs 16 \
+  --num-steps 32 \
+  --seed 0 \
+  --contact-mode newton_native \
+  --num-contacts-per-env 64 \
+  --headless \
+  presets=newton_mjwarp
+```
+
+### Rough Policy Eval
+
+```bash
+./isaaclab.sh -p -m isaaclab_neural.eval.eval \
+  --task Isaac-Velocity-Rough-Anymal-C-NeRD-v0 \
+  --checkpoint ./data/trained_models/Anymal-C-Rough-Native/nn/final_model.pt \
+  --policy-checkpoint /path/to/rsl_rl/Anymal-C-Velocity-Rough/model.pt \
+  --policy-agent rsl_rl_cfg_entry_point \
+  --num-envs 16 \
+  --num-steps 400 \
+  --seed 0 \
+  --contact-mode newton_native \
+  --num-contacts-per-env 64 \
+  --headless \
+  presets=newton_mjwarp
+```
+
+For the negative/control baseline, run the flat-native checkpoint on the same
+rough task and compare the rollout video/reward profile against the rough-native
+checkpoint.
+
 ## Video Recording
 
 Add these flags to any eval command:

@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 env:
-  env_name: Anymal-C-Native
+  env_name: Anymal-C-Rough-Native
   num_envs: 512
   neural_solver_cfg:
     name: TransformerNeuralSolver
@@ -41,12 +41,12 @@ algorithm:
     betas: [0.9, 0.999]
 
   dataset:
-    train_dataset_path: ./data/datasets/Anymal-C-Native/dataset_train.hdf5
+    train_dataset_path: ./data/datasets/Anymal-C-Rough-Native/dataset_train.hdf5
     valid_datasets:
-      exp_trajectory: ./data/datasets/Anymal-C-Native/dataset_valid.hdf5
-      zero_action_trajectory: ./data/datasets/Anymal-C-Native/dataset_zero_action_valid.hdf5
-      lstm_actuator_zero_action_trajectory: ./data/datasets/Anymal-C-Native/dataset_lstm_actuator_zero_action_valid.hdf5
-      lstm_actuator_policy_trajectory: ./data/datasets/Anymal-C-Native/dataset_lstm_actuator_policy_valid.hdf5
+      exp_trajectory: ./data/datasets/Anymal-C-Rough-Native/dataset_valid.hdf5
+      zero_action_trajectory: ./data/datasets/Anymal-C-Rough-Native/dataset_zero_action_valid.hdf5
+      lstm_actuator_zero_action_trajectory: ./data/datasets/Anymal-C-Rough-Native/dataset_lstm_actuator_zero_action_valid.hdf5
+      lstm_actuator_policy_trajectory: ./data/datasets/Anymal-C-Rough-Native/dataset_lstm_actuator_policy_valid.hdf5
     max_capacity: 20000000
     load_mode: eager
     num_data_workers: 8
@@ -56,8 +56,8 @@ algorithm:
     action_mode: joint_f
     rollout_horizon: 10
     num_rollouts: 1024
-    # dataset_path: ./data/datasets/Anymal-C-Native/dataset_zero_action_valid.hdf5
-    dataset_path: ./data/datasets/Anymal-C-Native/dataset_lstm_actuator_policy_valid.hdf5
+    # dataset_path: ./data/datasets/Anymal-C-Rough-Native/dataset_zero_action_valid.hdf5
+    dataset_path: ./data/datasets/Anymal-C-Rough-Native/dataset_lstm_actuator_policy_valid.hdf5
 
 inputs:
   low_dim: [

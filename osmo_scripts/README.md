@@ -36,6 +36,9 @@ The launcher supports declarative presets in `osmo_scripts/presets/`:
 
 - `anymal_newton_native`: Anymal-C with Newton native contacts,
   `num_contacts_per_env: 64`, and `penetration_priority` contact packing.
+- `anymal_rough_newton_native`: Anymal-C rough terrain with Newton native
+  contacts, rough dataset-generation/deployment/NeRD task IDs, and separate
+  `Anymal-C-Rough-Native` dataset paths.
 - `anymal_fixed_ground`: Anymal-C with fixed-ground abstract contacts.
 - `cartpole_fixed_ground`: Cartpole with fixed-ground contacts.
 
@@ -187,6 +190,15 @@ Submit Anymal fixed-ground:
 
 ```bash
 ./osmo_scripts/start.sh --preset anymal_fixed_ground --pool <osmo-pool>
+```
+
+Submit the full rough Newton-native baseline:
+
+```bash
+./osmo_scripts/start.sh \
+  --preset anymal_rough_newton_native \
+  --dataset-cache-mode off \
+  --pool <osmo-pool>
 ```
 
 Submit Cartpole fixed-ground:

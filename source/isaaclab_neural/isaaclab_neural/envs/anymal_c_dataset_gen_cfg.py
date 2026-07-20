@@ -10,15 +10,19 @@ from __future__ import annotations
 from copy import deepcopy
 
 import isaaclab.envs.mdp as base_mdp
-import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils.configclass import configclass
-from isaaclab_assets.robots.anymal import ANYDRIVE_3_SIMPLE_ACTUATOR_CFG
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
+
+import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c.flat_env_cfg import AnymalCFlatEnvCfg
+from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c.rough_env_cfg import AnymalCRoughEnvCfg
+
+from isaaclab_assets.robots.anymal import ANYDRIVE_3_SIMPLE_ACTUATOR_CFG
+
 
 @configclass
 class ObservationsCfg:
@@ -49,6 +53,7 @@ class ObservationsCfg:
             self.concatenate_terms = True
 
     policy: PolicyCfg = PolicyCfg()
+
 
 ROOT_HEIGHT_MINIMUM = 0.4
 KP_RANGE = (30.0, 200.0)
@@ -93,6 +98,42 @@ class AnymalCDatasetGenFlatEnvCfg(AnymalCFlatEnvCfg):
         # DCMotor default; restore the preset-resolved armature (newton=0.01) set
         # by super() so data-gen physics matches the deployment env
         # (Anymal-C-Velocity-Flat), which NeRD is trained against.
+        armature = self.scene.robot.actuators["legs"].armature
+        self.scene.robot.actuators["legs"] = deepcopy(ANYDRIVE_3_SIMPLE_ACTUATOR_CFG)
+        self.scene.robot.actuators["legs"].armature = armature
+
+
+@configclass
+class AnymalCDatasetGenRoughEnvCfg(AnymalCRoughEnvCfg):
+    """Anymal-C rough config for NeRD dataset generation.
+
+    This keeps the upstream rough-terrain observation and terrain curriculum
+    setup so policy-driven collection can use rough-terrain policies, while
+    replacing the actuator with a simple explicit actuator for data generation.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Disable contact-sensor related reward/termination terms (not working with NeRD solver)
+        setattr(self.terminations, "base_contact", None)
+        setattr(self.rewards, "feet_air_time", None)
+        setattr(self.rewards, "undesired_contacts", None)
+        # Disable random pushing event
+        setattr(self.events, "push_robot", None)
+
+        # Add root-height termination
+        setattr(
+            self.terminations,
+            "low_root_height",
+            DoneTerm(
+                func=base_mdp.root_height_below_minimum,
+                params={
+                    "minimum_height": ROOT_HEIGHT_MINIMUM,
+                    "asset_cfg": SceneEntityCfg("robot"),
+                },
+            ),
+        )
+
         armature = self.scene.robot.actuators["legs"].armature
         self.scene.robot.actuators["legs"] = deepcopy(ANYDRIVE_3_SIMPLE_ACTUATOR_CFG)
         self.scene.robot.actuators["legs"].armature = armature

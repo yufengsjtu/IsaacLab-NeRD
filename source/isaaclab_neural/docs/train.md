@@ -87,8 +87,14 @@ export NVDATASET_TENANTID=<your-tenant-id>
 ```
 
 更多 OSMO/NV-Datasets 使用方式见 `osmo_scripts/README.md`。
+如果需要同步到 Weights & Biases，使用 `osmo_scripts/start.sh --enable-wandb`
+并设置 `WANDB_API_KEY`；详细参数见 `osmo_scripts/README.md` 的 W&B 部分。
 
 ## Memory and Storage Notes
+
+数据生成可以通过 `--write-chunk-transitions` 分块写入 HDF5。每个 chunk
+会先校验完整 schema、shape 和 dtype；追加写入失败时会回滚已 resize 的 dataset，
+避免留下部分写入的 HDF5 文件。
 
 `SequenceModelTrainer` 使用 `TrajectoryDataset`，训练初始化时会把
 `algorithm.dataset.max_capacity` 对应的数据从 HDF5 加载到 CPU 内存中，而不是每个
@@ -325,7 +331,23 @@ states_frame: body
 anchor_frame_step: every
 ```
 
-Native 数据集记录 Newton collision pipeline 产生的动态 contacts，并打包成固定 64 个 slots。`contact_masks` 表示 slot 是否被 native contact 占用。当前 native 输入包含 `contact_points_0` 和 `contact_points_1`；两者采集时保存为 world frame，训练 preprocessing 时转换到 body frame。
+Native 数据集记录 Newton collision pipeline 产生的动态 contacts，并打包成固定
+64 个 slots。打包默认使用 `penetration_priority`，即优先保留 signed surface
+separation 最小的接触，并用几何信息做确定性 tie-break。
+
+Native contact 输入的约定是：
+
+- contact side 会 canonicalize 为 primary robot articulation first；
+- `contact_normals` 从 robot side 指向另一侧；
+- `contact_depths` 存 signed surface separation，而不是旧的 raw normal distance；
+- `contact_masks` 表示 slot 是否被 native contact 占用；
+- inactive slots 会在 preprocessing 和模型输入边界再次清零，避免归一化或噪声把 padding
+  变成非零特征；
+- contact RMS 统计只使用 `contact_masks=True` 的有效 contacts；样本过少的 slot 会回退到
+  pooled field statistics。
+
+当前 native 输入包含 `contact_points_0` 和 `contact_points_1`；两者采集时保存为
+world frame，训练 preprocessing 时转换到 body frame。
 
 ### Generate Train Dataset
 

@@ -4,8 +4,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 workflow:
-  base_name: anymal-c-newton-native
-  dataset_subdir: anymal-c-newton-native
+  base_name: anymal-c-rough-newton-native
+  dataset_subdir: anymal-c-rough-newton-native
 
 resources:
   num_gpu: 8
@@ -15,12 +15,12 @@ resources:
   platform: ovx-l40s
 
 experiment:
-  env_name: Anymal-C-Native
+  env_name: Anymal-C-Rough-Native
   robot_name: Anymal-C
-  data_gen_task: Isaac-Velocity-Flat-Anymal-C-Dataset-Gen-v0
-  deployment_task: Isaac-Velocity-Flat-Anymal-C-v0
-  train_task: Isaac-Velocity-Flat-Anymal-C-NeRD-v0
-  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_native.yaml
+  data_gen_task: Isaac-Velocity-Rough-Anymal-C-Dataset-Gen-v0
+  deployment_task: Isaac-Velocity-Rough-Anymal-C-v0
+  train_task: Isaac-Velocity-Rough-Anymal-C-NeRD-v0
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native.yaml
   train_preset: newton_mjwarp
   num_gpus: 8
   contact_mode: newton_native
@@ -36,7 +36,7 @@ experiment:
   trajectory_length: 400
   write_chunk_transitions: 5000000
   update_dataset_statistics: true
-  policy_checkpoint: ./pretrained/control_policy/anymal_c_flat_terrain/model_499.pt
+  policy_checkpoint: ./pretrained/control_policy/anymal_c_rough_terrain/model_1499.pt
   dataset_specs:
     - filename: dataset_train.hdf5
       seed: 0
