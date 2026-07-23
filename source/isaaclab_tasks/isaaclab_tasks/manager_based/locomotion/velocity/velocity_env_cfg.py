@@ -31,6 +31,7 @@ from isaaclab.utils.configclass import configclass
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
 
 import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
+from isaaclab_tasks.manager_based.locomotion.velocity.mdp.terminations import unstable_articulation_state
 from isaaclab_tasks.utils import PresetCfg, preset
 
 ##
@@ -51,8 +52,8 @@ class RoughPhysicsCfg(PresetCfg):
     default = PhysxCfg(gpu_max_rigid_patch_count=10 * 2**15)
     newton_mjwarp = NewtonCfg(
         solver_cfg=MJWarpSolverCfg(
-            njmax=200,
-            nconmax=100,
+            njmax=512,
+            nconmax=256,
             cone="pyramidal",
             impratio=1.0,
             integrator="implicitfast",
@@ -321,6 +322,15 @@ class TerminationsCfg:
     """Termination terms for the MDP."""
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    unstable_state = DoneTerm(
+        func=unstable_articulation_state,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "root_lin_vel_limit": 50.0,
+            "root_ang_vel_limit": 100.0,
+            "joint_vel_limit": 150.0,
+        },
+    )
     base_contact = DoneTerm(
         func=mdp.illegal_contact,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="base"), "threshold": 1.0},
