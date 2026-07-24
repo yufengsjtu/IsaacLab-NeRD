@@ -133,6 +133,8 @@ class DataGenerationAdapter:
                 num_contacts_per_env=num_contacts_per_env,
                 device=str(self.device),
                 packing_policy=solver_cfg.contact_packing_policy,
+                contact_representation=getattr(solver_cfg, "contact_representation", "flat"),
+                max_contact_tokens=int(getattr(solver_cfg, "max_contact_tokens", 128)),
             )
         else:
             raise ValueError(f"Unsupported contact_mode: {self.contact_mode}")
@@ -147,6 +149,8 @@ class DataGenerationAdapter:
             num_contacts_per_env=num_contacts_per_env,
             contact_mode=self.contact_mode,
             contact_adapter=self.contact_adapter,
+            contact_representation=getattr(self.solver_cfg, "contact_representation", "flat"),
+            max_contact_tokens=int(getattr(self.solver_cfg, "max_contact_tokens", 0)),
         )
         self.sync()
 

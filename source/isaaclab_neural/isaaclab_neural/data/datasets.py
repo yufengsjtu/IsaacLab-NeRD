@@ -218,11 +218,21 @@ class BatchTransitionDataset:
                     continue
 
                 data = _read_dataset_array(data_group, key)
-                data = data.reshape(total_transitions, -1)
-                self.dataset[key] = _torch_tensor(
-                    data[: self.dataset_length * self.batch_size].reshape(self.dataset_length, self.batch_size, -1),
-                    device=self.device,
-                )
+                usable = self.dataset_length * self.batch_size
+                if key == "contact_tokens" and data.ndim >= 4:
+                    # Preserve ``[..., K, 17]`` for set encoding.
+                    token_shape = data.shape[-2:]
+                    flat = data.reshape(-1, *token_shape)[:usable]
+                    self.dataset[key] = _torch_tensor(
+                        flat.reshape(self.dataset_length, self.batch_size, *token_shape),
+                        device=self.device,
+                    )
+                else:
+                    data = data.reshape(total_transitions, -1)
+                    self.dataset[key] = _torch_tensor(
+                        data[:usable].reshape(self.dataset_length, self.batch_size, -1),
+                        device=self.device,
+                    )
 
     def __len__(self) -> int:
         """Return the number of batches."""
@@ -239,7 +249,7 @@ class BatchTransitionDataset:
         for batch_index in range(self.batch_size):
             permutation = torch.randperm(self.dataset_length, device=self.device)
             for value in self.dataset.values():
-                value[:, batch_index, :] = value[permutation, batch_index, :]
+                value[:, batch_index] = value[permutation, batch_index]
 
 
 class LazyBatchTransitionDataset:
@@ -384,7 +394,11 @@ class TrajectoryDataset(Dataset):
                     continue
 
                 data = _read_dataset_array(data_group, key, slice(None, num_trajectories))
-                self.dataset[key] = data.reshape(data.shape[0], data.shape[1], -1)
+                # Keep contact token set axes ``[..., K, 17]``; flatten only rank-3 fields.
+                if key == "contact_tokens" and data.ndim >= 4:
+                    self.dataset[key] = data
+                else:
+                    self.dataset[key] = data.reshape(data.shape[0], data.shape[1], -1)
 
             if traj_lengths is None:
                 traj_lengths = np.full(num_trajectories, num_transitions_per_trajectory, dtype="int32")

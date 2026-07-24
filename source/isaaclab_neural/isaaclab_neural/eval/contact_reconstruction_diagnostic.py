@@ -95,20 +95,19 @@ def load_dataset_batch(
     path = Path(dataset_path).expanduser()
     with h5py.File(path, "r", swmr=True, libver="latest") as dataset_file:
         data_group = dataset_file["data"]
-        required = {
-            "states",
-            "next_states",
-            "joint_f",
-            "root_body_q",
-            "gravity_dir",
-            "contact_masks",
-            "contact_normals",
-            "contact_depths",
-            "contact_points_0",
-            "contact_points_1",
-            "contact_thicknesses_0",
-            "contact_thicknesses_1",
-        }
+        base_required = {"states", "next_states", "joint_f", "root_body_q", "gravity_dir"}
+        if "contact_tokens" in data_group:
+            required = base_required | {"contact_tokens"}
+        else:
+            required = base_required | {
+                "contact_masks",
+                "contact_normals",
+                "contact_depths",
+                "contact_points_0",
+                "contact_points_1",
+                "contact_thicknesses_0",
+                "contact_thicknesses_1",
+            }
         missing = sorted(required - set(data_group.keys()))
         if missing:
             raise ValueError(f"Dataset is missing required diagnostic fields: {missing}.")
@@ -234,6 +233,30 @@ def contact_metrics(
     }
 
 
+def contact_token_metrics(
+    dataset_inputs: dict[str, torch.Tensor],
+    runtime_inputs: dict[str, torch.Tensor],
+) -> dict[str, float]:
+    """Compare valid contact token counts and geometry for the latest frame."""
+    dataset_tokens = dataset_inputs["contact_tokens"][:, -1]
+    runtime_tokens = runtime_inputs["contact_tokens"][:, -1]
+    dataset_valid = dataset_tokens[..., 0] > 0.5
+    runtime_valid = runtime_tokens[..., 0] > 0.5
+    geometry_slice = slice(4, 17)
+    if (dataset_valid & runtime_valid).any():
+        geometry_diff = dataset_tokens[..., geometry_slice] - runtime_tokens[..., geometry_slice]
+        geometry_rmse = float(geometry_diff[dataset_valid & runtime_valid].square().mean().sqrt())
+    else:
+        geometry_rmse = float("nan")
+    metrics = {
+        "valid_count_abs_diff_mean": float((dataset_valid.sum(dim=-1) - runtime_valid.sum(dim=-1)).abs().float().mean()),
+        "geometry_rmse": geometry_rmse,
+    }
+    if "contact_token_overflow" in runtime_inputs:
+        metrics["runtime_overflow_max"] = float(runtime_inputs["contact_token_overflow"][:, -1].max())
+    return metrics
+
+
 def input_difference_metrics(
     dataset_inputs: dict[str, torch.Tensor],
     runtime_inputs: dict[str, torch.Tensor],
@@ -291,7 +314,14 @@ def run_diagnostic(env, args: argparse.Namespace) -> None:
         device=str(solver.torch_device),
         history_length=int(getattr(solver, "num_states_history", 1)),
     )
-    if dataset_raw["contact_masks"].shape[-1] != solver.num_contacts_per_env:
+    if "contact_tokens" in dataset_raw:
+        max_tokens = dataset_raw["contact_tokens"].shape[-2]
+        runtime_capacity = int(getattr(solver, "max_contact_tokens", 0) or solver.num_contacts_per_env)
+        if max_tokens != runtime_capacity:
+            raise ValueError(
+                f"Dataset contact tokens ({max_tokens}) do not match runtime capacity ({runtime_capacity})."
+            )
+    elif dataset_raw["contact_masks"].shape[-1] != solver.num_contacts_per_env:
         raise ValueError(
             f"Dataset contact slots ({dataset_raw['contact_masks'].shape[-1]}) do not match "
             f"runtime slots ({solver.num_contacts_per_env})."
@@ -324,12 +354,15 @@ def run_diagnostic(env, args: argparse.Namespace) -> None:
     print_metrics("runtime_reconstructed_prediction", state_error(solver, runtime_prediction, target_next_states))
     print_metrics(
         "contact_comparison",
-        contact_metrics(dataset_processed, runtime_processed, solver.num_contacts_per_env),
+        contact_token_metrics(dataset_processed, runtime_processed)
+        if "contact_tokens" in dataset_processed
+        else contact_metrics(dataset_processed, runtime_processed, solver.num_contacts_per_env),
     )
-    print_metrics(
-        "input_differences",
-        input_difference_metrics(dataset_processed, runtime_processed, solver.num_contacts_per_env),
-    )
+    if "contact_tokens" not in dataset_processed:
+        print_metrics(
+            "input_differences",
+            input_difference_metrics(dataset_processed, runtime_processed, solver.num_contacts_per_env),
+        )
     print_metrics(
         "prediction_difference",
         state_error(solver, runtime_prediction, dataset_prediction),

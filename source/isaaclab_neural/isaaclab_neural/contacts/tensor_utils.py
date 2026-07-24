@@ -107,3 +107,51 @@ def normalize_contact_field(
     """Normalize each contact with independent per-slot channel statistics."""
     reshaped = reshape_contact_field(value, contact_masks)
     return normalizer.normalize(reshaped).reshape_as(value)
+
+
+class ContactTokenMoments:
+    """Accumulate per-channel statistics over valid contact tokens only."""
+
+    def __init__(self, channels: int, device: torch.device | str):
+        from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_CATEGORICAL_CHANNELS
+
+        self.channels = channels
+        self.categorical = set(CONTACT_TOKEN_CATEGORICAL_CHANNELS)
+        self.count = 0.0
+        self.sum = torch.zeros(channels, dtype=torch.float64, device=device)
+        self.square_sum = torch.zeros(channels, dtype=torch.float64, device=device)
+
+    def update(self, contact_tokens: torch.Tensor) -> None:
+        """Update moments from ``[..., max_tokens, contact_dim]`` tensors."""
+        flat = contact_tokens.reshape(-1, self.channels)
+        valid = flat[:, 0] > 0.5
+        if not valid.any():
+            return
+        values = flat[valid].to(torch.float64)
+        self.count += float(valid.sum().item())
+        self.sum += values.sum(dim=0)
+        self.square_sum += values.square().sum(dim=0)
+
+    def finalize(self, device: torch.device | str) -> RunningMeanStd:
+        """Return channel-wise RMS with identity channels pinned to mean=0, std=1."""
+        safe_count = max(self.count, 1.0)
+        mean = self.sum / safe_count
+        variance = (self.square_sum / safe_count - mean.square()).clamp_min(0.0)
+        for channel in self.categorical:
+            mean[channel] = 0.0
+            variance[channel] = 1.0
+        rms = RunningMeanStd(shape=(self.channels,), device=device)
+        rms.mean.copy_(mean.to(dtype=torch.float32, device=device))
+        rms.var.copy_(variance.to(dtype=torch.float32, device=device))
+        rms.count.fill_(self.count)
+        return rms
+
+
+def normalize_contact_tokens(
+    contact_tokens: torch.Tensor,
+    normalizer: RunningMeanStd,
+) -> torch.Tensor:
+    """Normalize valid contact tokens and re-zero padding."""
+    normalized = normalizer.normalize(contact_tokens)
+    valid = contact_tokens[..., 0:1] > 0.5
+    return normalized * valid.to(normalized.dtype)

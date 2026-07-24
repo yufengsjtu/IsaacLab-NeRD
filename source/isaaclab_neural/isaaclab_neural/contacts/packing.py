@@ -14,6 +14,7 @@ ContactPackingPolicy = Literal[
     "force_priority",
     "penetration_priority",
     "random",
+    "body_round_robin_pair_atomic",
 ]
 
 
@@ -60,6 +61,14 @@ def get_contact_order(
         # Native contacts do not always carry forces before solver execution.
         # Fall back to deepest-first, which is deterministic and always available.
         return _penetration_priority_order(raw_contacts)
+
+    if packing_policy == "body_round_robin_pair_atomic":
+        raise ValueError(
+            "Packing policy 'body_round_robin_pair_atomic' is only used by the "
+            "contact_tokens representation inside ContactSetEncoder. For flat "
+            "newton_native packing choose penetration_priority, stable_index, "
+            "random, or force_priority."
+        )
 
     raise ValueError(f"Unsupported contact packing policy: {packing_policy}")
 

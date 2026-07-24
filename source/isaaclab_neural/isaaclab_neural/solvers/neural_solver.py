@@ -53,6 +53,8 @@ class NeuralSolver(SolverBase):
         min_contact_event_threshold: float = None,
         contact_mode: Literal["fixed_ground", "newton_native"] = "fixed_ground",
         contact_adapter: NewtonContactAdapter | None = None,
+        contact_representation: str = "flat",
+        max_contact_tokens: int = 0,
     ):
         """
         Args:
@@ -111,6 +113,8 @@ class NeuralSolver(SolverBase):
         self.joint_f_dim = self.model.joint_f.shape[0] // self.num_envs
         self.num_contacts_per_env = num_contacts_per_env
         self.contact_mode = contact_mode
+        self.contact_representation = contact_representation
+        self.max_contact_tokens = int(max_contact_tokens)
         self.contact_adapter = contact_adapter
         if self.contact_mode == "newton_native" and self.contact_adapter is None:
             raise ValueError("NeuralSolver contact_mode='newton_native' requires a NewtonContactAdapter.")
@@ -391,6 +395,18 @@ class NeuralSolver(SolverBase):
         }
 
     def _empty_contacts(self):
+        from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
+
+        if self.contact_representation == "contact_tokens":
+            max_tokens = self.max_contact_tokens or self.num_contacts_per_env
+            return {
+                "contact_tokens": torch.zeros(
+                    (self.num_envs, max_tokens, CONTACT_TOKEN_DIM),
+                    device=self.torch_device,
+                ),
+                "contact_token_overflow": torch.zeros((self.num_envs,), dtype=torch.long, device=self.torch_device),
+            }
+
         contact_depths = torch.zeros(
             (self.num_envs, self.num_contacts_per_env),
             device=self.torch_device,
@@ -421,6 +437,8 @@ class NeuralSolver(SolverBase):
         }
 
     def process_neural_model_inputs(self, model_inputs):
+        from isaaclab_neural.contacts.contact_set_encoder import transform_contact_tokens_to_body_frame
+
         # convert frame
         (
             model_inputs["states"],
@@ -439,6 +457,13 @@ class NeuralSolver(SolverBase):
             model_inputs.get("gravity_dir", None),
         )
 
+        if "contact_tokens" in model_inputs:
+            model_inputs["contact_tokens"] = transform_contact_tokens_to_body_frame(
+                model_inputs["contact_tokens"],
+                model_inputs["root_body_q"],
+                translation_only=(self.states_frame == "body_translation_only"),
+            )
+
         # post processing
         self.wrap2PI(model_inputs["states"])
         if model_inputs["next_states"] is not None:
@@ -450,7 +475,7 @@ class NeuralSolver(SolverBase):
             model_inputs["states_embedding"] = self.embed_states(model_inputs["states"])
 
         # Apply contact mask: zero features for inactive anchors.
-        if model_inputs["contact_points_1"] is not None:
+        if model_inputs.get("contact_points_1") is not None and "contact_masks" in model_inputs:
             mask = model_inputs["contact_masks"].unsqueeze(-1)  # (B, T, C, 1) bool
             for key in model_inputs.keys():
                 if key.startswith("contact_") and key != "contact_masks":

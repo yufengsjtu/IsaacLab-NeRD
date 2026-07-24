@@ -271,3 +271,20 @@ a machine where this import succeeds:
 Without `--policy-checkpoint`, `eval.py` uses zero actions. This only smoke-tests
 checkpoint loading and environment stepping. To evaluate closed-loop locomotion,
 pass the matching RSL-RL policy checkpoint with `--policy-checkpoint`.
+
+## Contact Token Diagnostics
+
+For native contact-token datasets and checkpoints, use the offline tools below
+before long training runs:
+
+```bash
+./isaaclab.sh -p -m isaaclab_neural.eval.contact_distribution_stats --dataset PATH
+./isaaclab.sh -p -m isaaclab_neural.eval.contact_regime_eval --dataset PATH --overflow-gate
+./isaaclab.sh -p -m isaaclab_neural.eval.contact_reconstruction_diagnostic \
+  --task Isaac-Velocity-Flat-Anymal-C-NeRD-v0 \
+  --checkpoint PATH \
+  --dataset PATH \
+  --num-envs 16
+```
+
+Pass `--overflow-gate` to fail when contact capacity truncates tokens.

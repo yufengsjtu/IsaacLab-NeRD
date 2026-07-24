@@ -35,10 +35,16 @@ experiments. The supported flow is:
 The launcher supports declarative presets in `osmo_scripts/presets/`:
 
 - `anymal_newton_native`: Anymal-C with Newton native contacts,
-  `num_contacts_per_env: 64`, and `penetration_priority` contact packing.
+  flat representation, `num_contacts_per_env: 64`, and
+  `penetration_priority` contact packing.
+- `anymal_newton_native_contact_tokens`: Anymal-C with Newton native
+  directed contact tokens, `max_contact_tokens: 128`, and pair-atomic
+  body-round-robin packing.
 - `anymal_rough_newton_native`: Anymal-C rough terrain with Newton native
   contacts, rough dataset-generation/deployment/NeRD task IDs, and separate
   `Anymal-C-Rough-Native` dataset paths.
+- `anymal_rough_newton_native_contact_tokens`: rough-terrain equivalent with
+  token HDF5 datasets and the contact-token transformer config.
 - `anymal_fixed_ground`: Anymal-C with fixed-ground abstract contacts.
 - `cartpole_fixed_ground`: Cartpole with fixed-ground contacts.
 
@@ -64,6 +70,19 @@ Set this through `start.sh`:
   --pool <osmo-pool>
 ```
 
+For contact-token training:
+
+```bash
+./osmo_scripts/start.sh \
+  --preset anymal_newton_native_contact_tokens \
+  --dataset-cache-mode off \
+  --pool <osmo-pool>
+```
+
+Use `anymal_rough_newton_native_contact_tokens` for rough terrain. Token
+presets use distinct workflow names and dataset cache subdirectories, so they
+cannot accidentally reuse flat HDF5 files.
+
 Cached datasets are searched under several compatible layouts, including
 `<dataset_subdir>/<env_name>/` and `<dataset_subdir>/`.
 
@@ -83,9 +102,12 @@ workflow.
 Contact-related generation options come from each preset:
 
 - `contact_mode`: `fixed_ground` or `newton_native`.
+- `contact_representation`: `flat` or `contact_tokens`.
 - `num_contacts_per_env`: required for native contacts.
+- `max_contact_tokens`: directed token capacity for `contact_tokens`.
 - `contact_packing_policy`: native packing policy such as
-  `penetration_priority`.
+  `penetration_priority`; token presets use
+  `body_round_robin_pair_atomic`.
 - `states_frame`: optional override for dataset generation, used by Cartpole
   fixed-ground to collect world-frame data.
 

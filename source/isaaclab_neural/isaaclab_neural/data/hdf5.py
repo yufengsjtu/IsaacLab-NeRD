@@ -106,7 +106,12 @@ def _flatten_rollouts(rollouts: Mapping) -> dict[str, Any]:
 
 def _validate_rollout_arrays(arrays: Mapping[str, Any]) -> None:
     """Validate required fields and common trajectory dimensions."""
-    required = {"states", "next_states", "joint_f", "contact_depths", "contact_masks"}
+    required = {"states", "next_states", "joint_f"}
+    if "contact_tokens" in arrays:
+        # Body-frame training needs the root pose used by process_neural_model_inputs.
+        required.update({"contact_tokens", "root_body_q", "gravity_dir"})
+    else:
+        required.update({"contact_depths", "contact_masks"})
     missing = sorted(required - set(arrays))
     if missing:
         raise ValueError(f"Rollout data is missing required fields: {missing}.")
@@ -197,7 +202,15 @@ def _update_metadata(data_group: h5py.Group) -> None:
     data_group.attrs["total_transitions"] = states.shape[0] * states.shape[1]
     data_group.attrs["state_dim"] = states.shape[-1]
     data_group.attrs["next_state_dim"] = cast(h5py.Dataset, data_group["next_states"]).shape[-1]
-    data_group.attrs["num_contacts_per_env"] = cast(h5py.Dataset, data_group["contact_depths"]).shape[-1]
+    if "contact_depths" in data_group:
+        data_group.attrs["num_contacts_per_env"] = cast(h5py.Dataset, data_group["contact_depths"]).shape[-1]
+    elif "contact_tokens" in data_group:
+        data_group.attrs["num_contacts_per_env"] = cast(h5py.Dataset, data_group["contact_tokens"]).shape[-2]
+    if "contact_tokens" in data_group:
+        tokens = cast(h5py.Dataset, data_group["contact_tokens"])
+        data_group.attrs["max_contact_tokens"] = tokens.shape[-2]
+        data_group.attrs["contact_token_dim"] = tokens.shape[-1]
+        data_group.attrs["contact_representation"] = "contact_tokens"
     data_group.attrs["joint_f_dim"] = cast(h5py.Dataset, data_group["joint_f"]).shape[-1]
     if "actions" in data_group:
         data_group.attrs["action_dim"] = cast(h5py.Dataset, data_group["actions"]).shape[-1]

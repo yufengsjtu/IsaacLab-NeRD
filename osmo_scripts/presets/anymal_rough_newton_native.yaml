@@ -24,6 +24,7 @@ experiment:
   train_preset: newton_mjwarp
   num_gpus: 8
   contact_mode: newton_native
+  contact_representation: flat
   num_contacts_per_env: 64
   contact_packing_policy: penetration_priority
   sample_mode: action

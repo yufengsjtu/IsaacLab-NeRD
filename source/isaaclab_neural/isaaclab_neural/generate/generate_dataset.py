@@ -112,6 +112,8 @@ def build_solver_cfg(args):
         num_contacts_per_env=args.num_contacts_per_env,
         contact_mode=args.contact_mode,
         contact_packing_policy=packing_policy,
+        contact_representation=args.contact_representation,
+        max_contact_tokens=args.max_contact_tokens,
     )
 
 

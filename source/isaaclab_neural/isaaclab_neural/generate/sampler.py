@@ -14,6 +14,7 @@ import torch
 from tqdm import tqdm
 
 from isaaclab_neural.generate.adapter import DataGenerationAdapter
+from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM, CONTACT_REPRESENTATION_TOKENS
 
 
 class ActionTrajectorySampler:
@@ -48,13 +49,29 @@ class ActionTrajectorySampler:
         num_envs = self.adapter.num_envs
         trajectory_length = self.trajectory_length
         num_contacts_per_env = self.adapter.num_contacts_per_env
+        use_contact_tokens = getattr(self.adapter.solver, "contact_representation", "flat") == CONTACT_REPRESENTATION_TOKENS
         buffers: dict[str, Any] = {
             "states": torch.empty((num_envs, trajectory_length, self.adapter.state_dim), device=self.data_device),
             "next_states": torch.empty((num_envs, trajectory_length, self.adapter.state_dim), device=self.data_device),
             "joint_f": torch.empty((num_envs, trajectory_length, self.adapter.joint_f_dim), device=self.data_device),
             "root_body_q": torch.empty((num_envs, trajectory_length, 7), device=self.data_device),
             "gravity_dir": torch.zeros((num_envs, trajectory_length, 3), device=self.data_device),
-            "contacts": {
+        }
+        if use_contact_tokens:
+            max_tokens = int(getattr(self.adapter.solver, "max_contact_tokens", num_contacts_per_env))
+            buffers["contacts"] = {
+                "contact_tokens": torch.empty(
+                    (num_envs, trajectory_length, max_tokens, CONTACT_TOKEN_DIM),
+                    device=self.data_device,
+                ),
+                "contact_token_overflow": torch.empty(
+                    (num_envs, trajectory_length),
+                    dtype=torch.long,
+                    device=self.data_device,
+                ),
+            }
+        else:
+            buffers["contacts"] = {
                 "contact_masks": torch.empty(
                     (num_envs, trajectory_length, num_contacts_per_env),
                     dtype=torch.bool,
@@ -78,8 +95,7 @@ class ActionTrajectorySampler:
                 "contact_thicknesses_1": torch.empty(
                     (num_envs, trajectory_length, num_contacts_per_env), device=self.data_device
                 ),
-            },
-        }
+            }
         if record_actions:
             buffers["actions"] = torch.empty(
                 (num_envs, trajectory_length, self.adapter.action_dim), device=self.data_device

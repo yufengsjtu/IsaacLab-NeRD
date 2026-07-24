@@ -65,9 +65,21 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-contacts-per-env", type=int, default=0)
     parser.add_argument(
         "--contact-packing-policy",
-        choices=["stable_index", "penetration_priority", "random", "force_priority"],
+        choices=["stable_index", "penetration_priority", "random", "force_priority", "body_round_robin_pair_atomic"],
         default=None,
         help="Contact slot ordering. Defaults to penetration_priority for newton_native and stable_index otherwise.",
+    )
+    parser.add_argument(
+        "--contact-representation",
+        choices=["flat", "contact_tokens"],
+        default="flat",
+        help="Contact encoding stored in generated HDF5 datasets.",
+    )
+    parser.add_argument(
+        "--max-contact-tokens",
+        type=int,
+        default=128,
+        help="Directed contact token capacity when --contact-representation=contact_tokens.",
     )
     parser.add_argument("--states-frame", choices=["world", "body", "body_translation_only"], default="body")
     parser.add_argument("--anchor-frame-step", choices=["first", "last", "every"], default="every")

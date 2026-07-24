@@ -25,7 +25,11 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from isaaclab_neural.contacts.tensor_utils import MIN_CONTACT_RMS_SAMPLES, MaskedContactMoments
+from isaaclab_neural.contacts.tensor_utils import (
+    MIN_CONTACT_RMS_SAMPLES,
+    ContactTokenMoments,
+    MaskedContactMoments,
+)
 from isaaclab_neural.data import (
     collate_fn_BatchTransitionDataset,
     create_batch_transition_dataset,
@@ -413,6 +417,7 @@ class VanillaTrainer:
         self.dataset_rms = {}
         self.contact_rms_counts: dict[str, torch.Tensor] = {}
         contact_moments: dict[str, MaskedContactMoments] = {}
+        contact_token_moments: ContactTokenMoments | None = None
         for data in tqdm(dataloader):
             data = self.preprocess_data_batch(data)
             data["relative_states"] = self.neural_solver.convert_next_states_to_prediction(
@@ -423,7 +428,12 @@ class VanillaTrainer:
             )
             contact_masks = data.get("contact_masks")
             for key, value in data.items():
-                if key == "contact_masks":
+                if key in {"contact_masks", "contact_token_overflow"}:
+                    continue
+                if key == "contact_tokens":
+                    if contact_token_moments is None:
+                        contact_token_moments = ContactTokenMoments(value.shape[-1], self.device)
+                    contact_token_moments.update(value)
                     continue
                 use_masked_contact_rms = self.neural_solver.contact_mode == "newton_native" and key.startswith(
                     "contact_"
@@ -449,6 +459,12 @@ class VanillaTrainer:
                 f"Contact RMS {key}: min_count={int(counts.min())}, max_count={int(counts.max())}, "
                 f"sparse_slots={sparse_slots}/{counts.numel()} "
                 f"(pooled fallback below {MIN_CONTACT_RMS_SAMPLES} samples)."
+            )
+        if contact_token_moments is not None:
+            self.dataset_rms["contact_tokens"] = contact_token_moments.finalize(self.device)
+            print_info(
+                f"Contact token RMS: samples={int(self.dataset_rms['contact_tokens'].count.item())}, "
+                f"dim={self.dataset_rms['contact_tokens'].mean.numel()}"
             )
 
     def get_student_forcing_probability(self, epoch: int) -> float:
@@ -488,7 +504,7 @@ class VanillaTrainer:
             data[key] = value.to(self.device)
         if "contact_masks" in data:
             data["contact_masks"] = data["contact_masks"].bool()
-        else:
+        elif "contact_tokens" not in data:
             data["contact_masks"] = self.neural_solver.get_contact_masks(
                 data["contact_depths"],
                 data["contact_thicknesses_0"],

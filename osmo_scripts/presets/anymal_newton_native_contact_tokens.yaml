@@ -4,8 +4,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 workflow:
-  base_name: anymal-c-newton-native
-  dataset_subdir: anymal-c-newton-native
+  base_name: anymal-c-newton-native-contact-tokens
+  dataset_subdir: anymal-c-newton-native-contact-tokens
 
 resources:
   num_gpu: 8
@@ -15,18 +15,19 @@ resources:
   platform: ovx-l40s
 
 experiment:
-  env_name: Anymal-C-Native
+  env_name: Anymal-C-Native-ContactTokens
   robot_name: Anymal-C
   data_gen_task: Isaac-Velocity-Flat-Anymal-C-Dataset-Gen-v0
   deployment_task: Isaac-Velocity-Flat-Anymal-C-v0
   train_task: Isaac-Velocity-Flat-Anymal-C-NeRD-v0
-  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_native.yaml
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_native_contact_tokens.yaml
   train_preset: newton_mjwarp
   num_gpus: 8
   contact_mode: newton_native
-  contact_representation: flat
+  contact_representation: contact_tokens
   num_contacts_per_env: 64
-  contact_packing_policy: penetration_priority
+  max_contact_tokens: 128
+  contact_packing_policy: body_round_robin_pair_atomic
   sample_mode: action
   initial_states_source: env
   randomize_pd_gains: true

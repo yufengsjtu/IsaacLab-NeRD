@@ -7,6 +7,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from isaaclab_neural.contacts.newton_contact_adapter import NewtonContactAdapter
 from isaaclab_neural.contacts.packing import get_contact_order, resolve_contact_packing_policy
@@ -41,7 +42,17 @@ def test_canonicalize_contact_sides_puts_dynamic_body_first():
         thickness1,
     )
 
-    actual_shape0, actual_shape1, actual_point0, actual_point1, actual_normal, actual_t0, actual_t1 = actual
+    (
+        actual_shape0,
+        actual_shape1,
+        actual_point0,
+        actual_point1,
+        actual_normal,
+        actual_t0,
+        actual_t1,
+        actual_offset0,
+        actual_offset1,
+    ) = actual
     torch.testing.assert_close(actual_shape0, torch.tensor([1, 2, 1]))
     torch.testing.assert_close(actual_shape1, torch.tensor([0, 0, 2]))
     torch.testing.assert_close(actual_point0[:, 0], torch.tensor([1.0, 2.0, 5.0]))
@@ -49,6 +60,8 @@ def test_canonicalize_contact_sides_puts_dynamic_body_first():
     torch.testing.assert_close(actual_normal[:, 0], torch.tensor([-1.0, 1.0, -1.0]))
     torch.testing.assert_close(actual_t0, torch.tensor([0.4, 0.2, 0.6]))
     torch.testing.assert_close(actual_t1, torch.tensor([0.1, 0.5, 0.3]))
+    assert actual_offset0 is None
+    assert actual_offset1 is None
 
 
 def test_shape_body_ids_accepts_int32_shape_indices():
@@ -61,25 +74,38 @@ def test_shape_body_ids_accepts_int32_shape_indices():
     torch.testing.assert_close(body_ids, torch.tensor([-1, 7, -1, -1]))
 
 
-def test_surface_separation_subtracts_both_thicknesses():
+def test_surface_offset_moves_effective_contact_point():
     adapter = _adapter()
     adapter._points_to_world = lambda _shapes, points, _state: points
-    point0 = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
-    point1 = torch.tensor([[0.15, 0.0, 0.0], [1.5, 0.0, 0.0]])
-    normal = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    point0 = torch.tensor([[0.0, 0.0, 0.0]])
+    point1 = torch.tensor([[0.0, 0.0, 0.0]])
+    offset0 = torch.tensor([[0.0, 0.0, -0.1]])
+    offset1 = torch.tensor([[0.0, 0.0, 0.0]])
+    normal = torch.tensor([[0.0, 0.0, 1.0]])
 
-    separation, _, _ = adapter._read_separation_and_world_points(
-        torch.tensor([1, 1]),
-        torch.tensor([0, 0]),
+    _, _, _, surface0, surface1 = adapter._read_separation_and_world_points(
+        torch.tensor([1]),
+        torch.tensor([0]),
         point0,
         point1,
         normal,
-        torch.tensor([0.1, 0.2]),
-        torch.tensor([0.1, 0.1]),
+        torch.tensor([0.0]),
+        torch.tensor([0.0]),
+        offset0,
+        offset1,
         object(),
     )
 
-    torch.testing.assert_close(separation, torch.tensor([-0.05, 0.2]))
+    torch.testing.assert_close(surface0, torch.tensor([[0.0, 0.0, -0.1]]))
+    torch.testing.assert_close(surface1, point1)
+
+
+def test_body_round_robin_pair_atomic_is_rejected_for_flat_packing():
+    with pytest.raises(ValueError, match="contact_tokens"):
+        get_contact_order(
+            {"surface_separation": torch.tensor([-0.01])},
+            packing_policy="body_round_robin_pair_atomic",
+        )
 
 
 def test_canonicalize_contact_sides_prefers_primary_robot_over_dynamic_object():
@@ -97,7 +123,7 @@ def test_canonicalize_contact_sides_prefers_primary_robot_over_dynamic_object():
         torch.tensor([0.2]),
     )
 
-    shape0, shape1, point0, point1, normal, thickness0, thickness1 = actual
+    shape0, shape1, point0, point1, normal, thickness0, thickness1, _, _ = actual
     torch.testing.assert_close(shape0, torch.tensor([2]))
     torch.testing.assert_close(shape1, torch.tensor([1]))
     torch.testing.assert_close(point0, torch.tensor([[2.0, 0.0, 0.0]]))
@@ -166,9 +192,12 @@ def test_contact_adapter_reports_truncation():
     adapter = _adapter()
     adapter.num_envs = 1
     adapter.num_contacts_per_env = 1
+    adapter.max_contact_tokens = 1
+    adapter.contact_representation = "flat"
     adapter.device = torch.device("cpu")
     adapter.packing_policy = "penetration_priority"
     adapter.body_world = [0] * 8
+    adapter.bodies_per_env = 8
     adapter.contact_masks = torch.zeros(1, 1, dtype=torch.bool)
     adapter.contact_normals = torch.zeros(1, 1, 3)
     adapter.contact_depths = torch.zeros(1, 1)
@@ -176,6 +205,9 @@ def test_contact_adapter_reports_truncation():
     adapter.contact_thicknesses_1 = torch.zeros(1, 1)
     adapter.contact_points_0 = torch.zeros(1, 1, 3)
     adapter.contact_points_1 = torch.zeros(1, 1, 3)
+    adapter.contact_tokens = torch.zeros(1, 1, 17)
+    adapter.contact_token_overflow = torch.zeros(1, dtype=torch.long)
+    adapter._token_encoder = None
     adapter._contact_frames = 0
     adapter._raw_contacts_total = 0
     adapter._packed_contacts_total = 0

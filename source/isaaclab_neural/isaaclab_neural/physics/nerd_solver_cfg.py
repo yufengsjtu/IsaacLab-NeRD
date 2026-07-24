@@ -20,8 +20,17 @@ if TYPE_CHECKING:
 ContactMode = Literal["fixed_ground", "newton_native"]
 """Contact source used to build neural-model inputs."""
 
-ContactPackingPolicy = Literal["stable_index", "penetration_priority", "random", "force_priority"]
+ContactPackingPolicy = Literal[
+    "stable_index",
+    "penetration_priority",
+    "random",
+    "force_priority",
+    "body_round_robin_pair_atomic",
+]
 """Policy for ordering Newton native contacts before packing into fixed slots."""
+
+ContactRepresentation = Literal["flat", "contact_tokens"]
+"""Contact encoding used by the trained neural model."""
 
 
 @configclass
@@ -74,6 +83,12 @@ class NerdSolverCfg(NewtonSolverCfg):
 
     contact_packing_policy: ContactPackingPolicy = "penetration_priority"
     """Policy for ordering Newton native contacts before packing into fixed slots."""
+
+    contact_representation: ContactRepresentation = "flat"
+    """Contact encoding consumed by the trained model."""
+
+    max_contact_tokens: int = 128
+    """Maximum directed contact tokens per environment when ``contact_representation='contact_tokens'``."""
 
     states_frame: Literal["world", "body", "body_translation_only"] = "body"
     """Frame used to express neural-model states."""

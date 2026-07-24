@@ -10,6 +10,13 @@ import newton
 import torch
 import warp as wp
 
+from isaaclab_neural.contacts.contact_set_encoder import ContactSetEncoder
+from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_REPRESENTATION_FLAT,
+    CONTACT_REPRESENTATION_TOKENS,
+    CONTACT_TOKEN_DIM,
+    DEFAULT_MAX_CONTACT_TOKENS,
+)
 from isaaclab_neural.contacts.packing import ContactPackingPolicy, get_contact_order
 from isaaclab_neural.utils import torch_utils
 
@@ -31,10 +38,18 @@ class NewtonContactAdapter:
         num_contacts_per_env: int,
         device: str | None = None,
         packing_policy: ContactPackingPolicy = "stable_index",
+        *,
+        contact_representation: str = CONTACT_REPRESENTATION_FLAT,
+        max_contact_tokens: int = DEFAULT_MAX_CONTACT_TOKENS,
     ):
         self.model = model
         self.num_envs = int(model.world_count)
-        self.num_contacts_per_env = int(num_contacts_per_env)
+        self.contact_representation = contact_representation
+        self.max_contact_tokens = int(max_contact_tokens)
+        if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
+            self.num_contacts_per_env = self.max_contact_tokens
+        else:
+            self.num_contacts_per_env = int(num_contacts_per_env)
         self.num_total_contacts = self.num_envs * self.num_contacts_per_env
         self.packing_policy: ContactPackingPolicy = packing_policy
 
@@ -92,6 +107,27 @@ class NewtonContactAdapter:
             dtype=torch.float32,
             device=self.device,
         )
+        self.contact_tokens = torch.zeros(
+            (self.num_envs, self.max_contact_tokens, CONTACT_TOKEN_DIM),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.contact_token_overflow = torch.zeros(
+            (self.num_envs,),
+            dtype=torch.long,
+            device=self.device,
+        )
+        self._token_encoder: ContactSetEncoder | None = None
+        if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
+            self._token_encoder = ContactSetEncoder(
+                model=model,
+                primary_body_mask=self.primary_body_mask,
+                shape_body_torch=self.shape_body_torch,
+                bodies_per_env=self.bodies_per_env,
+                num_envs=self.num_envs,
+                max_contact_tokens=self.max_contact_tokens,
+                device=self.device,
+            )
 
     def reset_buffers(self) -> None:
         """Clear all fixed-size contact buffers before packing a new frame."""
@@ -102,6 +138,8 @@ class NewtonContactAdapter:
         self.contact_thicknesses_1.zero_()
         self.contact_points_0.zero_()
         self.contact_points_1.zero_()
+        self.contact_tokens.zero_()
+        self.contact_token_overflow.zero_()
 
     def update(
         self,
@@ -117,6 +155,30 @@ class NewtonContactAdapter:
             return
 
         raw = self._read_raw_contacts(contacts, contact_count, state)
+        if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
+            assert self._token_encoder is not None
+            if state is None:
+                raise ValueError("Contact token encoding requires the current Newton State.")
+            self.contact_tokens.copy_(self._token_encoder.encode(raw, state))
+            self._token_encoder.record_frame()
+            overflow = self._token_encoder.last_overflow
+            if overflow is not None:
+                self.contact_token_overflow.copy_(overflow)
+            valid_tokens = int((self.contact_tokens[..., 0] > 0.5).sum().item())
+            self._raw_contacts_total += contact_count
+            self._packed_contacts_total += valid_tokens
+            if int(self.contact_token_overflow.sum().item()) > 0:
+                self._truncated_frames += 1
+                self._dropped_contacts_total += int(self.contact_token_overflow.sum().item())
+                if not self._truncation_warning_emitted:
+                    logger.warning(
+                        "Contact token packing dropped tokens because max_contact_tokens=%d. "
+                        "Further truncation warnings are suppressed; inspect truncation_summary() for totals.",
+                        self.max_contact_tokens,
+                    )
+                    self._truncation_warning_emitted = True
+            return
+
         order = get_contact_order(raw, self.packing_policy)
         write_counts = torch.zeros(
             self.num_envs,
@@ -167,6 +229,12 @@ class NewtonContactAdapter:
 
     def to_neural_inputs(self) -> dict[str, torch.Tensor]:
         """Return cloned tensors with the same shape convention as fixed-ground contacts."""
+        if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
+            return {
+                "contact_tokens": self.contact_tokens.clone(),
+                "contact_token_overflow": self.contact_token_overflow.clone(),
+            }
+
         B = self.num_envs
         C = self.num_contacts_per_env
         return {
@@ -181,7 +249,7 @@ class NewtonContactAdapter:
 
     def truncation_summary(self) -> dict[str, int | float]:
         """Return cumulative native contact packing statistics."""
-        return {
+        summary = {
             "frames": self._contact_frames,
             "raw_contacts": self._raw_contacts_total,
             "packed_contacts": self._packed_contacts_total,
@@ -189,6 +257,9 @@ class NewtonContactAdapter:
             "truncated_frames": self._truncated_frames,
             "truncated_frame_ratio": self._truncated_frames / max(self._contact_frames, 1),
         }
+        if self._token_encoder is not None:
+            summary.update(self._token_encoder.overflow_summary())
+        return summary
 
     def _contact_count(self, contacts: newton.Contacts) -> int:
         count_array = contacts.rigid_contact_count
@@ -211,24 +282,38 @@ class NewtonContactAdapter:
 
         thickness0 = self._read_thickness(contacts, contact_count, side=0)
         thickness1 = self._read_thickness(contacts, contact_count, side=1)
-        shape0, shape1, point0, point1, normal, thickness0, thickness1 = self._canonicalize_contact_sides(
-            shape0,
-            shape1,
-            point0,
-            point1,
-            normal,
-            thickness0,
-            thickness1,
+        offset0 = self._read_optional_vec3(contacts, "rigid_contact_offset0", contact_count)
+        offset1 = self._read_optional_vec3(contacts, "rigid_contact_offset1", contact_count)
+        if (offset0 is None) != (offset1 is None):
+            zeros = torch.zeros_like(point0)
+            offset0 = zeros if offset0 is None else offset0
+            offset1 = zeros if offset1 is None else offset1
+        shape0, shape1, point0, point1, normal, thickness0, thickness1, offset0, offset1 = (
+            self._canonicalize_contact_sides(
+                shape0,
+                shape1,
+                point0,
+                point1,
+                normal,
+                thickness0,
+                thickness1,
+                offset0,
+                offset1,
+            )
         )
-        surface_separation, point0_world, point1_world = self._read_separation_and_world_points(
-            shape0,
-            shape1,
-            point0,
-            point1,
-            normal,
-            thickness0,
-            thickness1,
-            state,
+        surface_separation, point0_world, point1_world, surface0_world, surface1_world = (
+            self._read_separation_and_world_points(
+                shape0,
+                shape1,
+                point0,
+                point1,
+                normal,
+                thickness0,
+                thickness1,
+                offset0,
+                offset1,
+                state,
+            )
         )
 
         return {
@@ -238,6 +323,8 @@ class NewtonContactAdapter:
             "point1": point1,
             "point0_world": point0_world,
             "point1_world": point1_world,
+            "surface0_world": surface0_world,
+            "surface1_world": surface1_world,
             "normal": normal,
             "surface_separation": surface_separation,
             "thickness0": thickness0,
@@ -253,7 +340,9 @@ class NewtonContactAdapter:
         normal: torch.Tensor,
         thickness0: torch.Tensor,
         thickness1: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:
+        offset0: torch.Tensor | None = None,
+        offset1: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor | None, ...]:
         """Put the dynamic robot side first and orient normals from side 0 to side 1."""
         body0 = self._shape_body_ids(shape0)
         body1 = self._shape_body_ids(shape1)
@@ -275,6 +364,8 @@ class NewtonContactAdapter:
         canonical_normal = torch.where(vector_swap, -normal, normal)
         canonical_thickness0 = torch.where(swap, thickness1, thickness0)
         canonical_thickness1 = torch.where(swap, thickness0, thickness1)
+        canonical_offset0 = None if offset0 is None else torch.where(vector_swap, offset1, offset0)
+        canonical_offset1 = None if offset1 is None else torch.where(vector_swap, offset0, offset1)
         return (
             canonical_shape0,
             canonical_shape1,
@@ -283,6 +374,8 @@ class NewtonContactAdapter:
             canonical_normal,
             canonical_thickness0,
             canonical_thickness1,
+            canonical_offset0,
+            canonical_offset1,
         )
 
     def _shape_body_ids(self, shapes: torch.Tensor) -> torch.Tensor:
@@ -345,6 +438,13 @@ class NewtonContactAdapter:
 
         return wp.to_torch(margins)[:contact_count].to(self.device)
 
+    def _read_optional_vec3(self, contacts: newton.Contacts, name: str, contact_count: int) -> torch.Tensor | None:
+        """Return an optional Newton contact vec3 buffer, or ``None`` if absent."""
+        values = getattr(contacts, name, None)
+        if values is None:
+            return None
+        return wp.to_torch(values)[:contact_count].to(self.device)
+
     def _read_separation_and_world_points(
         self,
         shape0: torch.Tensor,
@@ -354,8 +454,10 @@ class NewtonContactAdapter:
         normal: torch.Tensor,
         thickness0: torch.Tensor,
         thickness1: torch.Tensor,
+        offset0: torch.Tensor | None,
+        offset1: torch.Tensor | None,
         state: newton.State | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if state is None:
             raise ValueError(
                 "NewtonContactAdapter computes surface separation from geometry. "
@@ -365,9 +467,13 @@ class NewtonContactAdapter:
 
         point0_world = self._points_to_world(shape0, point0, state)
         point1_world = self._points_to_world(shape1, point1, state)
+        surface0_local = point0 if offset0 is None else point0 + offset0
+        surface1_local = point1 if offset1 is None else point1 + offset1
+        surface0_world = self._points_to_world(shape0, surface0_local, state)
+        surface1_world = self._points_to_world(shape1, surface1_local, state)
         normal_distance = torch.sum(normal * (point1_world - point0_world), dim=-1)
         surface_separation = normal_distance - thickness0 - thickness1
-        return surface_separation, point0_world, point1_world
+        return surface_separation, point0_world, point1_world, surface0_world, surface1_world
 
     def _points_to_world(
         self,

@@ -163,12 +163,20 @@ def stage_generated_datasets(
 def contact_args(experiment: dict) -> list[str]:
     args = ["--contact-mode", str(experiment.get("contact_mode", "fixed_ground"))]
     if experiment.get("contact_mode") == "newton_native":
+        representation = str(experiment.get("contact_representation", "flat"))
         args += [
             "--num-contacts-per-env",
             str(experiment.get("num_contacts_per_env", 64)),
             "--contact-packing-policy",
             str(experiment.get("contact_packing_policy", "penetration_priority")),
+            "--contact-representation",
+            representation,
         ]
+        if representation == "contact_tokens":
+            args += [
+                "--max-contact-tokens",
+                str(experiment.get("max_contact_tokens", 128)),
+            ]
     return args
 
 

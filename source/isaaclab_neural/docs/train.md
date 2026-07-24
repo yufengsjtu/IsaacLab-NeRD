@@ -481,3 +481,64 @@ For a quick local test, reduce data generation scale first:
 ```
 
 For native experiments, always regenerate datasets after changing contact schema, contact packing policy, `num_contacts_per_env`, or contact point frame semantics.
+
+## Contact Token Sets
+
+PhysicsNeMo-style contact token sets store directed contacts as
+``[trajectories, steps, max_contact_tokens, 17]`` tensors instead of flat
+64-slot fields. Enable them for dataset generation, training, and deployment
+with:
+
+```yaml
+env:
+  neural_solver_cfg:
+    contact_representation: contact_tokens
+    max_contact_tokens: 128
+    # Token mode always uses pair-atomic body round-robin inside ContactSetEncoder.
+    # This field is metadata for docs/config clarity; flat packing ignores it.
+    contact_packing_policy: body_round_robin_pair_atomic
+inputs:
+  low_dim: [states_embedding, joint_f, gravity_dir]
+  contact_set:
+    dim: 17
+    encoder_layers: 2
+    encoder_heads: 4
+    hidden_size: 384
+```
+
+Notes:
+
+- Token capacity is controlled by ``max_contact_tokens`` (not ``num_contacts_per_env``).
+- Eager and lazy loaders preserve ``contact_tokens`` shape ``[..., K, 17]``.
+- Token HDF5 must include ``root_body_q`` and ``gravity_dir`` for body-frame training.
+
+Dataset generation:
+
+```bash
+./isaaclab.sh -p -m isaaclab_neural.generate.generate_dataset \
+  --task Isaac-Velocity-Flat-Anymal-C-Dataset-Gen-v0 \
+  --dataset-dir ./data/datasets/Anymal-C-Native-ContactTokens \
+  --dataset-name dataset_train.hdf5 \
+  --env-name Anymal-C-Native \
+  --robot-name Anymal-C \
+  --sample-mode action \
+  --contact-mode newton_native \
+  --contact-representation contact_tokens \
+  --max-contact-tokens 128 \
+  --num-contacts-per-env 64
+```
+
+Training configs:
+
+- Flat smoke: `source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_native_contact_tokens.yaml`
+- Rough A/B: `source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native_contact_tokens.yaml`
+
+Diagnostics:
+
+```bash
+./isaaclab.sh -p -m isaaclab_neural.eval.contact_distribution_stats --dataset PATH
+./isaaclab.sh -p -m isaaclab_neural.eval.contact_regime_eval --dataset PATH --overflow-gate
+```
+
+Contact-token checkpoints are not compatible with flat contact checkpoints.
+Regenerate HDF5 whenever `max_contact_tokens` or token channel semantics change.
