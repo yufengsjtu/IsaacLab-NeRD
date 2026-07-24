@@ -33,8 +33,14 @@ def analyze_contact_distribution(dataset_path: str | Path) -> dict[str, float | 
 
         num_contacts_per_env = int(data.attrs.get("num_contacts_per_env", valid_counts.max(initial=0)))
         max_contact_tokens = int(data.attrs.get("max_contact_tokens", num_contacts_per_env))
+        uses_tokens = "contact_tokens" in data
 
     flat_counts = valid_counts.reshape(-1)
+    # Packed tokens never exceed K; real drops are recorded in contact_token_overflow.
+    if uses_tokens:
+        capacity_overflow_frames = 0
+    else:
+        capacity_overflow_frames = int((flat_counts > num_contacts_per_env).sum())
     summary: dict[str, float | int | np.ndarray] = {
         "frames": int(flat_counts.size),
         "min_valid_contacts": int(flat_counts.min(initial=0)),
@@ -44,7 +50,7 @@ def analyze_contact_distribution(dataset_path: str | Path) -> dict[str, float | 
         "p99_valid_contacts": float(np.percentile(flat_counts, 99)),
         "num_contacts_per_env": num_contacts_per_env,
         "max_contact_tokens": max_contact_tokens,
-        "capacity_overflow_frames": int((flat_counts > max_contact_tokens).sum()),
+        "capacity_overflow_frames": capacity_overflow_frames,
     }
     if overflow is not None:
         summary["token_overflow_frames"] = int((overflow > 0).sum())

@@ -82,8 +82,16 @@ class TransformerNeuralSolver(NeuralSolver):
             return {key: value.unsqueeze(1) for key, value in model_inputs.items()}
 
         # assemble the model inputs in world frame
+        # default_collate stacks history as [T, B, ...]; transpose to [B, T, ...].
+        # Use transpose(0, 1) so 2-D scalars (e.g. contact_token_overflow) and
+        # 4-D token sets (contact_tokens) both work, not only flat 3-D fields.
         model_inputs = torch.utils.data.default_collate(list(self.states_history))
-        for key in model_inputs:
-            model_inputs[key] = model_inputs[key].permute(1, 0, 2)
+        for key, value in model_inputs.items():
+            if value.ndim < 2:
+                raise ValueError(
+                    f"History field {key!r} must have at least two dimensions after collate "
+                    f"(got shape {tuple(value.shape)})."
+                )
+            model_inputs[key] = value.transpose(0, 1).contiguous()
 
         return self.process_neural_model_inputs(model_inputs)

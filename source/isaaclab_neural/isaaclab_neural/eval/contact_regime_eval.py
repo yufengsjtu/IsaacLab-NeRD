@@ -65,8 +65,16 @@ def evaluate_dataset_regimes(dataset_path: str | Path) -> dict[str, float]:
         if "contact_depths" in data:
             contact_depths = np.asarray(data["contact_depths"])
         else:
+            from isaaclab_neural.contacts.contact_set_schema import (
+                CONTACT_TOKEN_GAP_INDEX,
+                CONTACT_TOKEN_VALID_INDEX,
+            )
+
             tokens = np.asarray(data["contact_tokens"])
-            contact_depths = tokens[..., 13]
+            # Padding rows have gap=0; only valid tokens may count as contact.
+            valid = tokens[..., CONTACT_TOKEN_VALID_INDEX] > 0.5
+            gaps = tokens[..., CONTACT_TOKEN_GAP_INDEX]
+            contact_depths = np.where(valid, gaps, np.inf)
 
     regimes = classify_regimes(contact_depths)
     metrics = {}

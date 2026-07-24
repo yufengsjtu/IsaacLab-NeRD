@@ -443,10 +443,10 @@ class NeuralSolver(SolverBase):
         (
             model_inputs["states"],
             model_inputs["next_states"],
-            model_inputs["contact_points_0"],
-            model_inputs["contact_points_1"],
-            model_inputs["contact_normals"],
-            model_inputs["gravity_dir"],
+            contact_points_0,
+            contact_points_1,
+            contact_normals,
+            gravity_dir,
         ) = self.convert_coordinate_frame(
             model_inputs["root_body_q"],
             model_inputs["states"],
@@ -456,6 +456,18 @@ class NeuralSolver(SolverBase):
             model_inputs.get("contact_normals", None),
             model_inputs.get("gravity_dir", None),
         )
+        # Token mode has no flat contact fields; do not inject None placeholders that
+        # would later be mistaken for newton_native masked-contact RMS inputs.
+        for key, value in (
+            ("contact_points_0", contact_points_0),
+            ("contact_points_1", contact_points_1),
+            ("contact_normals", contact_normals),
+            ("gravity_dir", gravity_dir),
+        ):
+            if value is not None:
+                model_inputs[key] = value
+            else:
+                model_inputs.pop(key, None)
 
         if "contact_tokens" in model_inputs:
             model_inputs["contact_tokens"] = transform_contact_tokens_to_body_frame(

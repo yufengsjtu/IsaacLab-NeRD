@@ -535,7 +535,7 @@ class VanillaTrainer:
             )
             contact_masks = data.get("contact_masks")
             for key, value in data.items():
-                if key in {"contact_masks", "contact_token_overflow"}:
+                if value is None or key in {"contact_masks", "contact_token_overflow"}:
                     continue
                 if key == "contact_tokens":
                     if contact_token_moments is None:

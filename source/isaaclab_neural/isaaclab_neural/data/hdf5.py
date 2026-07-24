@@ -209,13 +209,15 @@ def _update_metadata(data_group: h5py.Group) -> None:
     data_group.attrs["next_state_dim"] = cast(h5py.Dataset, data_group["next_states"]).shape[-1]
     if "contact_depths" in data_group:
         data_group.attrs["num_contacts_per_env"] = cast(h5py.Dataset, data_group["contact_depths"]).shape[-1]
-    elif "contact_tokens" in data_group:
-        data_group.attrs["num_contacts_per_env"] = cast(h5py.Dataset, data_group["contact_tokens"]).shape[-2]
     if "contact_tokens" in data_group:
         tokens = cast(h5py.Dataset, data_group["contact_tokens"])
+        # Token capacity is max_contact_tokens; keep num_contacts_per_env only if already set
+        # (e.g. from the generator config) so it is not silently overwritten by K.
         data_group.attrs["max_contact_tokens"] = tokens.shape[-2]
         data_group.attrs["contact_token_dim"] = tokens.shape[-1]
         data_group.attrs["contact_representation"] = "contact_tokens"
+        if "num_contacts_per_env" not in data_group.attrs:
+            data_group.attrs["num_contacts_per_env"] = tokens.shape[-2]
     data_group.attrs["joint_f_dim"] = cast(h5py.Dataset, data_group["joint_f"]).shape[-1]
     if "actions" in data_group:
         data_group.attrs["action_dim"] = cast(h5py.Dataset, data_group["actions"]).shape[-1]
