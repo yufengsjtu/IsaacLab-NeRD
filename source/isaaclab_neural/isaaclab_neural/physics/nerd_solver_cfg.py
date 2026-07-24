@@ -87,7 +87,7 @@ class NerdSolverCfg(NewtonSolverCfg):
     contact_representation: ContactRepresentation = "flat"
     """Contact encoding consumed by the trained model."""
 
-    max_contact_tokens: int = 128
+    max_contact_tokens: int = 64
     """Maximum directed contact tokens per environment when ``contact_representation='contact_tokens'``."""
 
     states_frame: Literal["world", "body", "body_translation_only"] = "body"

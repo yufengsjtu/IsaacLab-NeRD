@@ -38,7 +38,7 @@ The launcher supports declarative presets in `osmo_scripts/presets/`:
   flat representation, `num_contacts_per_env: 64`, and
   `penetration_priority` contact packing.
 - `anymal_newton_native_contact_tokens`: Anymal-C with Newton native
-  directed contact tokens, `max_contact_tokens: 128`, and pair-atomic
+  directed contact tokens, `max_contact_tokens: 64`, and pair-atomic
   body-round-robin packing.
 - `anymal_rough_newton_native`: Anymal-C rough terrain with Newton native
   contacts, rough dataset-generation/deployment/NeRD task IDs, and separate

@@ -15,6 +15,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
+import h5py
+
 from lib.simple_yaml import load_yaml
 
 
@@ -86,8 +88,29 @@ def required_dataset_files(experiment: dict, specs: list[DatasetSpec]) -> list[s
 def dataset_cache_complete(
     candidate_dir: Path,
     required_files: list[str],
+    experiment: dict,
 ) -> bool:
-    return all((candidate_dir / filename).is_file() for filename in required_files)
+    for filename in required_files:
+        dataset_path = candidate_dir / filename
+        if not dataset_path.is_file():
+            return False
+        if experiment.get("contact_representation", "flat") != "contact_tokens":
+            continue
+        expected_capacity = int(experiment.get("max_contact_tokens", 64))
+        with h5py.File(dataset_path, "r") as handle:
+            if "data" not in handle:
+                print(f"Rejected cached dataset without a data group: {dataset_path}")
+                return False
+            data_group = handle["data"]
+            representation = str(data_group.attrs.get("contact_representation", ""))
+            capacity = int(data_group.attrs.get("max_contact_tokens", -1))
+            if representation != "contact_tokens" or capacity != expected_capacity:
+                print(
+                    f"Rejected cached dataset {dataset_path}: expected contact_tokens capacity "
+                    f"{expected_capacity}, found representation={representation!r}, capacity={capacity}."
+                )
+                return False
+    return True
 
 
 def load_dataset_cache_from_input(
@@ -96,6 +119,7 @@ def load_dataset_cache_from_input(
     env_name: str,
     local_env_dir: Path,
     required_files: list[str],
+    experiment: dict,
 ) -> bool:
     if not input_root.is_dir():
         print(f"Dataset input path does not exist: {input_root}")
@@ -119,7 +143,7 @@ def load_dataset_cache_from_input(
         local_env_dir.mkdir(parents=True, exist_ok=True)
         for file in files:
             shutil.copy2(file, local_env_dir / file.name)
-        if dataset_cache_complete(local_env_dir, required_files):
+        if dataset_cache_complete(local_env_dir, required_files, experiment):
             print(f"Loaded datasets for {env_name} from NV-Datasets input: {candidate}")
             return True
 
@@ -175,7 +199,7 @@ def contact_args(experiment: dict) -> list[str]:
         if representation == "contact_tokens":
             args += [
                 "--max-contact-tokens",
-                str(experiment.get("max_contact_tokens", 128)),
+                str(experiment.get("max_contact_tokens", 64)),
             ]
     return args
 
@@ -341,6 +365,7 @@ def run(args: argparse.Namespace):
             env_name=str(experiment["env_name"]),
             local_env_dir=local_env_dir,
             required_files=required_files,
+            experiment=experiment,
         )
         if not datasets_available:
             print(f"NV-Datasets input cache unavailable for {experiment['env_name']}; generating datasets locally.")

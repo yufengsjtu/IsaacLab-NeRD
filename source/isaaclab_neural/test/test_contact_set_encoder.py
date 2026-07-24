@@ -7,6 +7,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from isaaclab_neural.contacts.contact_set_encoder import ContactSetEncoder, transform_contact_tokens_to_body_frame
 from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
@@ -89,6 +90,48 @@ def test_contact_set_encoder_block_is_permutation_invariant():
     out_a = block(tokens)
     out_b = block(shuffled)
     torch.testing.assert_close(out_a, out_b, atol=1.0e-5, rtol=1.0e-5)
+
+
+def test_contact_set_encoder_block_uses_eight_latent_queries_by_default():
+    block = ContactSetEncoderBlock(hidden_size=32, num_heads=4, device="cpu")
+
+    assert block.num_latent_queries == 8
+    assert block.latent_queries.shape == (8, 32)
+
+
+def test_contact_set_encoder_block_handles_empty_contact_sets():
+    block = ContactSetEncoderBlock(hidden_size=32, num_heads=4, device="cpu")
+    padded_tokens = torch.zeros(2, 3, 4, CONTACT_TOKEN_DIM)
+    padded_tokens[..., 1:] = torch.randn_like(padded_tokens[..., 1:])
+    zero_capacity_tokens = torch.zeros(2, 3, 0, CONTACT_TOKEN_DIM)
+
+    padded_output = block(padded_tokens)
+    zero_capacity_output = block(zero_capacity_tokens)
+
+    assert padded_output.shape == (2, 3, 32)
+    assert torch.isfinite(padded_output).all()
+    torch.testing.assert_close(padded_output, zero_capacity_output, atol=1.0e-5, rtol=1.0e-5)
+
+
+def test_contact_set_encoder_block_mixed_empty_sets_have_finite_gradients():
+    block = ContactSetEncoderBlock(hidden_size=32, num_heads=4, device="cpu")
+    tokens = torch.zeros(2, 1, 4, CONTACT_TOKEN_DIM)
+    tokens[1, 0, 0, 0] = 1.0
+    tokens[1, 0, 0, 4:7] = torch.tensor([0.1, 0.2, 0.3])
+    tokens.requires_grad_()
+
+    output = block(tokens)
+    output.square().mean().backward()
+
+    assert torch.isfinite(output).all()
+    assert tokens.grad is not None
+    assert torch.isfinite(tokens.grad).all()
+    assert all(parameter.grad is None or torch.isfinite(parameter.grad).all() for parameter in block.parameters())
+
+
+def test_contact_set_encoder_block_rejects_nonpositive_latent_query_count():
+    with pytest.raises(ValueError, match="num_latent_queries"):
+        ContactSetEncoderBlock(hidden_size=32, num_heads=4, num_latent_queries=0, device="cpu")
 
 
 def test_transform_contact_tokens_to_body_frame_zeros_padding():

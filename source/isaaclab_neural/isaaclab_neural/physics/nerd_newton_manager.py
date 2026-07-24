@@ -183,7 +183,7 @@ class NewtonNerdManager(NewtonManager):
                 device=str(wp.device_to_torch(PhysicsManager._device)),
                 packing_policy=packing_policy,
                 contact_representation=cfg_dict.get("contact_representation", "flat"),
-                max_contact_tokens=int(cfg_dict.get("max_contact_tokens", 128)),
+                max_contact_tokens=int(cfg_dict.get("max_contact_tokens", 64)),
             )
             cls._nerd_contact_adapter = contact_adapter
         else:

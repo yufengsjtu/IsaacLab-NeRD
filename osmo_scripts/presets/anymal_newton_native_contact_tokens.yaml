@@ -26,7 +26,7 @@ experiment:
   contact_mode: newton_native
   contact_representation: contact_tokens
   num_contacts_per_env: 64
-  max_contact_tokens: 128
+  max_contact_tokens: 64
   contact_packing_policy: body_round_robin_pair_atomic
   sample_mode: action
   initial_states_source: env

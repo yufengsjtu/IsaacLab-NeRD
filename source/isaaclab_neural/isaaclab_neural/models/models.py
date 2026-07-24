@@ -192,6 +192,7 @@ class ModelMixedInput(nn.Module):
                 hidden_size=hidden_size,
                 num_layers=int(contact_cfg.get('encoder_layers', 2)),
                 num_heads=int(contact_cfg.get('encoder_heads', 4)),
+                num_latent_queries=int(contact_cfg.get('num_latent_queries', 8)),
                 max_bodies=int(contact_cfg.get('max_bodies', 32)),
                 max_other_bodies=int(contact_cfg.get('max_other_bodies', 32)),
                 dropout=float(contact_cfg.get('dropout', 0.0)),

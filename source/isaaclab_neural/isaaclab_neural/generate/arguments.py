@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 
+from isaaclab_neural.contacts.contact_set_schema import DEFAULT_MAX_CONTACT_TOKENS
+
 
 def get_parser() -> argparse.ArgumentParser:
     """Create the NeRD dataset-generation argument parser."""
@@ -78,7 +80,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-contact-tokens",
         type=int,
-        default=128,
+        default=DEFAULT_MAX_CONTACT_TOKENS,
         help="Directed contact token capacity when --contact-representation=contact_tokens.",
     )
     parser.add_argument("--states-frame", choices=["world", "body", "body_translation_only"], default="body")

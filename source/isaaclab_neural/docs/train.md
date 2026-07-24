@@ -510,7 +510,7 @@ with:
 env:
   neural_solver_cfg:
     contact_representation: contact_tokens
-    max_contact_tokens: 128
+    max_contact_tokens: 64
     # Token mode always uses pair-atomic body round-robin inside ContactSetEncoder.
     # This field is metadata for docs/config clarity; flat packing ignores it.
     contact_packing_policy: body_round_robin_pair_atomic
@@ -520,6 +520,7 @@ inputs:
     dim: 17
     encoder_layers: 2
     encoder_heads: 4
+    num_latent_queries: 8
     hidden_size: 384
 ```
 
@@ -541,7 +542,7 @@ Dataset generation:
   --sample-mode action \
   --contact-mode newton_native \
   --contact-representation contact_tokens \
-  --max-contact-tokens 128 \
+  --max-contact-tokens 64 \
   --num-contacts-per-env 64
 ```
 
