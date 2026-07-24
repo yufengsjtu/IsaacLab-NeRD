@@ -148,12 +148,20 @@ class ActionTrajectorySampler:
 
     @staticmethod
     def _merge_rollout_batches(rollout_batches: dict[str, Any]) -> dict[str, Any]:
+        """Concatenate collected rollout rounds.
+
+        Large contact-token tensors are merged on CPU to avoid a second peak GPU
+        allocation that dwarfs the per-round buffers.
+        """
         rollouts: dict[str, Any] = {}
         for key, value in rollout_batches.items():
             if isinstance(value, dict):
-                rollouts[key] = {sub_key: torch.cat(sub_value, dim=0) for sub_key, sub_value in value.items()}
+                rollouts[key] = {
+                    sub_key: torch.cat([tensor.detach().cpu() for tensor in sub_value], dim=0)
+                    for sub_key, sub_value in value.items()
+                }
             else:
-                rollouts[key] = torch.cat(value, dim=0)
+                rollouts[key] = torch.cat([tensor.detach().cpu() for tensor in value], dim=0)
         return rollouts
 
     def _resolve_initial_states(
@@ -212,6 +220,7 @@ class ActionTrajectorySampler:
                     self.adapter.env.render()
 
             valid_transitions = self._append_valid_trajectories(batch, rollout_batches)
+            del batch
             if valid_transitions == 0:
                 raise RuntimeError(
                     "Dataset generation produced no valid transitions for a full rollout batch. "

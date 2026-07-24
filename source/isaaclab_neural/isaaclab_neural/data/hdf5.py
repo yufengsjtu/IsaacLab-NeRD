@@ -121,9 +121,14 @@ def _validate_rollout_arrays(arrays: Mapping[str, Any]) -> None:
         raise ValueError(f"states must have shape [trajectories, steps, features], got {states.shape}.")
     trajectory_shape = states.shape[:2]
     for name, data in arrays.items():
-        if data.ndim < 3 or data.shape[:2] != trajectory_shape:
+        # Per-step scalars (e.g. contact_token_overflow) are [N, T]; all other fields are [N, T, ...].
+        matches_trajectory = data.shape[:2] == trajectory_shape and (
+            data.ndim >= 3 or data.shape == trajectory_shape
+        )
+        if not matches_trajectory:
             raise ValueError(
-                f"Rollout field {name!r} must start with trajectory shape {trajectory_shape}, got {data.shape}."
+                f"Rollout field {name!r} must start with trajectory shape {trajectory_shape} "
+                f"(ndim>=3, or exactly {trajectory_shape} for per-step scalars); got shape={data.shape}."
             )
 
 

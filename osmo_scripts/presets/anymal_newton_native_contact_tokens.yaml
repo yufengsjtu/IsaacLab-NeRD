@@ -36,7 +36,7 @@ experiment:
   data_gen_num_envs: 1024
   train_num_envs: 256
   trajectory_length: 400
-  write_chunk_transitions: 5000000
+  write_chunk_transitions: 819200
   update_dataset_statistics: true
   policy_checkpoint: ./pretrained/control_policy/anymal_c_flat_terrain/model_299.pt
   dataset_specs:

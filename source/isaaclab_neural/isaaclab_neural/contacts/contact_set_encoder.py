@@ -114,7 +114,12 @@ class ContactSetEncoder:
         self.num_envs = num_envs
         self.max_contact_tokens = int(max_contact_tokens)
         self.device = torch.device(device)
-        self.body_world = model.body_world.numpy() if model.body_world is not None else None
+        # Cache as int64: Newton exposes body_world as int32, but contact indexing
+        # buffers are long and PyTorch index-put requires matching dtypes.
+        if model.body_world is None:
+            self.body_world = None
+        else:
+            self.body_world = torch.as_tensor(model.body_world.numpy(), device=self.device, dtype=torch.long)
         self._primary_body_ids = torch.nonzero(primary_body_mask, as_tuple=False).reshape(-1)
         self._body_slot_lookup = self._build_body_slot_lookup()
         body_com = getattr(model, "body_com", None)
@@ -168,10 +173,9 @@ class ContactSetEncoder:
         """Map global body ids to per-environment local primary-body slots."""
         lookup = torch.full((int(self.model.body_count),), -1, dtype=torch.long, device=self.device)
         if self.body_world is not None:
-            body_world = torch.as_tensor(self.body_world, device=self.device, dtype=torch.long)
             for world_id in range(self.num_envs):
                 env_ids = torch.nonzero(
-                    (body_world == world_id) & self.primary_body_mask.to(self.device),
+                    (self.body_world == world_id) & self.primary_body_mask.to(self.device),
                     as_tuple=False,
                 ).reshape(-1)
                 for local_slot, body_id in enumerate(env_ids.tolist()):
@@ -398,12 +402,16 @@ class ContactSetEncoder:
         env_ids = torch.full(body_ids.shape, -1, dtype=torch.long, device=body_ids.device)
         dynamic = body_ids >= 0
         if dynamic.any() and self.body_world is not None:
-            env_ids[dynamic] = torch.as_tensor(self.body_world, device=body_ids.device)[body_ids[dynamic]]
+            env_ids[dynamic] = self.body_world.to(device=body_ids.device)[body_ids[dynamic].long()]
         static = ~dynamic
         if static.any():
-            static_envs = torch.div(shapes[static], self.bodies_per_env, rounding_mode="floor")
+            static_envs = torch.div(shapes[static].long(), self.bodies_per_env, rounding_mode="floor")
             invalid_static = (shapes[static] < 0) | (static_envs < 0) | (static_envs >= self.num_envs)
-            env_ids[static] = torch.where(invalid_static, torch.full_like(static_envs, -1), static_envs)
+            env_ids[static] = torch.where(
+                invalid_static,
+                torch.full_like(static_envs, -1, dtype=torch.long),
+                static_envs.to(dtype=torch.long),
+            )
         # Keep unknown env ids as -1 so packing can dump them instead of env 0.
         return env_ids
 

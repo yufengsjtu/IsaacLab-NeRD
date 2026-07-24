@@ -202,6 +202,31 @@ def test_body_slot_is_local_per_environment():
     torch.testing.assert_close(tokens[1, 0, 12], torch.tensor(-0.2))
 
 
+def test_contact_env_ids_accepts_int32_body_world():
+    """Newton body_world is int32; env_ids buffers are long and must match on assign."""
+    device = torch.device("cpu")
+    model = SimpleNamespace(
+        body_count=4,
+        body_world=torch.tensor([0, 0, 1, 1], dtype=torch.int32),
+        body_com=torch.zeros(4, 3),
+    )
+    encoder = ContactSetEncoder(
+        model=model,
+        primary_body_mask=torch.tensor([True, True, True, True]),
+        shape_body_torch=torch.tensor([-1, 0, 1, 2, 3]),
+        bodies_per_env=2,
+        num_envs=2,
+        max_contact_tokens=4,
+        device=device,
+    )
+    body_ids = torch.tensor([0, 2, -1], dtype=torch.long)
+    shapes = torch.tensor([1, 3, 0], dtype=torch.long)
+
+    env_ids = encoder._contact_env_ids(body_ids, shapes)
+
+    torch.testing.assert_close(env_ids, torch.tensor([0, 1, 0], dtype=torch.long))
+
+
 def test_eager_trajectory_dataset_preserves_contact_token_rank(tmp_path):
     import h5py
     import numpy as np
