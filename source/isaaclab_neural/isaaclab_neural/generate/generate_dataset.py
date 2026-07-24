@@ -79,6 +79,9 @@ def configure_env(env_cfg, args) -> None:
         env_cfg.scene.num_envs = args.num_envs
     if hasattr(env_cfg, "seed"):
         env_cfg.seed = args.seed
+    terrain_cfg = getattr(getattr(getattr(env_cfg, "scene", None), "terrain", None), "terrain_generator", None)
+    if terrain_cfg is not None:
+        terrain_cfg.seed = args.seed
     if hasattr(env_cfg, "sim") and hasattr(env_cfg.sim, "device"):
         env_cfg.sim.device = args.device
 
@@ -127,7 +130,7 @@ def main(env_cfg, agent_cfg=None) -> None:
 
     from isaaclab_tasks.utils import launch_simulation
 
-    from isaaclab_neural.data import write_rollouts_to_hdf5
+    from isaaclab_neural.data import build_terrain_context, write_rollouts_to_hdf5
     from isaaclab_neural.generate.adapter import DataGenerationAdapter
     from isaaclab_neural.utils.commons import JOINT_F_LIM, JOINT_Q_MAX, JOINT_Q_MIN, JOINT_QD_LIM
     from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
@@ -147,6 +150,7 @@ def main(env_cfg, agent_cfg=None) -> None:
         with newton_material_binding_api_autofix():
             env = gym.make(args_cli.task, cfg=env_cfg, device=args_cli.device).unwrapped
             env.reset()
+        terrain_context = build_terrain_context(env_cfg, args_cli.seed)
         adapter = DataGenerationAdapter(env, solver_cfg)
         sampler_cls, sampler_kwargs = _sampler_spec(
             args_cli.task,
@@ -230,6 +234,7 @@ def main(env_cfg, agent_cfg=None) -> None:
                     output_path,
                     rollouts,
                     env_name,
+                    terrain_context=terrain_context,
                 )
                 written_transitions = rollouts["states"].shape[0] * rollouts["states"].shape[1]
                 total_transitions += written_transitions
@@ -246,6 +251,7 @@ def main(env_cfg, agent_cfg=None) -> None:
                 output_path,
                 rollouts,
                 env_name,
+                terrain_context=terrain_context,
             )
         truncation_summary = adapter.contact_truncation_summary()
         if truncation_summary is not None:

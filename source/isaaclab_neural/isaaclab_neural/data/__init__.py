@@ -5,6 +5,8 @@
 
 """Data utilities for isaaclab_neural."""
 
+from isaaclab_neural.utils.commons import DATASET_MODES
+
 from .datasets import (
     BatchTransitionDataset,
     LazyBatchTransitionDataset,
@@ -15,8 +17,13 @@ from .datasets import (
     create_batch_transition_dataset,
     create_trajectory_dataset,
 )
-from isaaclab_neural.utils.commons import DATASET_MODES
 from .hdf5 import append_rollouts_to_hdf5, write_rollouts_to_hdf5
+from .terrain_context import (
+    build_terrain_context,
+    read_terrain_context,
+    set_terrain_seed,
+    validate_terrain_context,
+)
 
 __all__ = [
     "DATASET_MODES",
@@ -30,4 +37,8 @@ __all__ = [
     "create_trajectory_dataset",
     "append_rollouts_to_hdf5",
     "write_rollouts_to_hdf5",
+    "build_terrain_context",
+    "read_terrain_context",
+    "set_terrain_seed",
+    "validate_terrain_context",
 ]

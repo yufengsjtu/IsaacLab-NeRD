@@ -286,6 +286,42 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
     subprocess.run(command, check=True)
 
 
+def run_context_diagnostic(experiment: dict, specs: list[DatasetSpec], dataset_dir: Path):
+    """Validate terrain and contact reconstruction for a generated dataset."""
+    diagnostic_filename = str(experiment.get("diagnostic_dataset", specs[0].filename))
+    dataset_path = dataset_dir / str(experiment["env_name"]) / diagnostic_filename
+    command = [
+        sys.executable,
+        "-m",
+        "isaaclab_neural.eval.contact_reconstruction_diagnostic",
+        "--task",
+        str(experiment["train_task"]),
+        "--dataset",
+        str(dataset_path),
+        "--num-envs",
+        str(experiment.get("diagnostic_num_envs", experiment["data_gen_num_envs"])),
+        "--step",
+        str(experiment.get("diagnostic_step", 0)),
+        "--require-terrain-context",
+        "--headless",
+        *contact_args(experiment),
+    ]
+    if experiment.get("states_frame"):
+        command += ["--states-frame", str(experiment["states_frame"])]
+    if experiment.get("diagnostic_contact_tolerance") is not None:
+        command += ["--contact-tolerance", str(experiment["diagnostic_contact_tolerance"])]
+    if experiment.get("train_preset"):
+        command.append(f"presets={experiment['train_preset']}")
+    subprocess.run(command, check=True)
+    if experiment.get("diagnostic_negative_seed_test", False):
+        dataset_spec = next(spec for spec in specs if spec.filename == diagnostic_filename)
+        negative_command = [*command, "--terrain-seed-override", str(dataset_spec.seed + 1)]
+        result = subprocess.run(negative_command, check=False)
+        if result.returncode == 0:
+            raise RuntimeError("Negative terrain-seed diagnostic unexpectedly passed.")
+        print(f"Negative terrain-seed diagnostic failed as expected with exit code {result.returncode}.")
+
+
 def start_tensorboard(output_root: Path, port: int):
     log_file = (output_root / "tensorboard.log").open("w", encoding="utf-8")
     process = subprocess.Popen(
@@ -352,6 +388,10 @@ def run(args: argparse.Namespace):
             nvdataset_data_dataset=args.nvdataset_data_dataset,
             nvdataset_data_description=args.nvdataset_data_description,
         )
+
+    if experiment.get("diagnostic_only", False):
+        run_context_diagnostic(experiment, specs, dataset_dir)
+        return
 
     run_training(experiment, output_root, args)
 

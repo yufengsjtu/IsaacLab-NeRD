@@ -335,6 +335,8 @@ class VanillaTrainer:
         self.num_eval_rollouts = int(eval_cfg.get("num_rollouts", self.neural_env.num_envs))
         self.eval_dataset_path = eval_cfg.get("dataset_path")
         self.eval_passive = bool(eval_cfg.get("passive", True))
+        self.eval_require_terrain_context = bool(eval_cfg.get("require_terrain_context", False))
+        self.eval_contact_context_tolerance = float(eval_cfg.get("contact_context_tolerance", 1.0e-4))
         self.eval_render = bool(cli_cfg.get("render", False))
 
         if self.action_mode not in ("action", "joint_f"):
@@ -349,6 +351,8 @@ class VanillaTrainer:
             hdf5_dataset_path=self.eval_dataset_path,
             eval_horizon=self.eval_horizon,
             device=self.device,
+            require_terrain_context=self.eval_require_terrain_context,
+            contact_context_tolerance=self.eval_contact_context_tolerance,
         )
 
     def _init_optimizer(self, algo_cfg: dict[str, Any]) -> None:

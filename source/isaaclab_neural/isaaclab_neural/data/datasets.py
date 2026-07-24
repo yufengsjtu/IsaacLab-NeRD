@@ -122,6 +122,11 @@ class _LazyHdf5Accessor:
     def dataset(self, key: str) -> h5py.Dataset:
         return cast(h5py.Dataset, self._ensure_open()[key])
 
+    def trajectory_context_dataset(self, key: str) -> h5py.Dataset:
+        """Return one per-trajectory context dataset from the open file."""
+        self._ensure_open()
+        return cast(h5py.Dataset, cast(h5py.File, self._file)["context"]["trajectories"][key])
+
     def close(self) -> None:
         if self._file is not None:
             self._file.close()
@@ -353,6 +358,7 @@ class TrajectoryDataset(Dataset):
     ):
         self.max_capacity = max_capacity
         self.dataset: dict[str, np.ndarray] = {}
+        self.trajectory_context: dict[str, np.ndarray] = {}
         self.traj_lengths: np.ndarray = np.array([], dtype="int32")
         self.sample_sequence_length = sample_sequence_length
         self.mapping_index2traj = np.zeros((0, 2), dtype=int)
@@ -377,6 +383,7 @@ class TrajectoryDataset(Dataset):
             )
 
             self.dataset = {}
+            self.trajectory_context = {}
             traj_lengths = None
             for key in data_group.keys():
                 if key == "traj_lengths":
@@ -385,6 +392,12 @@ class TrajectoryDataset(Dataset):
 
                 data = _read_dataset_array(data_group, key, slice(None, num_trajectories))
                 self.dataset[key] = data.reshape(data.shape[0], data.shape[1], -1)
+            if "context" in dataset_file and "trajectories" in dataset_file["context"]:
+                trajectory_group = cast(h5py.Group, dataset_file["context"]["trajectories"])
+                for key in trajectory_group.keys():
+                    self.trajectory_context[key] = np.asarray(
+                        cast(h5py.Dataset, trajectory_group[key])[:num_trajectories]
+                    )
 
             if traj_lengths is None:
                 traj_lengths = np.full(num_trajectories, num_transitions_per_trajectory, dtype="int32")
@@ -419,10 +432,12 @@ class TrajectoryDataset(Dataset):
             raise IndexError(f"Index {index} out of range for dataset of length {len(self)}.")
 
         traj_index, traj_step_index = self.mapping_index2traj[index]
-        return {
+        sample = {
             key: _torch_tensor(value[traj_index, traj_step_index : traj_step_index + self.sample_sequence_length])
             for key, value in self.dataset.items()
         }
+        sample.update({key: _torch_tensor(value[traj_index]) for key, value in self.trajectory_context.items()})
+        return sample
 
     def shuffle(self) -> None:
         """No-op kept for API symmetry with :class:`BatchTransitionDataset`."""
@@ -453,6 +468,10 @@ class LazyTrajectoryDataset(Dataset):
         self.data_keys = list(metadata["data_keys"])
         self.traj_lengths = cast(np.ndarray, metadata["traj_lengths"])
         self._hdf5 = _LazyHdf5Accessor(self.dataset_path)
+        self.trajectory_context_keys: list[str] = []
+        with h5py.File(self.dataset_path, "r", swmr=True, libver="latest") as dataset_file:
+            if "context" in dataset_file and "trajectories" in dataset_file["context"]:
+                self.trajectory_context_keys = list(dataset_file["context"]["trajectories"].keys())
         self.update_sample_sequence_length(sample_sequence_length)
 
     def update_sample_sequence_length(self, sample_sequence_length: int) -> None:
@@ -498,6 +517,8 @@ class LazyTrajectoryDataset(Dataset):
                 sample[key] = torch.as_tensor(data.astype(bool), dtype=torch.bool)
             else:
                 sample[key] = torch.as_tensor(data.astype("float32"), dtype=torch.float32)
+        for key in self.trajectory_context_keys:
+            sample[key] = _torch_tensor(np.asarray(self._hdf5.trajectory_context_dataset(key)[traj_index]))
         return sample
 
     def shuffle(self) -> None:

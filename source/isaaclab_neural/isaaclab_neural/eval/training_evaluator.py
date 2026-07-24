@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import warp as wp
 from torch.utils.data import default_collate
 from tqdm import tqdm
-import warp as wp
 
 from isaaclab_neural.data import TrajectoryDataset
 from isaaclab_neural.utils.commons import JOINT_F_LIM, JOINT_Q_MAX, JOINT_Q_MIN, JOINT_QD_LIM
@@ -20,15 +20,26 @@ from isaaclab_neural.utils.commons import JOINT_F_LIM, JOINT_Q_MAX, JOINT_Q_MIN,
 class TrainingRolloutEvaluator:
     """Evaluate a trained NeRD model by rolling it from dataset states."""
 
-    def __init__(self, neural_env, hdf5_dataset_path: str | None = None, eval_horizon: int = 10, device="cuda:0"):
+    def __init__(
+        self,
+        neural_env,
+        hdf5_dataset_path: str | None = None,
+        eval_horizon: int = 10,
+        device="cuda:0",
+        require_terrain_context: bool = False,
+        contact_context_tolerance: float = 1.0e-4,
+    ):
         self.neural_env = neural_env
         self.device = device
         self.eval_horizon = eval_horizon
+        self.history_length = int(getattr(neural_env.solver_neural, "num_states_history", 1))
+        self.require_terrain_context = require_terrain_context
+        self.contact_context_tolerance = contact_context_tolerance
         self.trajectory_dataset = None
         if hdf5_dataset_path is not None:
             self.trajectory_dataset = TrajectoryDataset(
                 hdf5_dataset_path=hdf5_dataset_path,
-                sample_sequence_length=eval_horizon,
+                sample_sequence_length=eval_horizon + self.history_length - 1,
             )
 
     @torch.no_grad()
@@ -115,7 +126,7 @@ class TrainingRolloutEvaluator:
         for key in ("states", "next_states", control_key):
             if key not in trajectories:
                 raise KeyError(f"'{key}' is required for {control_key} eval with source '{trajectory_source}'.")
-        return {key: trajectories[key] for key in ("states", "next_states", control_key)}
+        return trajectories
 
     def _sample_dataset_trajectories(self, num_traj: int) -> dict[str, torch.Tensor]:
         if self.trajectory_dataset is None:
@@ -219,9 +230,14 @@ class TrainingRolloutEvaluator:
         if total_traj == 0:
             raise ValueError(f"num_traj must be at least num_envs ({num_envs}) for rollout eval.")
 
-        initial_states = trajectories["states"][:total_traj, 0, :].to(self.device)
-        controls = trajectories[control_key][:total_traj].to(self.device)
-        target_next_states = trajectories["next_states"][:total_traj].to(self.device)
+        history_offset = self._history_offset(trajectories)
+        initial_states = trajectories["states"][:total_traj, history_offset, :].to(self.device)
+        controls = trajectories[control_key][
+            :total_traj, history_offset : history_offset + self.eval_horizon
+        ].to(self.device)
+        target_next_states = trajectories["next_states"][
+            :total_traj, history_offset : history_offset + self.eval_horizon
+        ].to(self.device)
 
         rollout_states = torch.empty(
             (total_traj, self.eval_horizon + 1, env.solver_neural.state_dim),
@@ -235,11 +251,16 @@ class TrainingRolloutEvaluator:
             start = round_index * num_envs
             end = start + num_envs
             rollout_states[start:end, 0].copy_(initial_states[start:end])
+            self._restore_terrain_context(trajectories, start, end)
             env.neural_adapter.reset(initial_states[start:end])
+            self._preload_history(trajectories, start, end, history_offset)
+            self._validate_runtime_contact_context(trajectories, start, end, history_offset)
 
             for step in range(self.eval_horizon):
                 if eval_mode == "single-step":
-                    env.neural_adapter.reset(trajectories["states"][start:end, step].to(self.device))
+                    state_step = history_offset + step
+                    env.neural_adapter.reset(trajectories["states"][start:end, state_step].to(self.device))
+                    self._preload_history(trajectories, start, end, state_step)
                 rollout_states[start:end, step + 1].copy_(step_fn(controls[start:end, step]))
                 if render and hasattr(env.unwrapped, "render"):
                     env.unwrapped.render()
@@ -251,6 +272,88 @@ class TrainingRolloutEvaluator:
             "ground-truth": target_next_states,
         }
         return next_states_diff, trajectories_out, error_stats
+
+    def _history_offset(self, trajectories: dict[str, torch.Tensor]) -> int:
+        """Return the number of dataset frames used to warm-start history."""
+        if self.history_length <= 1:
+            return 0
+        required = {"root_body_q", "states", "joint_f", "gravity_dir"}
+        required.update(self.neural_env.solver_neural.contacts.keys())
+        if not required.issubset(trajectories):
+            if self.require_terrain_context:
+                missing = sorted(required - set(trajectories))
+                raise ValueError(f"Strict rollout evaluation is missing history inputs: {missing}.")
+            return 0
+        return self.history_length - 1
+
+    def _preload_history(
+        self,
+        trajectories: dict[str, torch.Tensor],
+        start: int,
+        end: int,
+        history_offset: int,
+    ) -> None:
+        """Preload raw dataset frames preceding the rollout state."""
+        if history_offset == 0:
+            return
+        solver = self.neural_env.solver_neural
+        preload = getattr(solver, "preload_states_history", None)
+        if preload is None:
+            return
+        keys = {"root_body_q", "states", "joint_f", "gravity_dir", *solver.contacts.keys()}
+        preload(
+            {
+                key: trajectories[key][start:end, history_offset - self.history_length + 1 : history_offset].to(
+                    self.device
+                )
+                for key in keys
+            }
+        )
+
+    def _restore_terrain_context(
+        self,
+        trajectories: dict[str, torch.Tensor],
+        start: int,
+        end: int,
+    ) -> None:
+        """Map evaluation slots to the trajectory's recorded terrain patch."""
+        keys = {"terrain_level", "terrain_type", "env_origin"}
+        if not keys.issubset(trajectories):
+            if self.require_terrain_context:
+                raise ValueError("Strict rollout evaluation requires per-trajectory terrain patch metadata.")
+            return
+        terrain = getattr(getattr(self.neural_env.neural_adapter.isaaclab_env, "scene", None), "terrain", None)
+        if terrain is None:
+            if self.require_terrain_context:
+                raise ValueError("Strict rollout evaluation requires an environment terrain.")
+            return
+        terrain.terrain_levels[: end - start].copy_(trajectories["terrain_level"][start:end].to(terrain.device))
+        terrain.terrain_types[: end - start].copy_(trajectories["terrain_type"][start:end].to(terrain.device))
+        terrain.env_origins[: end - start].copy_(trajectories["env_origin"][start:end].to(terrain.device))
+
+    def _validate_runtime_contact_context(
+        self,
+        trajectories: dict[str, torch.Tensor],
+        start: int,
+        end: int,
+        history_offset: int,
+    ) -> None:
+        """Ensure reset-time runtime contacts match the recorded current frame."""
+        if not self.require_terrain_context:
+            return
+        solver = self.neural_env.solver_neural
+        for key, runtime_value in solver.contacts.items():
+            recorded = trajectories[key][start:end, history_offset].to(runtime_value.device)
+            if runtime_value.dtype == torch.bool:
+                if not torch.equal(runtime_value, recorded.bool()):
+                    raise ValueError(f"Runtime contact context mismatch for {key!r}.")
+            else:
+                max_error = torch.max(torch.abs(runtime_value - recorded)).item()
+                if max_error > self.contact_context_tolerance:
+                    raise ValueError(
+                        f"Runtime contact context mismatch for {key!r}: max error {max_error:.6g} "
+                        f"exceeds {self.contact_context_tolerance:.6g}."
+                    )
 
     def _step_action(self, action: torch.Tensor) -> torch.Tensor:
         env = self.neural_env.unwrapped

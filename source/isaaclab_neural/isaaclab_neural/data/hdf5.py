@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import h5py
+import numpy as np
 import torch
 
 
@@ -26,6 +27,7 @@ def write_rollouts_to_hdf5(
     dataset_path: str | Path,
     rollouts: Mapping,
     env_name: str,
+    terrain_context: Mapping[str, Any] | None = None,
 ) -> None:
     """Serialize rollout tensors to a NeRD HDF5 trajectory dataset.
 
@@ -34,10 +36,12 @@ def write_rollouts_to_hdf5(
         rollouts: Rollout dictionary containing ``states``, ``next_states``,
             ``joint_f``, and a nested ``contacts`` dictionary.
         env_name: Environment name stored in dataset metadata.
+        terrain_context: Optional deterministic terrain provenance.
     """
     dataset_path = Path(dataset_path).expanduser()
     dataset_path.parent.mkdir(parents=True, exist_ok=True)
     arrays = _flatten_rollouts(rollouts)
+    trajectory_context = _trajectory_context_arrays(rollouts, arrays["states"].shape[0])
     _validate_rollout_arrays(arrays)
 
     with h5py.File(dataset_path, "w") as dataset_file:
@@ -49,6 +53,7 @@ def write_rollouts_to_hdf5(
                 maxshape=(None, *data.shape[1:]),
                 chunks=True,
             )
+        _create_context_groups(dataset_file, trajectory_context, terrain_context)
         data_group.attrs["env"] = env_name
         data_group.attrs["mode"] = "trajectory"
         _update_metadata(data_group)
@@ -58,6 +63,7 @@ def append_rollouts_to_hdf5(
     dataset_path: str | Path,
     rollouts: Mapping,
     env_name: str,
+    terrain_context: Mapping[str, Any] | None = None,
 ) -> None:
     """Append rollout tensors to a NeRD HDF5 trajectory dataset.
 
@@ -68,6 +74,7 @@ def append_rollouts_to_hdf5(
     dataset_path = Path(dataset_path).expanduser()
     dataset_path.parent.mkdir(parents=True, exist_ok=True)
     arrays = _flatten_rollouts(rollouts)
+    trajectory_context = _trajectory_context_arrays(rollouts, arrays["states"].shape[0])
     _validate_rollout_arrays(arrays)
 
     with h5py.File(dataset_path, "a") as dataset_file:
@@ -79,12 +86,22 @@ def append_rollouts_to_hdf5(
             env_name=env_name,
             is_new=is_new,
         )
+        _validate_context_target(
+            dataset_file,
+            trajectory_context,
+            terrain_context,
+            is_new=is_new,
+        )
         if is_new:
             _create_appendable_datasets(data_group, arrays)
+            _create_context_groups(dataset_file, trajectory_context, terrain_context)
             data_group.attrs["env"] = env_name
             data_group.attrs["mode"] = "trajectory"
         else:
-            _append_arrays_atomically(data_group, arrays)
+            trajectory_group = (
+                cast(h5py.Group, dataset_file["context"]["trajectories"]) if "context" in dataset_file else None
+            )
+            _append_arrays_atomically(data_group, arrays, trajectory_group, trajectory_context)
         _update_metadata(data_group)
 
 
@@ -92,6 +109,8 @@ def _flatten_rollouts(rollouts: Mapping) -> dict[str, Any]:
     """Flatten rollout tensors and nested contact tensors into numpy arrays."""
     arrays = {}
     for key, value in rollouts.items():
+        if key == "trajectory_context":
+            continue
         if isinstance(value, Mapping):
             for sub_key, sub_value in value.items():
                 if sub_key in arrays:
@@ -101,6 +120,22 @@ def _flatten_rollouts(rollouts: Mapping) -> dict[str, Any]:
             if key in arrays:
                 raise ValueError(f"Duplicate rollout dataset key: {key!r}.")
             arrays[key] = _to_numpy(value)
+    return arrays
+
+
+def _trajectory_context_arrays(rollouts: Mapping, trajectory_count: int) -> dict[str, Any]:
+    """Convert optional per-trajectory context tensors to numpy arrays."""
+    context = rollouts.get("trajectory_context")
+    if context is None:
+        return {}
+    if not isinstance(context, Mapping):
+        raise TypeError("trajectory_context must be a mapping.")
+    arrays = {str(key): _to_numpy(value) for key, value in context.items()}
+    for name, data in arrays.items():
+        if data.ndim < 1 or data.shape[0] != trajectory_count:
+            raise ValueError(
+                f"Trajectory context {name!r} must start with trajectory count {trajectory_count}, got {data.shape}."
+            )
     return arrays
 
 
@@ -153,6 +188,67 @@ def _validate_append_target(
             raise ValueError(f"Dataset dtype mismatch for {name!r}: existing={dataset.dtype}, new={data.dtype}.")
 
 
+def _validate_context_target(
+    dataset_file: h5py.File,
+    trajectory_context: Mapping[str, Any],
+    terrain_context: Mapping[str, Any] | None,
+    *,
+    is_new: bool,
+) -> None:
+    """Validate global and per-trajectory context before appending."""
+    if is_new:
+        return
+    if "context" not in dataset_file or "trajectories" not in dataset_file["context"]:
+        if trajectory_context or terrain_context is not None:
+            raise ValueError("Existing dataset has no context groups.")
+        return
+
+    context_group = cast(h5py.Group, dataset_file["context"])
+    trajectory_group = cast(h5py.Group, context_group["trajectories"])
+    if set(trajectory_group.keys()) != set(trajectory_context):
+        raise ValueError("Trajectory context keys do not match the existing dataset.")
+    for name, data in trajectory_context.items():
+        dataset = cast(h5py.Dataset, trajectory_group[name])
+        if dataset.shape[1:] != data.shape[1:] or dataset.dtype != data.dtype:
+            raise ValueError(f"Trajectory context {name!r} is incompatible with the existing dataset.")
+
+    if terrain_context is None:
+        if "terrain" in context_group:
+            raise ValueError("Terrain context is required when appending to this dataset.")
+        return
+    if "terrain" not in context_group:
+        raise ValueError("Existing dataset has no terrain context.")
+    terrain_group = cast(h5py.Group, context_group["terrain"])
+    existing = {
+        key: (
+            value.decode("utf-8")
+            if isinstance(value, bytes)
+            else value.item()
+            if isinstance(value, np.generic)
+            else value
+        )
+        for key, value in terrain_group.attrs.items()
+    }
+    if existing != dict(terrain_context):
+        raise ValueError("Terrain context does not match the existing dataset.")
+
+
+def _create_context_groups(
+    dataset_file: h5py.File,
+    trajectory_context: Mapping[str, Any],
+    terrain_context: Mapping[str, Any] | None,
+) -> None:
+    """Create global and per-trajectory context groups."""
+    context_group = dataset_file.create_group("context")
+    trajectory_group = context_group.create_group("trajectories")
+    for name, data in trajectory_context.items():
+        trajectory_group.create_dataset(name=name, data=data, maxshape=(None, *data.shape[1:]), chunks=True)
+    if terrain_context is not None:
+        terrain_group = context_group.create_group("terrain")
+        for name, value in terrain_context.items():
+            terrain_group.attrs[name] = value
+
+
 def _create_appendable_datasets(data_group: h5py.Group, arrays: Mapping[str, Any]) -> None:
     """Create a new set of appendable datasets, cleaning up on failure."""
     created = []
@@ -171,21 +267,32 @@ def _create_appendable_datasets(data_group: h5py.Group, arrays: Mapping[str, Any
         raise
 
 
-def _append_arrays_atomically(data_group: h5py.Group, arrays: Mapping[str, Any]) -> None:
+def _append_arrays_atomically(
+    data_group: h5py.Group,
+    arrays: Mapping[str, Any],
+    trajectory_group: h5py.Group | None,
+    trajectory_context: Mapping[str, Any],
+) -> None:
     """Append all fields and roll back their sizes if any write fails."""
     old_count = cast(h5py.Dataset, data_group["states"]).shape[0]
     append_count = arrays["states"].shape[0]
-    resized = []
+    resized: list[h5py.Dataset] = []
     try:
-        for name in arrays:
-            dataset = cast(h5py.Dataset, data_group[name])
+        datasets_and_arrays = [
+            *((cast(h5py.Dataset, data_group[name]), data) for name, data in arrays.items()),
+            *(
+                (cast(h5py.Dataset, trajectory_group[name]), data)
+                for name, data in trajectory_context.items()
+                if trajectory_group is not None
+            ),
+        ]
+        for dataset, _data in datasets_and_arrays:
             dataset.resize((old_count + append_count, *dataset.shape[1:]))
-            resized.append(name)
-        for name, data in arrays.items():
-            cast(h5py.Dataset, data_group[name])[old_count : old_count + append_count] = data
+            resized.append(dataset)
+        for dataset, data in datasets_and_arrays:
+            dataset[old_count : old_count + append_count] = data
     except Exception:
-        for name in resized:
-            dataset = cast(h5py.Dataset, data_group[name])
+        for dataset in resized:
             dataset.resize((old_count, *dataset.shape[1:]))
         raise
 

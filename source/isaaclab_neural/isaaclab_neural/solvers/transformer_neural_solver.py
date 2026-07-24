@@ -6,6 +6,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 from collections import deque
+from collections.abc import Mapping
 
 import torch
 from newton import Contacts, State
@@ -23,6 +24,38 @@ class TransformerNeuralSolver(NeuralSolver):
 
     def reset_states_history(self):
         self.states_history = deque(maxlen=self.num_states_history)
+
+    def preload_states_history(self, history: Mapping[str, torch.Tensor]) -> None:
+        """Replace solver history with validated raw dataset inputs.
+
+        Args:
+            history: Raw model inputs with shape ``[num_envs, history, features]``.
+        """
+        required = {"root_body_q", "states", "joint_f", "gravity_dir", *self.contacts.keys()}
+        missing = sorted(required - set(history))
+        if missing:
+            raise ValueError(f"History is missing required model inputs: {missing}.")
+
+        states = history["states"]
+        if states.ndim != 3 or states.shape[0] != self.num_envs:
+            raise ValueError(
+                f"History states must have shape [num_envs, history, state_dim], got {tuple(states.shape)}."
+            )
+        history_length = states.shape[1]
+        if history_length > self.num_states_history:
+            raise ValueError(
+                f"History length {history_length} exceeds configured maximum {self.num_states_history}."
+            )
+
+        self.reset_states_history()
+        for step in range(history_length):
+            entry = {
+                key: value[:, step].to(device=self.torch_device).clone()
+                for key, value in history.items()
+                if key in required
+            }
+            entry["states_embedding"] = self.embed_states(entry["states"])
+            self.states_history.append(entry)
 
     def reset(self, env_ids=None):
         """Reset transformer history globally or for selected environments."""

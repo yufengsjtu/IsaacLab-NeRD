@@ -18,6 +18,12 @@ import isaaclab_neural.envs  # noqa: F401 - registers built-in NeRD tasks
 import numpy as np
 import torch
 import warp as wp
+from isaaclab_neural.data import (
+    build_terrain_context,
+    read_terrain_context,
+    set_terrain_seed,
+    validate_terrain_context,
+)
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 from isaaclab_neural.solvers.neural_solver import NeuralSolver
 from isaaclab_neural.utils.checkpoint import get_cfg_from_checkpoint, load_checkpoint
@@ -29,11 +35,36 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     """Parse diagnostic and IsaacLab launcher arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", required=True, help="Registered NeRD task id.")
-    parser.add_argument("--checkpoint", required=True, help="NeRD checkpoint used for one-step predictions.")
+    parser.add_argument("--checkpoint", help="Optional NeRD checkpoint used for one-step predictions.")
     parser.add_argument("--dataset", required=True, help="HDF5 trajectory dataset.")
     parser.add_argument("--num-envs", type=int, default=16, help="Number of trajectories and runtime envs.")
     parser.add_argument("--trajectory-start", type=int, default=0, help="First trajectory index to compare.")
     parser.add_argument("--step", type=int, default=0, help="Trajectory step to compare.")
+    parser.add_argument(
+        "--require-terrain-context",
+        action="store_true",
+        help="Require terrain provenance, restore trajectory patches, and fail on contact mismatch.",
+    )
+    parser.add_argument(
+        "--terrain-seed-override",
+        type=int,
+        default=None,
+        help="Override the recorded terrain seed for a negative consistency test.",
+    )
+    parser.add_argument(
+        "--contact-tolerance",
+        type=float,
+        default=1.0e-4,
+        help="Maximum accepted reconstructed contact-point Chamfer distance.",
+    )
+    parser.add_argument("--num-contacts-per-env", type=int, default=64)
+    parser.add_argument("--contact-mode", choices=("fixed_ground", "newton_native"), default="newton_native")
+    parser.add_argument(
+        "--contact-packing-policy",
+        choices=("stable_index", "penetration_priority", "random", "force_priority"),
+        default="penetration_priority",
+    )
+    parser.add_argument("--states-frame", choices=("world", "body", "body_translation_only"), default="body")
 
     from isaaclab_tasks.utils import add_launcher_args
 
@@ -41,8 +72,20 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     return parser.parse_known_args()
 
 
-def build_solver_cfg(checkpoint_path: str) -> NerdSolverCfg:
-    """Reconstruct the solver configuration embedded in a checkpoint."""
+def build_solver_cfg(checkpoint_path: str | None, args: argparse.Namespace) -> NerdSolverCfg:
+    """Build a diagnostic solver, optionally loading model settings from a checkpoint."""
+    if checkpoint_path is None:
+        return NerdSolverCfg(
+            name="NeuralSolver",
+            states_frame=args.states_frame,
+            states_embedding_type="identical",
+            prediction_type="relative",
+            orientation_prediction_parameterization="quaternion",
+            min_contact_event_threshold=0.12,
+            num_contacts_per_env=args.num_contacts_per_env,
+            contact_mode=args.contact_mode,
+            contact_packing_policy=args.contact_packing_policy,
+        )
     checkpoint = load_checkpoint(checkpoint_path, device="cpu")
     cfg = get_cfg_from_checkpoint(checkpoint, checkpoint_path)
     solver_cfg_dict = dict(cfg["env"]["neural_solver_cfg"])
@@ -52,12 +95,24 @@ def build_solver_cfg(checkpoint_path: str) -> NerdSolverCfg:
     return solver_cfg
 
 
-def configure_env(env_cfg, args: argparse.Namespace) -> None:
+def configure_env(env_cfg, args: argparse.Namespace) -> dict[str, Any] | None:
     """Apply diagnostic launch overrides."""
     env_cfg.scene.num_envs = args.num_envs
-    env_cfg.seed = 0
+    terrain_context = read_terrain_context(args.dataset)
+    if terrain_context is None:
+        if args.require_terrain_context:
+            raise ValueError(f"Dataset {args.dataset!r} has no terrain context.")
+        env_cfg.seed = 0
+    else:
+        terrain_seed = (
+            int(args.terrain_seed_override)
+            if args.terrain_seed_override is not None
+            else int(terrain_context["seed"])
+        )
+        set_terrain_seed(env_cfg, terrain_seed)
     if args.device is not None:
         env_cfg.sim.device = args.device
+    return terrain_context
 
 
 def build_launch_cfg(env_cfg):
@@ -135,6 +190,11 @@ def load_dataset_batch(
                 batch[key] = torch.as_tensor(array, dtype=torch.bool, device=device)
             else:
                 batch[key] = torch.as_tensor(array, dtype=torch.float32, device=device)
+        if "context" in dataset_file and "trajectories" in dataset_file["context"]:
+            trajectory_group = dataset_file["context"]["trajectories"]
+            for key, dataset in trajectory_group.items():
+                array = np.asarray(dataset[trajectory_start:trajectory_end])
+                batch[key] = torch.as_tensor(array, device=device)
     return batch
 
 
@@ -277,11 +337,40 @@ def print_metrics(title: str, metrics: dict[str, float]) -> None:
         print(f"{key}={value:.8g}")
 
 
+def restore_terrain_patch(env, batch: dict[str, torch.Tensor], *, required: bool) -> None:
+    """Restore recorded terrain patch assignments for the selected trajectories."""
+    keys = {"terrain_level", "terrain_type", "env_origin"}
+    if not keys.issubset(batch):
+        if required:
+            raise ValueError(f"Dataset is missing trajectory terrain context: {sorted(keys - set(batch))}.")
+        return
+
+    terrain = getattr(getattr(env.neural_adapter.isaaclab_env, "scene", None), "terrain", None)
+    if terrain is None:
+        if required:
+            raise ValueError("The diagnostic task has no terrain importer.")
+        return
+    num_envs = batch["states"].shape[0]
+    terrain.terrain_levels[:num_envs].copy_(batch["terrain_level"].to(terrain.device, dtype=torch.long))
+    terrain.terrain_types[:num_envs].copy_(batch["terrain_type"].to(terrain.device, dtype=torch.long))
+    terrain.env_origins[:num_envs].copy_(batch["env_origin"].to(terrain.device, dtype=torch.float32))
+
+
+def validate_contact_metrics(metrics: dict[str, float], tolerance: float) -> None:
+    """Fail strict diagnostics when reconstructed contacts differ materially."""
+    if metrics["mask_agreement"] != 1.0:
+        raise ValueError(f"Contact-mask agreement is {metrics['mask_agreement']:.8g}, expected 1.0.")
+    chamfer = metrics["set_chamfer_distance_mean"]
+    if not np.isfinite(chamfer) or chamfer > tolerance:
+        raise ValueError(f"Contact-point Chamfer distance {chamfer:.8g} exceeds tolerance {tolerance:.8g}.")
+
+
 def run_diagnostic(env, args: argparse.Namespace) -> None:
     """Run dataset-contact and runtime-contact one-step A/B predictions."""
     adapter = env.neural_adapter
     solver = adapter.solver
-    solver.eval()
+    if solver.neural_model is not None:
+        solver.eval()
 
     dataset_raw = load_dataset_batch(
         args.dataset,
@@ -300,8 +389,8 @@ def run_diagnostic(env, args: argparse.Namespace) -> None:
     dt = float(getattr(env, "step_dt", getattr(env, "physics_dt")))
 
     dataset_processed = preprocess_inputs(solver, dataset_raw)
-    dataset_prediction = predict_next_states(solver, dataset_processed, dt)
 
+    restore_terrain_patch(env, dataset_raw, required=args.require_terrain_context)
     adapter.reset(initial_states=dataset_raw["states"][:, -1])
     manager = adapter.manager
     manager._control.joint_f.assign(wp.from_torch(dataset_raw["joint_f"][:, -1].reshape(-1)))
@@ -312,28 +401,31 @@ def run_diagnostic(env, args: argparse.Namespace) -> None:
         if key in runtime_raw:
             runtime_raw[key][:, -1:] = value
     runtime_processed = preprocess_inputs(solver, runtime_raw)
-    runtime_prediction = predict_next_states(solver, runtime_processed, dt)
 
     print(
         "[setup] "
-        f"dataset={args.dataset}, checkpoint={args.checkpoint}, num_envs={args.num_envs}, "
+        f"dataset={args.dataset}, checkpoint={args.checkpoint or 'none'}, num_envs={args.num_envs}, "
         f"trajectory_start={args.trajectory_start}, step={args.step}, "
         f"history_length={dataset_raw['states'].shape[1]}"
     )
-    print_metrics("dataset_contact_prediction", state_error(solver, dataset_prediction, target_next_states))
-    print_metrics("runtime_reconstructed_prediction", state_error(solver, runtime_prediction, target_next_states))
-    print_metrics(
-        "contact_comparison",
-        contact_metrics(dataset_processed, runtime_processed, solver.num_contacts_per_env),
-    )
+    comparison_metrics = contact_metrics(dataset_processed, runtime_processed, solver.num_contacts_per_env)
+    print_metrics("contact_comparison", comparison_metrics)
     print_metrics(
         "input_differences",
         input_difference_metrics(dataset_processed, runtime_processed, solver.num_contacts_per_env),
     )
-    print_metrics(
-        "prediction_difference",
-        state_error(solver, runtime_prediction, dataset_prediction),
-    )
+    if solver.neural_model is not None:
+        dataset_prediction = predict_next_states(solver, dataset_processed, dt)
+        runtime_prediction = predict_next_states(solver, runtime_processed, dt)
+        print_metrics("dataset_contact_prediction", state_error(solver, dataset_prediction, target_next_states))
+        print_metrics("runtime_reconstructed_prediction", state_error(solver, runtime_prediction, target_next_states))
+        print_metrics(
+            "prediction_difference",
+            state_error(solver, runtime_prediction, dataset_prediction),
+        )
+    if args.require_terrain_context:
+        validate_contact_metrics(comparison_metrics, args.contact_tolerance)
+        print("[strict-context] PASS")
 
 
 def main() -> None:
@@ -343,8 +435,8 @@ def main() -> None:
 
     @hydra_task_config(args_cli.task, "")
     def hydra_main(env_cfg, _agent_cfg=None) -> None:
-        configure_env(env_cfg, args_cli)
-        solver_cfg = build_solver_cfg(args_cli.checkpoint)
+        expected_terrain_context = configure_env(env_cfg, args_cli)
+        solver_cfg = build_solver_cfg(args_cli.checkpoint, args_cli)
 
         from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
 
@@ -352,6 +444,24 @@ def main() -> None:
 
         with launch_simulation(build_launch_cfg(env_cfg), args_cli):
             import gymnasium as gym
+
+            if expected_terrain_context is not None:
+                actual_terrain_context = build_terrain_context(
+                    env_cfg,
+                    int(
+                        args_cli.terrain_seed_override
+                        if args_cli.terrain_seed_override is not None
+                        else expected_terrain_context["seed"]
+                    ),
+                )
+                if actual_terrain_context is None:
+                    raise ValueError("Dataset has terrain context but the diagnostic task has no terrain generator.")
+                validate_terrain_context(expected_terrain_context, actual_terrain_context)
+                print(
+                    "[terrain-context] "
+                    f"seed={expected_terrain_context['seed']}, "
+                    f"mesh_sha256={expected_terrain_context['mesh_sha256']}, PASS"
+                )
 
             with newton_material_binding_api_autofix():
                 env = gym.make(args_cli.task, cfg=env_cfg, device=args_cli.device, solver_cfg=solver_cfg).unwrapped

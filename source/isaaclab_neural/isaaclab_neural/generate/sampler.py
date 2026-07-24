@@ -79,6 +79,7 @@ class ActionTrajectorySampler:
                     (num_envs, trajectory_length, num_contacts_per_env), device=self.data_device
                 ),
             },
+            "trajectory_context": self._trajectory_context(),
         }
         if record_actions:
             buffers["actions"] = torch.empty(
@@ -87,6 +88,31 @@ class ActionTrajectorySampler:
         up_axis = int(getattr(self.adapter.model, "up_axis", 2))
         buffers["gravity_dir"][:, :, up_axis] = -1.0
         return buffers
+
+    def _trajectory_context(self) -> dict[str, torch.Tensor]:
+        """Capture the source environment and terrain patch for each trajectory."""
+        num_envs = self.adapter.num_envs
+        source_env_id = torch.arange(num_envs, dtype=torch.int64, device=self.data_device)
+        terrain_level = torch.full((num_envs,), -1, dtype=torch.int64, device=self.data_device)
+        terrain_type = torch.full((num_envs,), -1, dtype=torch.int64, device=self.data_device)
+        env_origin = torch.zeros((num_envs, 3), dtype=torch.float32, device=self.data_device)
+
+        scene = getattr(self.adapter.env, "scene", None)
+        terrain = getattr(scene, "terrain", None)
+        if terrain is not None:
+            if getattr(terrain, "terrain_levels", None) is not None:
+                terrain_level.copy_(terrain.terrain_levels.to(self.data_device))
+            if getattr(terrain, "terrain_types", None) is not None:
+                terrain_type.copy_(terrain.terrain_types.to(self.data_device))
+            if getattr(terrain, "env_origins", None) is not None:
+                env_origin.copy_(terrain.env_origins.to(self.data_device))
+
+        return {
+            "source_env_id": source_env_id,
+            "terrain_level": terrain_level,
+            "terrain_type": terrain_type,
+            "env_origin": env_origin,
+        }
 
     def _copy_before_step(self, buffers: dict[str, Any], step: int) -> None:
         inputs = self.adapter.raw_neural_inputs()

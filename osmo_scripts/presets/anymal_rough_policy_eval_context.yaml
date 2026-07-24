@@ -1,0 +1,50 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+workflow:
+  base_name: anymal-rough-policy-eval-context
+  dataset_subdir: anymal-c-rough-newton-native
+
+resources:
+  num_gpu: 1
+  num_cpu: 15
+  memory: 64Gi
+  storage: 128Gi
+  platform: ovx-l40s
+
+experiment:
+  env_name: Anymal-C-Rough-Native
+  robot_name: Anymal-C
+  data_gen_task: Isaac-Velocity-Rough-Anymal-C-Dataset-Gen-v0
+  deployment_task: Isaac-Velocity-Rough-Anymal-C-v0
+  train_task: Isaac-Velocity-Rough-Anymal-C-NeRD-v0
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native.yaml
+  train_preset: newton_mjwarp
+  contact_mode: newton_native
+  num_contacts_per_env: 64
+  contact_packing_policy: penetration_priority
+  states_frame: body
+  initial_states_source: env
+  train_transitions: 1
+  valid_transitions: 1000000
+  data_gen_num_envs: 1024
+  train_num_envs: 64
+  trajectory_length: 400
+  write_chunk_transitions: 409600
+  randomize_pd_gains: false
+  policy_checkpoint: ./pretrained/control_policy/anymal_c_rough_terrain/model_1499.pt
+  diagnostic_only: true
+  diagnostic_dataset: dataset_lstm_actuator_policy_valid.hdf5
+  diagnostic_num_envs: 64
+  diagnostic_step: 9
+  diagnostic_contact_tolerance: 1.0e-4
+  diagnostic_negative_seed_test: true
+  dataset_specs:
+    - filename: dataset_lstm_actuator_policy_valid.hdf5
+      seed: 40
+      split: valid
+      task_kind: deployment
+      zero_actions: false
+      use_policy: true
