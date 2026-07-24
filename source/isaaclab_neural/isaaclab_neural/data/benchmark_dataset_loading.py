@@ -134,6 +134,8 @@ def _benchmark_trajectory_dataset(
     num_workers: int,
     warmup_epochs: int,
     measure_epochs: int,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> dict[str, float]:
     gc.collect()
     rss_before = _rss_gib()
@@ -144,6 +146,8 @@ def _benchmark_trajectory_dataset(
         hdf5_dataset_path=dataset_path,
         sample_sequence_length=sample_sequence_length,
         max_capacity=max_capacity,
+        rank=rank,
+        world_size=world_size,
     )
     init_seconds = time.perf_counter() - init_start
     rss_after_init = _current_rss_gib()
@@ -281,6 +285,8 @@ def _run_worker(payload: dict[str, object]) -> dict[str, float]:
             num_workers=int(payload["num_workers"]),
             warmup_epochs=int(payload["warmup_epochs"]),
             measure_epochs=int(payload["measure_epochs"]),
+            rank=0,
+            world_size=int(payload["eager_world_size"]) if load_mode == "eager" else 1,
         )
     return _benchmark_batch_transition_dataset(
         dataset_path,
@@ -321,6 +327,12 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--warmup-epochs", type=int, default=1)
     parser.add_argument("--measure-epochs", type=int, default=3)
+    parser.add_argument(
+        "--eager-world-size",
+        type=int,
+        default=1,
+        help="Simulate one rank of eager DDP trajectory sharding.",
+    )
     args = parser.parse_args()
 
     if args.dataset_path is None:
@@ -349,6 +361,7 @@ def main() -> None:
             "num_workers": args.num_workers,
             "warmup_epochs": args.warmup_epochs,
             "measure_epochs": args.measure_epochs,
+            "eager_world_size": args.eager_world_size,
         }
         eager = _benchmark_in_subprocess({**payload, "load_mode": "eager"})
         lazy = _benchmark_in_subprocess({**payload, "load_mode": "lazy"})
@@ -359,9 +372,11 @@ def main() -> None:
         init_ratio = lazy["init_seconds"] / max(eager["init_seconds"], 1e-6)
         epoch_ratio = lazy["epoch_seconds_mean"] / max(eager["epoch_seconds_mean"], 1e-6)
         rss_ratio = lazy["rss_after_init_gib"] / max(eager["rss_after_init_gib"], 1e-6)
+        throughput_ratio = lazy["samples_per_second"] / max(eager["samples_per_second"], 1e-6)
         print("\n[summary]")
         print(f"  lazy/eager init speed ratio: {init_ratio:.2f}x")
         print(f"  lazy/eager epoch speed ratio: {epoch_ratio:.2f}x")
+        print(f"  lazy/eager throughput ratio: {throughput_ratio:.2f}x")
         print(f"  lazy/eager rss-after-init ratio: {rss_ratio:.2f}x")
     finally:
         if temp_dir is not None:

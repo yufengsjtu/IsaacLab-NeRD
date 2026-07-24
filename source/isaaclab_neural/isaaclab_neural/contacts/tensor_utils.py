@@ -40,6 +40,15 @@ class MaskedContactMoments:
         self.sum += (reshaped * weights).sum(dim=reduce_dims)
         self.square_sum += (reshaped.square() * weights).sum(dim=reduce_dims)
 
+    def synchronize(self) -> None:
+        """Sum raw moments across an initialized distributed process group."""
+        import torch.distributed as dist
+
+        if not dist.is_available() or not dist.is_initialized():
+            return
+        for tensor in (self.count, self.sum, self.square_sum):
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+
     def finalize(
         self,
         device: torch.device | str,
@@ -117,7 +126,7 @@ class ContactTokenMoments:
 
         self.channels = channels
         self.categorical = set(CONTACT_TOKEN_CATEGORICAL_CHANNELS)
-        self.count = 0.0
+        self.count = torch.zeros((), dtype=torch.float64, device=device)
         self.sum = torch.zeros(channels, dtype=torch.float64, device=device)
         self.square_sum = torch.zeros(channels, dtype=torch.float64, device=device)
 
@@ -128,13 +137,22 @@ class ContactTokenMoments:
         if not valid.any():
             return
         values = flat[valid].to(torch.float64)
-        self.count += float(valid.sum().item())
+        self.count += valid.sum().to(torch.float64)
         self.sum += values.sum(dim=0)
         self.square_sum += values.square().sum(dim=0)
 
+    def synchronize(self) -> None:
+        """Sum raw moments across an initialized distributed process group."""
+        import torch.distributed as dist
+
+        if not dist.is_available() or not dist.is_initialized():
+            return
+        for tensor in (self.count, self.sum, self.square_sum):
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+
     def finalize(self, device: torch.device | str) -> RunningMeanStd:
         """Return channel-wise RMS with identity channels pinned to mean=0, std=1."""
-        safe_count = max(self.count, 1.0)
+        safe_count = self.count.clamp_min(1.0)
         mean = self.sum / safe_count
         variance = (self.square_sum / safe_count - mean.square()).clamp_min(0.0)
         for channel in self.categorical:
@@ -143,7 +161,7 @@ class ContactTokenMoments:
         rms = RunningMeanStd(shape=(self.channels,), device=device)
         rms.mean.copy_(mean.to(dtype=torch.float32, device=device))
         rms.var.copy_(variance.to(dtype=torch.float32, device=device))
-        rms.count.fill_(self.count)
+        rms.count.copy_(self.count.to(dtype=rms.count.dtype, device=device))
         return rms
 
 

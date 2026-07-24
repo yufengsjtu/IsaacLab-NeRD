@@ -96,14 +96,31 @@ export NVDATASET_TENANTID=<your-tenant-id>
 会先校验完整 schema、shape 和 dtype；追加写入失败时会回滚已 resize 的 dataset，
 避免留下部分写入的 HDF5 文件。
 
-`SequenceModelTrainer` 使用 `TrajectoryDataset`，训练初始化时会把
-`algorithm.dataset.max_capacity` 对应的数据从 HDF5 加载到 CPU 内存中，而不是每个
-batch 从磁盘流式读取。DDP 多卡训练时，每个 rank 会各自加载一份 dataset。
+`SequenceModelTrainer` 的 ``eager`` 模式会在初始化时把
+`algorithm.dataset.max_capacity` 对应的数据加载到 CPU 内存。DDP 下 trajectory 会先按
+全局 ``max_capacity`` 截断，再由各 rank 加载互不重叠的 trajectory shard，因此所有
+rank 合计只保留约一份训练集，而不是每个 rank 各复制一份。Validation datasets 仍只在
+rank 0 完整加载。
 
-例如 Anymal-C fixed-ground 的 `20M` transitions 训练集约 `30GiB` 量级；8 卡 DDP
-可能需要约 `30GiB * 8` 的 CPU 内存，再加 Isaac Sim、DataLoader workers、模型和统计
-计算开销。OSMO 上大规模 Anymal 训练建议使用较大的 `memory`（例如 `512Gi` 或更高），
-并在必要时降低 `max_capacity` 或 `num_data_workers` 做 smoke test。
+``lazy`` 模式只保留 metadata 和 HDF5 handle，并按 batch 读取。CUDA 训练时默认启用
+pinned memory、non-blocking copy 和 persistent workers。可使用以下配置调优：
+
+```yaml
+algorithm:
+  dataset:
+    load_mode: lazy
+    num_data_workers: 4
+    pin_memory: auto
+    non_blocking: auto
+    persistent_workers: auto
+    prefetch_factor: 2
+    # Optional global cap divided across DDP ranks.
+    max_total_workers: 32
+```
+
+``eager`` 通常吞吐更高，``lazy`` 内存最低。OSMO 上可先使用 ``eager`` rank sharding；
+若 validation 或 contact-token 数据仍超过节点内存，再切换 ``lazy``。降低
+``max_capacity`` 或 ``num_data_workers`` 适合 smoke test。
 
 ## Cartpole Fixed Ground
 

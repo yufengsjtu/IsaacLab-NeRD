@@ -45,6 +45,49 @@ from isaaclab_neural.utils.time_report import TimeProfiler, TimeReport
 from isaaclab_neural.utils.torch_utils import grad_norm, num_params_torch_model
 
 
+def _resolve_auto_bool(value: bool | str | None, *, automatic: bool) -> bool:
+    """Resolve a boolean config value that may use the string ``auto``."""
+    if value is None or value == "auto":
+        return automatic
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"Expected a boolean or 'auto', got {value!r}.")
+
+
+def _data_worker_init(_worker_id: int) -> None:
+    """Limit intra-op parallelism inside DataLoader worker processes."""
+    torch.set_num_threads(1)
+
+
+def _reset_validation_iterators(valid_loaders: dict[str, Any]) -> dict[str, Any]:
+    """Create fresh validation iterators so each epoch starts a new sampling order."""
+    return {name: iter(loader) for name, loader in valid_loaders.items()}
+
+
+@torch.no_grad()
+def _synchronize_running_mean_std(rms: RunningMeanStd, epsilon: float = 1.0e-4) -> None:
+    """Merge running moments across an initialized distributed process group."""
+    if not dist.is_available() or not dist.is_initialized():
+        return
+
+    count_with_prior = rms.count.to(torch.float64)
+    sample_count = (count_with_prior - epsilon).clamp_min(0.0)
+    value_sum = rms.mean.to(torch.float64) * count_with_prior
+    square_sum = (rms.var.to(torch.float64) + rms.mean.to(torch.float64).square()) * count_with_prior
+    square_sum -= epsilon
+
+    dist.all_reduce(sample_count, op=dist.ReduceOp.SUM)
+    dist.all_reduce(value_sum, op=dist.ReduceOp.SUM)
+    dist.all_reduce(square_sum, op=dist.ReduceOp.SUM)
+
+    global_count = sample_count + epsilon
+    global_mean = value_sum / global_count
+    global_var = (square_sum + epsilon) / global_count - global_mean.square()
+    rms.mean.copy_(global_mean.to(rms.mean.dtype))
+    rms.var.copy_(global_var.clamp_min(0.0).to(rms.var.dtype))
+    rms.count.copy_(global_count.to(rms.count.dtype))
+
+
 class TrainingEnvAdapter:
     """Expose the small environment surface needed by NeRD trainers."""
 
@@ -137,12 +180,45 @@ class VanillaTrainer:
         self.batch_size = int(algo_cfg["batch_size"])
         self.num_valid_batches = int(algo_cfg.get("num_valid_batches", 50))
         self.student_forcing_enabled = False
-        self.dataset_max_capacity = algo_cfg["dataset"].get("max_capacity", 100_000_000)
-        self.dataset_load_mode = algo_cfg["dataset"].get("load_mode", "eager")
-        self.num_data_workers = algo_cfg["dataset"].get("num_data_workers", 4)
+        dataset_cfg = algo_cfg["dataset"]
+        self.dataset_max_capacity = dataset_cfg.get("max_capacity", 100_000_000)
+        self.dataset_load_mode = dataset_cfg.get("load_mode", "eager")
+        self.num_data_workers = int(dataset_cfg.get("num_data_workers", 4))
+        self.num_valid_data_workers = self.num_data_workers
+        max_total_workers = dataset_cfg.get("max_total_workers")
+        if max_total_workers is not None:
+            num_valid_loaders = len(dataset_cfg.get("valid_datasets") or {})
+            concurrent_loaders = max(self.world_size, 1) + num_valid_loaders
+            workers_per_loader = max(0, int(max_total_workers) // concurrent_loaders)
+            self.num_data_workers = min(self.num_data_workers, workers_per_loader)
+            self.num_valid_data_workers = min(self.num_valid_data_workers, workers_per_loader)
+        is_cuda = torch.device(self.device).type == "cuda"
+        self.pin_memory = _resolve_auto_bool(
+            dataset_cfg.get("pin_memory", "auto"),
+            automatic=is_cuda and self.dataset_load_mode == "lazy",
+        )
+        self.non_blocking_data_transfer = _resolve_auto_bool(
+            dataset_cfg.get("non_blocking", "auto"),
+            automatic=self.pin_memory,
+        )
+        self.persistent_workers = _resolve_auto_bool(
+            dataset_cfg.get("persistent_workers", "auto"),
+            automatic=self.dataset_load_mode == "lazy" and self.num_data_workers > 0,
+        )
+        self.prefetch_factor = int(dataset_cfg.get("prefetch_factor", 2))
+        if self.prefetch_factor <= 0:
+            raise ValueError("dataset.prefetch_factor must be positive.")
+        if self.is_main_process:
+            print_info(
+                "Dataset loader: "
+                f"mode={self.dataset_load_mode}, train_workers={self.num_data_workers}, "
+                f"valid_workers={self.num_valid_data_workers}, pin_memory={self.pin_memory}, "
+                f"persistent_workers={self.persistent_workers}, prefetch_factor={self.prefetch_factor}"
+            )
         self.train_dataset = None
         self.valid_datasets = {}
         self.collate_fn = None
+        self.train_dataset_rank_sharded = False
         self.get_datasets(algo_cfg["dataset"].get("train_dataset_path"), algo_cfg["dataset"].get("valid_datasets"))
 
         if cli_cfg["train"]:
@@ -405,20 +481,51 @@ class VanillaTrainer:
         self.batch_size = 1
         self.collate_fn = collate_fn_BatchTransitionDataset
 
+    def _make_dataloader(
+        self,
+        *,
+        dataset,
+        batch_size: int,
+        shuffle: bool,
+        sampler=None,
+        drop_last: bool,
+        persistent_workers: bool | None = None,
+        num_workers: int | None = None,
+    ) -> DataLoader:
+        """Create a consistently configured training or validation DataLoader."""
+        loader_workers = self.num_data_workers if num_workers is None else num_workers
+        use_persistent_workers = (
+            self.persistent_workers if persistent_workers is None else persistent_workers
+        ) and loader_workers > 0
+        kwargs: dict[str, Any] = {
+            "dataset": dataset,
+            "batch_size": batch_size,
+            "collate_fn": self.collate_fn,
+            "shuffle": shuffle,
+            "sampler": sampler,
+            "num_workers": loader_workers,
+            "drop_last": drop_last,
+            "pin_memory": self.pin_memory,
+            "persistent_workers": use_persistent_workers,
+        }
+        if loader_workers > 0:
+            kwargs["prefetch_factor"] = self.prefetch_factor
+            kwargs["worker_init_fn"] = _data_worker_init
+        return DataLoader(**kwargs)
+
     def compute_dataset_statistics(self, dataset) -> None:
-        dataloader = DataLoader(
+        dataloader = self._make_dataloader(
             dataset=dataset,
             batch_size=max(512, self.batch_size),
-            collate_fn=self.collate_fn,
             shuffle=False,
-            num_workers=self.num_data_workers,
-            drop_last=True,
+            drop_last=False,
+            persistent_workers=False,
         )
         self.dataset_rms = {}
         self.contact_rms_counts: dict[str, torch.Tensor] = {}
         contact_moments: dict[str, MaskedContactMoments] = {}
         contact_token_moments: ContactTokenMoments | None = None
-        for data in tqdm(dataloader):
+        for data in tqdm(dataloader, disable=not self.is_main_process):
             data = self.preprocess_data_batch(data)
             data["relative_states"] = self.neural_solver.convert_next_states_to_prediction(
                 states=data["states"],
@@ -450,22 +557,31 @@ class VanillaTrainer:
                     rms_shape = value.shape[2:]
                     self.dataset_rms[key] = RunningMeanStd(shape=rms_shape, device=self.device)
                 self.dataset_rms[key].update(value, batch_dim=True, time_dim=True)
+        if self.is_distributed and self.train_dataset_rank_sharded:
+            for rms in self.dataset_rms.values():
+                _synchronize_running_mean_std(rms)
+            for moments in contact_moments.values():
+                moments.synchronize()
+            if contact_token_moments is not None:
+                contact_token_moments.synchronize()
         for key, moments in contact_moments.items():
             rms, counts = moments.finalize(self.device)
             self.dataset_rms[key] = rms
             self.contact_rms_counts[key] = counts
             sparse_slots = int(((counts > 0) & (counts < MIN_CONTACT_RMS_SAMPLES)).sum())
-            print_info(
-                f"Contact RMS {key}: min_count={int(counts.min())}, max_count={int(counts.max())}, "
-                f"sparse_slots={sparse_slots}/{counts.numel()} "
-                f"(pooled fallback below {MIN_CONTACT_RMS_SAMPLES} samples)."
-            )
+            if self.is_main_process:
+                print_info(
+                    f"Contact RMS {key}: min_count={int(counts.min())}, max_count={int(counts.max())}, "
+                    f"sparse_slots={sparse_slots}/{counts.numel()} "
+                    f"(pooled fallback below {MIN_CONTACT_RMS_SAMPLES} samples)."
+                )
         if contact_token_moments is not None:
             self.dataset_rms["contact_tokens"] = contact_token_moments.finalize(self.device)
-            print_info(
-                f"Contact token RMS: samples={int(self.dataset_rms['contact_tokens'].count.item())}, "
-                f"dim={self.dataset_rms['contact_tokens'].mean.numel()}"
-            )
+            if self.is_main_process:
+                print_info(
+                    f"Contact token RMS: samples={int(self.dataset_rms['contact_tokens'].count.item())}, "
+                    f"dim={self.dataset_rms['contact_tokens'].mean.numel()}"
+                )
 
     def get_student_forcing_probability(self, epoch: int) -> float:
         """Return the student forcing probability for trainers that support it."""
@@ -473,6 +589,14 @@ class VanillaTrainer:
 
     def compute_or_sync_dataset_statistics(self, dataset) -> None:
         """Compute dataset statistics once, then share them with DDP ranks."""
+        if self.is_distributed and self.train_dataset_rank_sharded:
+            if self.is_main_process:
+                print_info("Computing distributed dataset statistics...")
+            self.compute_dataset_statistics(dataset)
+            if self.is_main_process:
+                print_info("Finished computing distributed dataset statistics...")
+            return
+
         rms_state: list[dict[str, dict[str, Any]] | None] = [None]
         if self.is_main_process:
             print_info("Computing dataset statistics...")
@@ -501,7 +625,7 @@ class VanillaTrainer:
     @torch.no_grad()
     def preprocess_data_batch(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         for key, value in data.items():
-            data[key] = value.to(self.device)
+            data[key] = value.to(self.device, non_blocking=self.non_blocking_data_transfer)
         if "contact_masks" in data:
             data["contact_masks"] = data["contact_masks"].bool()
         elif "contact_tokens" not in data:
@@ -628,16 +752,14 @@ class VanillaTrainer:
                 shuffle=True,
                 drop_last=True,
             )
-            if self.is_distributed
+            if self.is_distributed and not self.train_dataset_rank_sharded
             else None
         )
-        train_loader = DataLoader(
+        train_loader = self._make_dataloader(
             dataset=cast(Any, self.train_dataset),
             batch_size=self.batch_size,
-            collate_fn=self.collate_fn,
             shuffle=train_sampler is None,
             sampler=train_sampler,
-            num_workers=self.num_data_workers,
             drop_last=True,
         )
         self.num_train_batches = len(train_loader) if self.num_iters_per_epoch == -1 else self.num_iters_per_epoch
@@ -646,15 +768,13 @@ class VanillaTrainer:
         valid_loader_iters = {}
         if self.is_main_process:
             for valid_dataset_name, valid_dataset in self.valid_datasets.items():
-                valid_loaders[valid_dataset_name] = DataLoader(
+                valid_loaders[valid_dataset_name] = self._make_dataloader(
                     dataset=valid_dataset,
                     batch_size=self.batch_size,
-                    collate_fn=self.collate_fn,
                     shuffle=True,
-                    num_workers=self.num_data_workers,
                     drop_last=True,
+                    num_workers=self.num_valid_data_workers,
                 )
-                valid_loader_iters[valid_dataset_name] = iter(valid_loaders[valid_dataset_name])
                 self.best_valid_losses.setdefault(valid_dataset_name, np.inf)
 
         self.time_report = TimeReport(cuda_synchronize=False)
@@ -683,6 +803,7 @@ class VanillaTrainer:
                 )
                 avg_valid_losses, avg_valid_losses_itemized = {}, {}
                 if self.is_main_process:
+                    valid_loader_iters = _reset_validation_iterators(valid_loaders)
                     for valid_dataset_name in self.valid_datasets:
                         avg_valid_losses[valid_dataset_name], avg_valid_losses_itemized[valid_dataset_name], _ = (
                             self.one_epoch(
@@ -866,11 +987,14 @@ class SequenceModelTrainer(VanillaTrainer):
         super().__init__(neural_env, cfg, checkpoint, device)
 
     def get_datasets(self, train_dataset_path, valid_datasets_cfg) -> None:
+        self.train_dataset_rank_sharded = self.is_distributed and self.dataset_load_mode == "eager"
         self.train_dataset = create_trajectory_dataset(
             load_mode=self.dataset_load_mode,
             sample_sequence_length=self.sample_sequence_length,
             hdf5_dataset_path=train_dataset_path,
             max_capacity=self.dataset_max_capacity,
+            rank=self.rank if self.train_dataset_rank_sharded else 0,
+            world_size=self.world_size if self.train_dataset_rank_sharded else 1,
         )
         if valid_datasets_cfg is not None and (not self.is_distributed or self.is_main_process):
             for valid_dataset_name, valid_dataset_path in valid_datasets_cfg.items():
@@ -899,7 +1023,7 @@ class MultiStepTrainer(SequenceModelTrainer):
     @torch.no_grad()
     def preprocess_data_batch(self, data):
         for key, value in data.items():
-            data[key] = value.to(self.device)
+            data[key] = value.to(self.device, non_blocking=self.non_blocking_data_transfer)
         data["states_w"] = data["states"].clone()
         data["next_states_w"] = data["next_states"].clone()
         data["gravity_dir_w"] = data["gravity_dir"].clone()

@@ -18,6 +18,7 @@ from torch.utils.data import Dataset
 from isaaclab_neural.utils.commons import DATASET_MODES
 
 BOOL_DATASET_KEYS = {"contact_masks"}
+INTEGER_DATASET_KEYS = {"contact_body_ids", "contact_token_overflow"}
 DatasetLoadMode = Literal["eager", "lazy"]
 
 
@@ -29,18 +30,22 @@ def _decode_attr(value: Any) -> Any:
 
 
 def _read_dataset_array(data_group: h5py.Group, key: str, selection: Any = None) -> np.ndarray:
-    """Read one HDF5 dataset while preserving boolean mask fields."""
+    """Read one HDF5 dataset while preserving categorical field dtypes."""
     dataset = cast(h5py.Dataset, data_group[key])
     data = np.asarray(dataset[selection] if selection is not None else dataset[()])
     if key in BOOL_DATASET_KEYS:
         return data.astype(bool)
+    if key in INTEGER_DATASET_KEYS:
+        return data.astype("int64")
     return data.astype("float32")
 
 
 def _torch_tensor(data: np.ndarray, device: str | torch.device | None = None) -> torch.Tensor:
-    """Convert loaded numpy data to torch with boolean masks preserved."""
+    """Convert loaded numpy data to torch with categorical dtypes preserved."""
     if data.dtype == np.bool_:
         return torch.as_tensor(data, dtype=torch.bool, device=device)
+    if np.issubdtype(data.dtype, np.integer):
+        return torch.as_tensor(data, dtype=torch.long, device=device)
     return torch.as_tensor(data, device=device)
 
 
@@ -140,22 +145,21 @@ def _read_flat_transition_range(
     flat_start: int,
     flat_end: int,
     num_transitions_per_trajectory: int,
+    *,
+    preserve_tail_shape: bool = False,
 ) -> np.ndarray:
-    """Read a flat transition range from a 2D or 3D rollout dataset."""
+    """Read a flat transition range while optionally preserving trailing axes."""
     if flat_end <= flat_start:
         raise ValueError("flat_end must be greater than flat_start.")
 
     if dataset.ndim == 2:
-        data = np.asarray(dataset[flat_start:flat_end])
-        if data.dtype != np.bool_:
-            data = data.astype("float32")
-        return data
+        return np.asarray(dataset[flat_start:flat_end])
 
-    if dataset.ndim != 3:
+    if dataset.ndim < 3:
         raise ValueError(f"Unsupported rollout dataset rank: {dataset.ndim}.")
 
-    feature_dim = int(np.prod(dataset.shape[2:]))
-    output = np.empty((flat_end - flat_start, feature_dim), dtype=np.bool_ if dataset.dtype == np.bool_ else np.float32)
+    tail_shape = tuple(dataset.shape[2:]) if preserve_tail_shape else (int(np.prod(dataset.shape[2:])),)
+    output = np.empty((flat_end - flat_start, *tail_shape), dtype=dataset.dtype)
     write_offset = 0
     position = flat_start
     while position < flat_end:
@@ -164,9 +168,7 @@ def _read_flat_transition_range(
         remaining_in_range = flat_end - position
         count = min(remaining_in_trajectory, remaining_in_range)
         chunk = np.asarray(dataset[traj_index, step_index : step_index + count])
-        if chunk.dtype != np.bool_:
-            chunk = chunk.astype("float32")
-        output[write_offset : write_offset + count] = chunk.reshape(count, feature_dim)
+        output[write_offset : write_offset + count] = chunk.reshape(count, *tail_shape)
         write_offset += count
         position += count
     return output
@@ -302,6 +304,7 @@ class LazyBatchTransitionDataset:
                 flat_start,
                 flat_start + self.batch_size,
                 self.num_transitions_per_trajectory,
+                preserve_tail_shape=key == "contact_tokens",
             )
         else:
             rows = [
@@ -310,6 +313,7 @@ class LazyBatchTransitionDataset:
                     int(batch_index) * self.batch_size + batch_slot,
                     int(batch_index) * self.batch_size + batch_slot + 1,
                     self.num_transitions_per_trajectory,
+                    preserve_tail_shape=key == "contact_tokens",
                 )[0]
                 for batch_slot, batch_index in enumerate(batch_indices)
             ]
@@ -317,6 +321,8 @@ class LazyBatchTransitionDataset:
 
         if key in BOOL_DATASET_KEYS:
             return torch.as_tensor(data, dtype=torch.bool)
+        if key in INTEGER_DATASET_KEYS:
+            return torch.as_tensor(data, dtype=torch.long)
         return torch.as_tensor(data, dtype=torch.float32)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
@@ -360,10 +366,20 @@ class TrajectoryDataset(Dataset):
         hdf5_dataset_path: str | Path,
         sample_sequence_length: int = 10,
         max_capacity: int = 100_000_000,
+        rank: int = 0,
+        world_size: int = 1,
     ):
+        if world_size <= 0:
+            raise ValueError("world_size must be positive.")
+        if rank < 0 or rank >= world_size:
+            raise ValueError(f"rank must be in [0, {world_size}), got {rank}.")
         self.max_capacity = max_capacity
+        self.rank = rank
+        self.world_size = world_size
+        self.is_rank_sharded = world_size > 1
         self.dataset: dict[str, np.ndarray] = {}
         self.traj_lengths: np.ndarray = np.array([], dtype="int32")
+        self.global_trajectory_indices = np.array([], dtype=np.int64)
         self.sample_sequence_length = sample_sequence_length
         self.mapping_index2traj = np.zeros((0, 2), dtype=int)
         self.length = 0
@@ -385,15 +401,22 @@ class TrajectoryDataset(Dataset):
                 int(np.ceil(self.max_capacity / num_transitions_per_trajectory)),
                 int(states_dataset.shape[0]),
             )
+            self.global_trajectory_indices = np.arange(self.rank, num_trajectories, self.world_size, dtype=np.int64)
+            if self.global_trajectory_indices.size == 0:
+                raise ValueError(
+                    f"Dataset has {num_trajectories} usable trajectories, which leaves rank {self.rank} "
+                    f"empty for world_size={self.world_size}."
+                )
+            trajectory_selection = slice(self.rank, num_trajectories, self.world_size)
 
             self.dataset = {}
             traj_lengths = None
             for key in data_group.keys():
                 if key == "traj_lengths":
-                    traj_lengths = np.asarray(cast(h5py.Dataset, data_group[key])[:num_trajectories]).astype("int32")
+                    traj_lengths = np.asarray(cast(h5py.Dataset, data_group[key])[trajectory_selection]).astype("int32")
                     continue
 
-                data = _read_dataset_array(data_group, key, slice(None, num_trajectories))
+                data = _read_dataset_array(data_group, key, trajectory_selection)
                 # Keep contact token set axes ``[..., K, 17]``; flatten only rank-3 fields.
                 if key == "contact_tokens" and data.ndim >= 4:
                     self.dataset[key] = data
@@ -401,7 +424,11 @@ class TrajectoryDataset(Dataset):
                     self.dataset[key] = data.reshape(data.shape[0], data.shape[1], -1)
 
             if traj_lengths is None:
-                traj_lengths = np.full(num_trajectories, num_transitions_per_trajectory, dtype="int32")
+                traj_lengths = np.full(
+                    self.global_trajectory_indices.size,
+                    num_transitions_per_trajectory,
+                    dtype="int32",
+                )
             self.traj_lengths = traj_lengths
 
     def update_sample_sequence_length(self, sample_sequence_length: int) -> None:
@@ -510,6 +537,8 @@ class LazyTrajectoryDataset(Dataset):
             data = np.asarray(self._hdf5.dataset(key)[traj_index, step_slice])
             if key in BOOL_DATASET_KEYS:
                 sample[key] = torch.as_tensor(data.astype(bool), dtype=torch.bool)
+            elif key in INTEGER_DATASET_KEYS:
+                sample[key] = torch.as_tensor(data.astype("int64"), dtype=torch.long)
             else:
                 sample[key] = torch.as_tensor(data.astype("float32"), dtype=torch.float32)
         return sample
@@ -558,6 +587,8 @@ def create_trajectory_dataset(
     hdf5_dataset_path: str | Path,
     sample_sequence_length: int = 10,
     max_capacity: int = 100_000_000,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> TrajectoryDataset | LazyTrajectoryDataset:
     """Create an eager or lazy trajectory-window dataset."""
     if load_mode == "lazy":
@@ -571,5 +602,7 @@ def create_trajectory_dataset(
             hdf5_dataset_path=hdf5_dataset_path,
             sample_sequence_length=sample_sequence_length,
             max_capacity=max_capacity,
+            rank=rank,
+            world_size=world_size,
         )
     raise ValueError(f"Unsupported dataset load_mode: {load_mode!r}. Expected 'eager' or 'lazy'.")

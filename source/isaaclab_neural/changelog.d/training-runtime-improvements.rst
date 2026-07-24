@@ -13,6 +13,12 @@ Added
 Changed
 ^^^^^^^
 
+* Changed eager sequence datasets to load one trajectory shard per distributed
+  rank and merge dataset statistics globally, avoiding full dataset replication
+  across ranks without changing checkpoint statistics.
+* Changed lazy loaders to support rank-4 contact-token batches and use pinned
+  memory, non-blocking transfers, persistent workers, and configurable
+  prefetching. Validation loaders now restart their sampling order each epoch.
 * Changed ``use_cuda_graph`` to follow
   :class:`~isaaclab_newton.physics.newton_manager_cfg.NewtonCfg` and live only
   on :class:`~isaaclab_neural.physics.nerd_newton_cfg.NerdNewtonCfg`. Remove
