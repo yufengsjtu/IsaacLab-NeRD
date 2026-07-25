@@ -11,6 +11,7 @@ import inspect
 import math
 import os
 import shutil
+import traceback
 from pathlib import Path
 from typing import Any, cast
 
@@ -337,6 +338,9 @@ class VanillaTrainer:
         self.eval_passive = bool(eval_cfg.get("passive", True))
         self.eval_require_terrain_context = bool(eval_cfg.get("require_terrain_context", False))
         self.eval_contact_context_tolerance = float(eval_cfg.get("contact_context_tolerance", 1.0e-4))
+        self.eval_contact_context_normal_tolerance = float(
+            eval_cfg.get("contact_context_normal_tolerance", 1.0e-3)
+        )
         self.eval_render = bool(cli_cfg.get("render", False))
 
         if self.action_mode not in ("action", "joint_f"):
@@ -353,6 +357,7 @@ class VanillaTrainer:
             device=self.device,
             require_terrain_context=self.eval_require_terrain_context,
             contact_context_tolerance=self.eval_contact_context_tolerance,
+            contact_context_normal_tolerance=self.eval_contact_context_normal_tolerance,
         )
 
     def _init_optimizer(self, algo_cfg: dict[str, Any]) -> None:
@@ -670,22 +675,35 @@ class VanillaTrainer:
                     shuffle=True,
                 )
                 avg_valid_losses, avg_valid_losses_itemized = {}, {}
+                main_process_exception = None
+                main_process_traceback = None
                 if self.is_main_process:
-                    for valid_dataset_name in self.valid_datasets:
-                        avg_valid_losses[valid_dataset_name], avg_valid_losses_itemized[valid_dataset_name], _ = (
-                            self.one_epoch(
-                                train=False,
-                                dataloader=valid_loaders[valid_dataset_name],
-                                dataloader_iter=valid_loader_iters[valid_dataset_name],
-                                num_batches=min(self.num_valid_batches, len(valid_loaders[valid_dataset_name])),
-                                distributed_reduce=False,
+                    try:
+                        for valid_dataset_name in self.valid_datasets:
+                            avg_valid_losses[valid_dataset_name], avg_valid_losses_itemized[valid_dataset_name], _ = (
+                                self.one_epoch(
+                                    train=False,
+                                    dataloader=valid_loaders[valid_dataset_name],
+                                    dataloader_iter=valid_loader_iters[valid_dataset_name],
+                                    num_batches=min(self.num_valid_batches, len(valid_loaders[valid_dataset_name])),
+                                    distributed_reduce=False,
+                                )
                             )
-                        )
-                with TimeProfiler(self.time_report, "eval"):
-                    if self.is_main_process and self.eval_interval > 0 and (epoch + 1) % self.eval_interval == 0:
-                        self.eval(epoch)
-                    if self.is_distributed:
-                        dist.barrier()
+                        with TimeProfiler(self.time_report, "eval"):
+                            if self.eval_interval > 0 and (epoch + 1) % self.eval_interval == 0:
+                                self.eval(epoch)
+                    except Exception as exc:
+                        main_process_exception = exc
+                        main_process_traceback = traceback.format_exc()
+                if self.is_distributed:
+                    error_payload = [main_process_traceback]
+                    dist.broadcast_object_list(error_payload, src=0)
+                    main_process_traceback = error_payload[0]
+                if main_process_traceback is not None:
+                    message = f"Main-process validation or rollout evaluation failed:\n{main_process_traceback}"
+                    if main_process_exception is not None:
+                        raise RuntimeError(message) from main_process_exception
+                    raise RuntimeError(message)
 
             if self.is_main_process and epoch % self.log_interval == 0:
                 self._log_training_epoch_summary(

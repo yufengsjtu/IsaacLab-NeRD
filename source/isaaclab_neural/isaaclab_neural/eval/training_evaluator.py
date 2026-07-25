@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import torch
 import warp as wp
@@ -14,7 +16,13 @@ from torch.utils.data import default_collate
 from tqdm import tqdm
 
 from isaaclab_neural.data import TrajectoryDataset
+from isaaclab_neural.eval.contact_set_matching import (
+    contact_set_matching_metrics,
+    contact_set_tolerance_failures,
+)
 from isaaclab_neural.utils.commons import JOINT_F_LIM, JOINT_Q_MAX, JOINT_Q_MIN, JOINT_QD_LIM
+
+logger = logging.getLogger(__name__)
 
 
 class TrainingRolloutEvaluator:
@@ -28,6 +36,7 @@ class TrainingRolloutEvaluator:
         device="cuda:0",
         require_terrain_context: bool = False,
         contact_context_tolerance: float = 1.0e-4,
+        contact_context_normal_tolerance: float = 1.0e-3,
     ):
         self.neural_env = neural_env
         self.device = device
@@ -35,6 +44,7 @@ class TrainingRolloutEvaluator:
         self.history_length = int(getattr(neural_env.solver_neural, "num_states_history", 1))
         self.require_terrain_context = require_terrain_context
         self.contact_context_tolerance = contact_context_tolerance
+        self.contact_context_normal_tolerance = contact_context_normal_tolerance
         self.trajectory_dataset = None
         if hdf5_dataset_path is not None:
             self.trajectory_dataset = TrajectoryDataset(
@@ -138,7 +148,11 @@ class TrainingRolloutEvaluator:
             indices = np.random.randint(low=0, high=dataset_length, size=num_traj)
         else:
             indices = np.arange(dataset_length)
-        return default_collate([self.trajectory_dataset[int(index)] for index in indices])
+        trajectories = default_collate([self.trajectory_dataset[int(index)] for index in indices])
+        window_locations = self.trajectory_dataset.mapping_index2traj[indices]
+        trajectories["_dataset_trajectory_index"] = torch.as_tensor(window_locations[:, 0], dtype=torch.long)
+        trajectories["_dataset_window_start"] = torch.as_tensor(window_locations[:, 1], dtype=torch.long)
+        return trajectories
 
     def _sample_online_trajectories(
         self,
@@ -254,13 +268,15 @@ class TrainingRolloutEvaluator:
             self._restore_terrain_context(trajectories, start, end)
             env.neural_adapter.reset(initial_states[start:end])
             self._preload_history(trajectories, start, end, history_offset)
-            self._validate_runtime_contact_context(trajectories, start, end, history_offset)
+            if eval_mode != "single-step":
+                self._validate_runtime_contact_context(trajectories, start, end, history_offset)
 
             for step in range(self.eval_horizon):
                 if eval_mode == "single-step":
                     state_step = history_offset + step
                     env.neural_adapter.reset(trajectories["states"][start:end, state_step].to(self.device))
                     self._preload_history(trajectories, start, end, state_step)
+                    self._validate_runtime_contact_context(trajectories, start, end, state_step)
                 rollout_states[start:end, step + 1].copy_(step_fn(controls[start:end, step]))
                 if render and hasattr(env.unwrapped, "render"):
                     env.unwrapped.render()
@@ -342,18 +358,103 @@ class TrainingRolloutEvaluator:
         if not self.require_terrain_context:
             return
         solver = self.neural_env.solver_neural
+        required_keys = {
+            "contact_masks",
+            "contact_points_0",
+            "contact_points_1",
+            "contact_normals",
+            "contact_depths",
+            "contact_thicknesses_0",
+            "contact_thicknesses_1",
+        }
+        missing = sorted(required_keys - set(solver.contacts))
+        if missing:
+            raise ValueError(f"Runtime contact context is missing fields required for set matching: {missing}.")
+
+        dataset_contacts = {}
+        runtime_contacts = {}
+        slot_max_errors = {}
         for key, runtime_value in solver.contacts.items():
             recorded = trajectories[key][start:end, history_offset].to(runtime_value.device)
-            if runtime_value.dtype == torch.bool:
-                if not torch.equal(runtime_value, recorded.bool()):
-                    raise ValueError(f"Runtime contact context mismatch for {key!r}.")
-            else:
+            dataset_contacts[key] = recorded.bool() if runtime_value.dtype == torch.bool else recorded
+            runtime_contacts[key] = runtime_value
+            if runtime_value.dtype != torch.bool:
                 max_error = torch.max(torch.abs(runtime_value - recorded)).item()
-                if max_error > self.contact_context_tolerance:
-                    raise ValueError(
-                        f"Runtime contact context mismatch for {key!r}: max error {max_error:.6g} "
-                        f"exceeds {self.contact_context_tolerance:.6g}."
-                    )
+                slot_max_errors[key] = max_error
+
+        dataset_mask = dataset_contacts["contact_masks"]
+        runtime_mask = runtime_contacts["contact_masks"]
+        mask_mismatch = dataset_mask != runtime_mask
+        normal_slot_error = slot_max_errors["contact_normals"]
+        other_slot_errors = [
+            error for key, error in slot_max_errors.items() if key != "contact_normals"
+        ]
+        slots_match = (
+            not mask_mismatch.any()
+            and np.isfinite(normal_slot_error)
+            and normal_slot_error <= self.contact_context_normal_tolerance
+            and all(
+                np.isfinite(error) and error <= self.contact_context_tolerance
+                for error in other_slot_errors
+            )
+        )
+        if slots_match:
+            return
+
+        num_contacts = dataset_mask.shape[-1]
+        set_metrics = contact_set_matching_metrics(
+            dataset_contacts,
+            runtime_contacts,
+            num_contacts,
+            deduplication_tolerance=self.contact_context_tolerance,
+            normal_tolerance=self.contact_context_normal_tolerance,
+        )
+        failures = contact_set_tolerance_failures(
+            set_metrics,
+            point_tolerance=self.contact_context_tolerance,
+            normal_tolerance=self.contact_context_normal_tolerance,
+        )
+
+        suspect_envs = mask_mismatch.any(dim=-1)
+        if not suspect_envs.any():
+            dataset_points = dataset_contacts["contact_points_1"].reshape(end - start, num_contacts, 3)
+            runtime_points = runtime_contacts["contact_points_1"].reshape(end - start, num_contacts, 3)
+            point_slot_error = torch.linalg.vector_norm(dataset_points - runtime_points, dim=-1)
+            suspect_envs = (point_slot_error > self.contact_context_tolerance).any(dim=-1)
+        detail_rows = []
+        for local_env in torch.nonzero(suspect_envs, as_tuple=False).flatten()[:8].tolist():
+            slot_indices = torch.nonzero(mask_mismatch[local_env], as_tuple=False).flatten().tolist()
+            batch_index = start + local_env
+            trajectory_index = int(
+                trajectories.get("_dataset_trajectory_index", torch.full((end,), -1))[batch_index]
+            )
+            window_start = int(trajectories.get("_dataset_window_start", torch.full((end,), -1))[batch_index])
+            terrain_level = int(trajectories.get("terrain_level", torch.full((end,), -1))[batch_index])
+            terrain_type = int(trajectories.get("terrain_type", torch.full((end,), -1))[batch_index])
+            detail_rows.append(
+                f"trajectory={trajectory_index}, step={window_start + history_offset}, "
+                f"terrain=({terrain_level}, {terrain_type}), mask_slots={slot_indices[:8]}, "
+                f"dataset_active={int(dataset_mask[local_env].sum())}, "
+                f"runtime_active={int(runtime_mask[local_env].sum())}"
+            )
+
+        mask_mismatch_count = int(mask_mismatch.sum().item())
+        summary = (
+            f"mask_mismatches={mask_mismatch_count}/{mask_mismatch.numel()}, "
+            f"slot_point1_max={slot_max_errors['contact_points_1']:.6g}, "
+            f"hausdorff_max={set_metrics['set_hausdorff_distance_max']:.6g}, "
+            f"matched_normal_max={set_metrics['matched_normal_l2_max']:.6g}, "
+            f"matched_depth_max={set_metrics['matched_depth_abs_max']:.6g}, "
+            f"unique_count_diff_max={set_metrics['unique_count_abs_diff_max']:.6g}; "
+            + " | ".join(detail_rows)
+        )
+        if failures:
+            raise ValueError(
+                "Runtime contact-set geometry mismatch: "
+                + "; ".join(failures)
+                + f". Diagnostics: {summary}"
+            )
+        logger.warning("Runtime contact slots differed, but unordered contact sets matched: %s", summary)
 
     def _step_action(self, action: torch.Tensor) -> torch.Tensor:
         env = self.neural_env.unwrapped

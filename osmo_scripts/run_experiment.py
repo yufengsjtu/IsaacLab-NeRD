@@ -310,6 +310,12 @@ def run_context_diagnostic(experiment: dict, specs: list[DatasetSpec], dataset_d
         command += ["--states-frame", str(experiment["states_frame"])]
     if experiment.get("diagnostic_contact_tolerance") is not None:
         command += ["--contact-tolerance", str(experiment["diagnostic_contact_tolerance"])]
+    if experiment.get("diagnostic_contact_normal_tolerance") is not None:
+        command += ["--contact-normal-tolerance", str(experiment["diagnostic_contact_normal_tolerance"])]
+    if experiment.get("diagnostic_random_samples"):
+        command += ["--random-samples", str(experiment["diagnostic_random_samples"])]
+        command += ["--random-seed", str(experiment.get("diagnostic_random_seed", 0))]
+        command += ["--eval-horizon", str(experiment.get("diagnostic_eval_horizon", 10))]
     if experiment.get("train_preset"):
         command.append(f"presets={experiment['train_preset']}")
     subprocess.run(command, check=True)

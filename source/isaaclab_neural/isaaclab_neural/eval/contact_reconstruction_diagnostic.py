@@ -11,7 +11,7 @@ import argparse
 import copy
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import h5py
 import isaaclab_neural.envs  # noqa: F401 - registers built-in NeRD tasks
@@ -23,6 +23,10 @@ from isaaclab_neural.data import (
     read_terrain_context,
     set_terrain_seed,
     validate_terrain_context,
+)
+from isaaclab_neural.eval.contact_set_matching import (
+    contact_set_matching_metrics,
+    contact_set_tolerance_failures,
 )
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 from isaaclab_neural.solvers.neural_solver import NeuralSolver
@@ -41,6 +45,19 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--trajectory-start", type=int, default=0, help="First trajectory index to compare.")
     parser.add_argument("--step", type=int, default=0, help="Trajectory step to compare.")
     parser.add_argument(
+        "--random-samples",
+        type=int,
+        default=0,
+        help="Random trajectory windows to compare in batches of --num-envs. Disabled when 0.",
+    )
+    parser.add_argument("--random-seed", type=int, default=0, help="Seed for random trajectory-window sampling.")
+    parser.add_argument(
+        "--eval-horizon",
+        type=int,
+        default=10,
+        help="Reserve this many post-reset steps when sampling random windows.",
+    )
+    parser.add_argument(
         "--require-terrain-context",
         action="store_true",
         help="Require terrain provenance, restore trajectory patches, and fail on contact mismatch.",
@@ -55,7 +72,13 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "--contact-tolerance",
         type=float,
         default=1.0e-4,
-        help="Maximum accepted reconstructed contact-point Chamfer distance.",
+        help="Maximum accepted matched contact-point and depth error.",
+    )
+    parser.add_argument(
+        "--contact-normal-tolerance",
+        type=float,
+        default=1.0e-3,
+        help="Maximum accepted matched contact-normal L2 error.",
     )
     parser.add_argument("--num-contacts-per-env", type=int, default=64)
     parser.add_argument("--contact-mode", choices=("fixed_ground", "newton_native"), default="newton_native")
@@ -149,7 +172,7 @@ def load_dataset_batch(
 
     path = Path(dataset_path).expanduser()
     with h5py.File(path, "r", swmr=True, libver="latest") as dataset_file:
-        data_group = dataset_file["data"]
+        data_group = cast(h5py.Group, dataset_file["data"])
         required = {
             "states",
             "next_states",
@@ -168,13 +191,15 @@ def load_dataset_batch(
         if missing:
             raise ValueError(f"Dataset is missing required diagnostic fields: {missing}.")
         trajectory_end = trajectory_start + num_envs
-        states = data_group["states"]
+        states = cast(h5py.Dataset, data_group["states"])
         if trajectory_end > states.shape[0]:
             raise ValueError(f"Requested trajectory end {trajectory_end}, but dataset contains {states.shape[0]}.")
         if step < 0 or step >= states.shape[1]:
             raise ValueError(f"Step {step} is outside dataset trajectory length {states.shape[1]}.")
         if "traj_lengths" in data_group:
-            traj_lengths = np.asarray(data_group["traj_lengths"][trajectory_start:trajectory_end])
+            traj_lengths = np.asarray(
+                cast(h5py.Dataset, data_group["traj_lengths"])[trajectory_start:trajectory_end]
+            )
             if np.any(step >= traj_lengths):
                 raise ValueError(
                     f"Step {step} exceeds one or more selected trajectory lengths: {traj_lengths.tolist()}."
@@ -185,17 +210,105 @@ def load_dataset_batch(
         for key, dataset in data_group.items():
             if key == "traj_lengths":
                 continue
+            dataset = cast(h5py.Dataset, dataset)
             array = np.asarray(dataset[trajectory_start:trajectory_end, history_start : step + 1])
             if array.dtype == np.bool_:
                 batch[key] = torch.as_tensor(array, dtype=torch.bool, device=device)
             else:
                 batch[key] = torch.as_tensor(array, dtype=torch.float32, device=device)
-        if "context" in dataset_file and "trajectories" in dataset_file["context"]:
-            trajectory_group = dataset_file["context"]["trajectories"]
-            for key, dataset in trajectory_group.items():
-                array = np.asarray(dataset[trajectory_start:trajectory_end])
-                batch[key] = torch.as_tensor(array, device=device)
+        if "context" in dataset_file:
+            context_group = cast(h5py.Group, dataset_file["context"])
+            if "trajectories" in context_group:
+                trajectory_group = cast(h5py.Group, context_group["trajectories"])
+                for key, dataset in trajectory_group.items():
+                    dataset = cast(h5py.Dataset, dataset)
+                    array = np.asarray(dataset[trajectory_start:trajectory_end])
+                    batch[key] = torch.as_tensor(array, device=device)
     return batch
+
+
+def load_random_dataset_batch(
+    dataset_path: str,
+    *,
+    num_envs: int,
+    history_length: int,
+    eval_horizon: int,
+    rng: np.random.Generator,
+    device: str,
+    excluded_trajectory_indices: set[int] | None = None,
+) -> tuple[dict[str, torch.Tensor], dict[str, np.ndarray]]:
+    """Load random evaluator-compatible history windows."""
+    if num_envs <= 0:
+        raise ValueError("num_envs must be positive.")
+    if history_length <= 0:
+        raise ValueError("history_length must be positive.")
+    if eval_horizon <= 0:
+        raise ValueError("eval_horizon must be positive.")
+
+    path = Path(dataset_path).expanduser()
+    with h5py.File(path, "r", swmr=True, libver="latest") as dataset_file:
+        data_group = cast(h5py.Group, dataset_file["data"])
+        states = cast(h5py.Dataset, data_group["states"])
+        if "traj_lengths" in data_group:
+            traj_lengths = np.asarray(cast(h5py.Dataset, data_group["traj_lengths"])).astype(np.int64)
+        else:
+            traj_lengths = np.full(states.shape[0], states.shape[1], dtype=np.int64)
+        eligible = np.flatnonzero(traj_lengths >= history_length + eval_horizon - 1)
+        if excluded_trajectory_indices:
+            excluded = np.fromiter(excluded_trajectory_indices, dtype=np.int64)
+            eligible = eligible[~np.isin(eligible, excluded)]
+        if eligible.size == 0:
+            if excluded_trajectory_indices:
+                raise ValueError("No unsampled evaluator-compatible trajectories remain.")
+            raise ValueError(
+                f"No trajectories are long enough for history_length={history_length} "
+                f"and eval_horizon={eval_horizon}."
+            )
+        if excluded_trajectory_indices is not None and eligible.size < num_envs:
+            raise ValueError(
+                f"Requested {num_envs} additional unique trajectories, but only {eligible.size} remain eligible."
+            )
+
+        trajectory_indices = rng.choice(
+            eligible,
+            size=num_envs,
+            replace=excluded_trajectory_indices is None,
+        )
+        steps = np.asarray(
+            [
+                rng.integers(history_length - 1, int(traj_lengths[trajectory_index]) - eval_horizon + 1)
+                for trajectory_index in trajectory_indices
+            ],
+            dtype=np.int64,
+        )
+        batch = {}
+        for key, dataset in data_group.items():
+            if key == "traj_lengths":
+                continue
+            dataset = cast(h5py.Dataset, dataset)
+            arrays = [
+                np.asarray(dataset[trajectory_index, step - history_length + 1 : step + 1])
+                for trajectory_index, step in zip(trajectory_indices, steps, strict=True)
+            ]
+            array = np.stack(arrays)
+            if array.dtype == np.bool_:
+                batch[key] = torch.as_tensor(array, dtype=torch.bool, device=device)
+            else:
+                batch[key] = torch.as_tensor(array, dtype=torch.float32, device=device)
+        if "context" in dataset_file:
+            context_group = cast(h5py.Group, dataset_file["context"])
+            if "trajectories" in context_group:
+                trajectory_group = cast(h5py.Group, context_group["trajectories"])
+                for key, dataset in trajectory_group.items():
+                    dataset = cast(h5py.Dataset, dataset)
+                    array = np.stack([np.asarray(dataset[index]) for index in trajectory_indices])
+                    batch[key] = torch.as_tensor(array, device=device)
+
+    metadata = {
+        "trajectory_index": trajectory_indices,
+        "step": steps,
+    }
+    return batch, metadata
 
 
 def clone_batch(batch: dict[str, Any]) -> dict[str, Any]:
@@ -220,6 +333,8 @@ def predict_next_states(
     dt: float,
 ) -> torch.Tensor:
     """Run one model step and convert the prediction back to world coordinates."""
+    if solver.neural_model is None:
+        raise ValueError("A neural model is required for prediction diagnostics.")
     model_inputs = clone_batch(processed_inputs)
     prediction = solver.neural_model(model_inputs, single_step=True).squeeze(1)
     next_states_model = solver.convert_prediction_to_next_states(
@@ -248,50 +363,80 @@ def contact_metrics(
     dataset_inputs: dict[str, torch.Tensor],
     runtime_inputs: dict[str, torch.Tensor],
     num_contacts_per_env: int,
+    deduplication_tolerance: float = 1.0e-4,
+    normal_tolerance: float = 1.0e-3,
 ) -> dict[str, float]:
     """Compare body-frame contacts slot-wise and as unordered point sets."""
     dataset_mask = dataset_inputs["contact_masks"][:, -1].bool()
     runtime_mask = runtime_inputs["contact_masks"][:, -1].bool()
+    mask_mismatch = dataset_mask != runtime_mask
     dataset_points = dataset_inputs["contact_points_1"][:, -1].reshape(-1, num_contacts_per_env, 3)
     runtime_points = runtime_inputs["contact_points_1"][:, -1].reshape(-1, num_contacts_per_env, 3)
 
     same_active = dataset_mask & runtime_mask
+    shared_active_slot_count = int(same_active.sum())
     if same_active.any():
         slot_distance = torch.linalg.vector_norm(dataset_points - runtime_points, dim=-1)[same_active]
         slot_mean = float(slot_distance.mean())
         slot_max = float(slot_distance.max())
+        slot_sum = float(slot_distance.sum())
     else:
         slot_mean = float("nan")
         slot_max = float("nan")
+        slot_sum = 0.0
 
-    chamfer_values = []
     count_differences = []
-    one_sided_empty_count = 0
     for env_index in range(dataset_mask.shape[0]):
         dataset_active = dataset_points[env_index, dataset_mask[env_index]]
         runtime_active = runtime_points[env_index, runtime_mask[env_index]]
         count_differences.append(abs(dataset_active.shape[0] - runtime_active.shape[0]))
-        if dataset_active.shape[0] == 0 and runtime_active.shape[0] == 0:
-            chamfer_values.append(torch.tensor(0.0, device=dataset_points.device))
-        elif dataset_active.shape[0] == 0 or runtime_active.shape[0] == 0:
-            chamfer_values.append(torch.tensor(float("inf"), device=dataset_points.device))
-            one_sided_empty_count += 1
-        else:
-            distances = torch.cdist(dataset_active, runtime_active)
-            chamfer_values.append(0.5 * (distances.min(dim=1).values.mean() + distances.min(dim=0).values.mean()))
-
-    chamfer_tensor = torch.stack(chamfer_values)
-    return {
+    set_inputs_dataset = {
+        key: dataset_inputs[key][:, -1]
+        for key in (
+            "contact_masks",
+            "contact_points_0",
+            "contact_points_1",
+            "contact_normals",
+            "contact_depths",
+            "contact_thicknesses_0",
+            "contact_thicknesses_1",
+        )
+    }
+    set_inputs_runtime = {
+        key: runtime_inputs[key][:, -1]
+        for key in (
+            "contact_masks",
+            "contact_points_0",
+            "contact_points_1",
+            "contact_normals",
+            "contact_depths",
+            "contact_thicknesses_0",
+            "contact_thicknesses_1",
+        )
+    }
+    metrics = {
         "mask_agreement": float((dataset_mask == runtime_mask).float().mean()),
+        "mask_mismatch_count": float(mask_mismatch.sum()),
+        "mask_total_count": float(mask_mismatch.numel()),
+        "mismatched_env_count": float(mask_mismatch.any(dim=-1).sum()),
         "dataset_active_mean": float(dataset_mask.sum(dim=-1).float().mean()),
         "runtime_active_mean": float(runtime_mask.sum(dim=-1).float().mean()),
         "active_count_abs_diff_mean": float(torch.tensor(count_differences, dtype=torch.float32).mean()),
         "slot_point_distance_mean": slot_mean,
         "slot_point_distance_max": slot_max,
-        "set_chamfer_distance_mean": float(chamfer_tensor.mean()),
-        "one_sided_empty_count": float(one_sided_empty_count),
-        "one_sided_empty_fraction": one_sided_empty_count / max(dataset_mask.shape[0], 1),
+        "slot_point_distance_sum": slot_sum,
+        "shared_active_slot_count": float(shared_active_slot_count),
     }
+    metrics.update(
+        contact_set_matching_metrics(
+            set_inputs_dataset,
+            set_inputs_runtime,
+            num_contacts_per_env,
+            deduplication_tolerance=deduplication_tolerance,
+            normal_tolerance=normal_tolerance,
+        )
+    )
+    return metrics
 
 
 def input_difference_metrics(
@@ -356,30 +501,60 @@ def restore_terrain_patch(env, batch: dict[str, torch.Tensor], *, required: bool
     terrain.env_origins[:num_envs].copy_(batch["env_origin"].to(terrain.device, dtype=torch.float32))
 
 
-def validate_contact_metrics(metrics: dict[str, float], tolerance: float) -> None:
-    """Fail strict diagnostics when reconstructed contacts differ materially."""
-    if metrics["mask_agreement"] != 1.0:
-        raise ValueError(f"Contact-mask agreement is {metrics['mask_agreement']:.8g}, expected 1.0.")
-    chamfer = metrics["set_chamfer_distance_mean"]
-    if not np.isfinite(chamfer) or chamfer > tolerance:
-        raise ValueError(f"Contact-point Chamfer distance {chamfer:.8g} exceeds tolerance {tolerance:.8g}.")
+def validate_contact_metrics(
+    metrics: dict[str, float],
+    tolerance: float,
+    normal_tolerance: float = 1.0e-3,
+) -> None:
+    """Fail strict diagnostics only when unordered contact geometry differs."""
+    failures = contact_set_tolerance_failures(
+        metrics,
+        point_tolerance=tolerance,
+        normal_tolerance=normal_tolerance,
+    )
+    if failures:
+        raise ValueError("Contact-set reconstruction mismatch: " + "; ".join(failures) + ".")
 
 
-def run_diagnostic(env, args: argparse.Namespace) -> None:
-    """Run dataset-contact and runtime-contact one-step A/B predictions."""
+def print_contact_mismatch_examples(
+    dataset_inputs: dict[str, torch.Tensor],
+    runtime_inputs: dict[str, torch.Tensor],
+    dataset_raw: dict[str, torch.Tensor],
+    metadata: dict[str, np.ndarray],
+) -> None:
+    """Print trajectory and terrain coordinates for mismatched contact masks."""
+    dataset_mask = dataset_inputs["contact_masks"][:, -1].bool()
+    runtime_mask = runtime_inputs["contact_masks"][:, -1].bool()
+    mismatch = dataset_mask != runtime_mask
+    mismatched_envs = torch.nonzero(mismatch.any(dim=-1), as_tuple=False).flatten()
+    for env_index in mismatched_envs[:8].tolist():
+        slots = torch.nonzero(mismatch[env_index], as_tuple=False).flatten().tolist()
+        terrain_level = int(dataset_raw.get("terrain_level", torch.full((dataset_mask.shape[0],), -1))[env_index])
+        terrain_type = int(dataset_raw.get("terrain_type", torch.full((dataset_mask.shape[0],), -1))[env_index])
+        print(
+            "[contact-mismatch] "
+            f"trajectory={int(metadata['trajectory_index'][env_index])}, "
+            f"step={int(metadata['step'][env_index])}, terrain=({terrain_level}, {terrain_type}), "
+            f"slots={slots[:8]}, dataset_active={int(dataset_mask[env_index].sum())}, "
+            f"runtime_active={int(runtime_mask[env_index].sum())}"
+        )
+
+
+def compare_diagnostic_batch(
+    env,
+    args: argparse.Namespace,
+    dataset_raw: dict[str, torch.Tensor],
+    metadata: dict[str, np.ndarray],
+    *,
+    print_all_metrics: bool,
+    run_predictions: bool,
+) -> dict[str, float]:
+    """Reset one runtime batch and compare it with recorded contacts."""
     adapter = env.neural_adapter
     solver = adapter.solver
     if solver.neural_model is not None:
         solver.eval()
 
-    dataset_raw = load_dataset_batch(
-        args.dataset,
-        trajectory_start=args.trajectory_start,
-        num_envs=args.num_envs,
-        step=args.step,
-        device=str(solver.torch_device),
-        history_length=int(getattr(solver, "num_states_history", 1)),
-    )
     if dataset_raw["contact_masks"].shape[-1] != solver.num_contacts_per_env:
         raise ValueError(
             f"Dataset contact slots ({dataset_raw['contact_masks'].shape[-1]}) do not match "
@@ -402,19 +577,22 @@ def run_diagnostic(env, args: argparse.Namespace) -> None:
             runtime_raw[key][:, -1:] = value
     runtime_processed = preprocess_inputs(solver, runtime_raw)
 
-    print(
-        "[setup] "
-        f"dataset={args.dataset}, checkpoint={args.checkpoint or 'none'}, num_envs={args.num_envs}, "
-        f"trajectory_start={args.trajectory_start}, step={args.step}, "
-        f"history_length={dataset_raw['states'].shape[1]}"
+    comparison_metrics = contact_metrics(
+        dataset_processed,
+        runtime_processed,
+        solver.num_contacts_per_env,
+        deduplication_tolerance=args.contact_tolerance,
+        normal_tolerance=args.contact_normal_tolerance,
     )
-    comparison_metrics = contact_metrics(dataset_processed, runtime_processed, solver.num_contacts_per_env)
-    print_metrics("contact_comparison", comparison_metrics)
-    print_metrics(
-        "input_differences",
-        input_difference_metrics(dataset_processed, runtime_processed, solver.num_contacts_per_env),
-    )
-    if solver.neural_model is not None:
+    if print_all_metrics or comparison_metrics["mask_mismatch_count"] > 0:
+        print_metrics("contact_comparison", comparison_metrics)
+        print_metrics(
+            "input_differences",
+            input_difference_metrics(dataset_processed, runtime_processed, solver.num_contacts_per_env),
+        )
+    if comparison_metrics["mask_mismatch_count"] > 0:
+        print_contact_mismatch_examples(dataset_processed, runtime_processed, dataset_raw, metadata)
+    if run_predictions and solver.neural_model is not None:
         dataset_prediction = predict_next_states(solver, dataset_processed, dt)
         runtime_prediction = predict_next_states(solver, runtime_processed, dt)
         print_metrics("dataset_contact_prediction", state_error(solver, dataset_prediction, target_next_states))
@@ -423,8 +601,139 @@ def run_diagnostic(env, args: argparse.Namespace) -> None:
             "prediction_difference",
             state_error(solver, runtime_prediction, dataset_prediction),
         )
+    return comparison_metrics
+
+
+def aggregate_contact_metrics(metrics_by_batch: list[dict[str, float]], batch_size: int) -> dict[str, float]:
+    """Aggregate equal-sized random diagnostic batches."""
+    mismatch_count = sum(metrics["mask_mismatch_count"] for metrics in metrics_by_batch)
+    mask_total = sum(metrics["mask_total_count"] for metrics in metrics_by_batch)
+    mean_keys = (
+        "dataset_active_mean",
+        "runtime_active_mean",
+        "active_count_abs_diff_mean",
+        "set_chamfer_distance_mean",
+        "set_hausdorff_distance_mean",
+        "dataset_unique_active_mean",
+        "runtime_unique_active_mean",
+        "unique_count_abs_diff_mean",
+        "one_sided_empty_fraction",
+    )
+    max_keys = (
+        "set_hausdorff_distance_max",
+        "matched_point0_distance_max",
+        "matched_normal_l2_max",
+        "matched_depth_abs_max",
+        "matched_thickness0_abs_max",
+        "matched_thickness1_abs_max",
+        "unique_count_abs_diff_max",
+    )
+    slot_max_values = np.asarray(
+        [
+            metrics["slot_point_distance_max"]
+            for metrics in metrics_by_batch
+            if metrics["shared_active_slot_count"] > 0
+        ],
+        dtype=np.float64,
+    )
+    summary = {
+        "mask_agreement": 1.0 - mismatch_count / max(mask_total, 1.0),
+        "mask_mismatch_count": mismatch_count,
+        "mask_total_count": mask_total,
+        "mismatched_env_count": sum(metrics["mismatched_env_count"] for metrics in metrics_by_batch),
+        "slot_point_distance_max": (
+            float("nan")
+            if slot_max_values.size == 0 or np.isnan(slot_max_values).any()
+            else float(slot_max_values.max())
+        ),
+        "one_sided_empty_count": sum(metrics["one_sided_empty_count"] for metrics in metrics_by_batch),
+        "slot_point_distance_sum": sum(metrics["slot_point_distance_sum"] for metrics in metrics_by_batch),
+        "shared_active_slot_count": sum(metrics["shared_active_slot_count"] for metrics in metrics_by_batch),
+        "num_samples": float(len(metrics_by_batch) * batch_size),
+    }
+    for key in mean_keys:
+        values = np.asarray([metrics[key] for metrics in metrics_by_batch], dtype=np.float64)
+        summary[key] = float(values.mean())
+    summary["slot_point_distance_mean"] = (
+        summary["slot_point_distance_sum"] / summary["shared_active_slot_count"]
+        if summary["shared_active_slot_count"] > 0
+        else float("nan")
+    )
+    for key in max_keys:
+        values = np.asarray([metrics[key] for metrics in metrics_by_batch], dtype=np.float64)
+        summary[key] = float("nan") if np.isnan(values).any() else float(values.max())
+    return summary
+
+
+def run_diagnostic(env, args: argparse.Namespace) -> None:
+    """Run dataset-contact and runtime-contact one-step A/B predictions."""
+    solver = env.neural_adapter.solver
+    history_length = int(getattr(solver, "num_states_history", 1))
+    print(
+        "[setup] "
+        f"dataset={args.dataset}, checkpoint={args.checkpoint or 'none'}, num_envs={args.num_envs}, "
+        f"history_length={history_length}, random_samples={args.random_samples}"
+    )
+    if args.random_samples > 0:
+        if args.random_samples % args.num_envs != 0:
+            raise ValueError("--random-samples must be divisible by --num-envs.")
+        rng = np.random.default_rng(args.random_seed)
+        metrics_by_batch = []
+        sampled_trajectory_indices: set[int] = set()
+        for batch_index in range(args.random_samples // args.num_envs):
+            dataset_raw, metadata = load_random_dataset_batch(
+                args.dataset,
+                num_envs=args.num_envs,
+                history_length=history_length,
+                eval_horizon=args.eval_horizon,
+                rng=rng,
+                device=str(solver.torch_device),
+                excluded_trajectory_indices=sampled_trajectory_indices,
+            )
+            sampled_trajectory_indices.update(int(index) for index in metadata["trajectory_index"])
+            metrics = compare_diagnostic_batch(
+                env,
+                args,
+                dataset_raw,
+                metadata,
+                print_all_metrics=False,
+                run_predictions=False,
+            )
+            metrics_by_batch.append(metrics)
+            print(
+                f"[random-progress] batch={batch_index + 1}/{args.random_samples // args.num_envs}, "
+                f"mask_mismatches={int(metrics['mask_mismatch_count'])}"
+            )
+        summary = aggregate_contact_metrics(metrics_by_batch, args.num_envs)
+        summary["unique_trajectory_count"] = float(len(sampled_trajectory_indices))
+        print_metrics("random_contact_summary", summary)
+        if args.require_terrain_context:
+            validate_contact_metrics(summary, args.contact_tolerance, args.contact_normal_tolerance)
+            print("[strict-context] PASS")
+        return
+
+    dataset_raw = load_dataset_batch(
+        args.dataset,
+        trajectory_start=args.trajectory_start,
+        num_envs=args.num_envs,
+        step=args.step,
+        device=str(solver.torch_device),
+        history_length=history_length,
+    )
+    metadata = {
+        "trajectory_index": np.arange(args.trajectory_start, args.trajectory_start + args.num_envs),
+        "step": np.full(args.num_envs, args.step),
+    }
+    metrics = compare_diagnostic_batch(
+        env,
+        args,
+        dataset_raw,
+        metadata,
+        print_all_metrics=True,
+        run_predictions=True,
+    )
     if args.require_terrain_context:
-        validate_contact_metrics(comparison_metrics, args.contact_tolerance)
+        validate_contact_metrics(metrics, args.contact_tolerance, args.contact_normal_tolerance)
         print("[strict-context] PASS")
 
 

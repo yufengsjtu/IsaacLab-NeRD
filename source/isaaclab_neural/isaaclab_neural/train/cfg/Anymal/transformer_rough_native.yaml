@@ -58,6 +58,7 @@ algorithm:
     num_rollouts: 1024
     require_terrain_context: True
     contact_context_tolerance: 1.0e-4
+    contact_context_normal_tolerance: 1.0e-3
     # dataset_path: ./data/datasets/Anymal-C-Rough-Native/dataset_zero_action_valid.hdf5
     dataset_path: ./data/datasets/Anymal-C-Rough-Native/dataset_lstm_actuator_policy_valid.hdf5
 
