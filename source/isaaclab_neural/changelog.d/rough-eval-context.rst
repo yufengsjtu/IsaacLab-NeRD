@@ -5,6 +5,11 @@ Changed
   dataset terrain context and warm-start transformer state history. Regenerate
   rough-terrain evaluation datasets to include the required context metadata.
 
+* Changed Newton-native rollout contact mismatches to diagnostic warnings
+  because repeated reconstruction may produce different contact manifolds.
+  Terrain, reset-state, and transformer-history context remain strictly
+  validated.
+
 Added
 ^^^^^
 

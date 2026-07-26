@@ -35,6 +35,8 @@ class TrainingRolloutEvaluator:
         eval_horizon: int = 10,
         device="cuda:0",
         require_terrain_context: bool = False,
+        contact_context_validation: str | None = None,
+        state_context_tolerance: float = 1.0e-5,
         contact_context_tolerance: float = 1.0e-4,
         contact_context_normal_tolerance: float = 1.0e-3,
     ):
@@ -43,6 +45,17 @@ class TrainingRolloutEvaluator:
         self.eval_horizon = eval_horizon
         self.history_length = int(getattr(neural_env.solver_neural, "num_states_history", 1))
         self.require_terrain_context = require_terrain_context
+        if contact_context_validation is None:
+            contact_context_validation = (
+                "warn" if getattr(neural_env.solver_neural, "contact_mode", None) == "newton_native" else "strict"
+            )
+        if contact_context_validation not in ("strict", "warn"):
+            raise ValueError(
+                "contact_context_validation must be 'strict' or 'warn', "
+                f"got {contact_context_validation!r}."
+            )
+        self.contact_context_validation = contact_context_validation
+        self.state_context_tolerance = state_context_tolerance
         self.contact_context_tolerance = contact_context_tolerance
         self.contact_context_normal_tolerance = contact_context_normal_tolerance
         self.trajectory_dataset = None
@@ -267,6 +280,7 @@ class TrainingRolloutEvaluator:
             rollout_states[start:end, 0].copy_(initial_states[start:end])
             self._restore_terrain_context(trajectories, start, end)
             env.neural_adapter.reset(initial_states[start:end])
+            self._validate_runtime_state_context(trajectories, start, end, history_offset)
             self._preload_history(trajectories, start, end, history_offset)
             if eval_mode != "single-step":
                 self._validate_runtime_contact_context(trajectories, start, end, history_offset)
@@ -275,6 +289,7 @@ class TrainingRolloutEvaluator:
                 if eval_mode == "single-step":
                     state_step = history_offset + step
                     env.neural_adapter.reset(trajectories["states"][start:end, state_step].to(self.device))
+                    self._validate_runtime_state_context(trajectories, start, end, state_step)
                     self._preload_history(trajectories, start, end, state_step)
                     self._validate_runtime_contact_context(trajectories, start, end, state_step)
                 rollout_states[start:end, step + 1].copy_(step_fn(controls[start:end, step]))
@@ -315,6 +330,8 @@ class TrainingRolloutEvaluator:
         solver = self.neural_env.solver_neural
         preload = getattr(solver, "preload_states_history", None)
         if preload is None:
+            if self.require_terrain_context:
+                raise ValueError("Strict rollout evaluation requires solver history preloading support.")
             return
         keys = {"root_body_q", "states", "joint_f", "gravity_dir", *solver.contacts.keys()}
         preload(
@@ -347,6 +364,39 @@ class TrainingRolloutEvaluator:
         terrain.terrain_types[: end - start].copy_(trajectories["terrain_type"][start:end].to(terrain.device))
         terrain.env_origins[: end - start].copy_(trajectories["env_origin"][start:end].to(terrain.device))
 
+    def _validate_runtime_state_context(
+        self,
+        trajectories: dict[str, torch.Tensor],
+        start: int,
+        end: int,
+        history_offset: int,
+    ) -> None:
+        """Ensure reset-time state and root pose match the recorded frame."""
+        if not self.require_terrain_context:
+            return
+        required = {"states", "root_body_q"}
+        missing = sorted(required - set(trajectories))
+        if missing:
+            raise ValueError(f"Strict rollout evaluation is missing reset context fields: {missing}.")
+
+        solver = self.neural_env.solver_neural
+        runtime_context = {
+            "states": solver.states,
+            "root_body_q": solver.root_body_q,
+        }
+        failures = []
+        for key, runtime_value in runtime_context.items():
+            recorded = trajectories[key][start:end, history_offset].to(runtime_value.device)
+            max_error = torch.max(torch.abs(runtime_value - recorded)).item()
+            if not np.isfinite(max_error) or max_error > self.state_context_tolerance:
+                failures.append(f"{key}_max_error={max_error:.6g}")
+        if failures:
+            raise ValueError(
+                "Runtime reset context mismatch: "
+                + "; ".join(failures)
+                + f" (tolerance={self.state_context_tolerance:.6g})."
+            )
+
     def _validate_runtime_contact_context(
         self,
         trajectories: dict[str, torch.Tensor],
@@ -370,6 +420,9 @@ class TrainingRolloutEvaluator:
         missing = sorted(required_keys - set(solver.contacts))
         if missing:
             raise ValueError(f"Runtime contact context is missing fields required for set matching: {missing}.")
+        missing = sorted(set(solver.contacts) - set(trajectories))
+        if missing:
+            raise ValueError(f"Dataset contact context is missing runtime contact fields: {missing}.")
 
         dataset_contacts = {}
         runtime_contacts = {}
@@ -379,6 +432,8 @@ class TrainingRolloutEvaluator:
             dataset_contacts[key] = recorded.bool() if runtime_value.dtype == torch.bool else recorded
             runtime_contacts[key] = runtime_value
             if runtime_value.dtype != torch.bool:
+                if not torch.isfinite(recorded).all() or not torch.isfinite(runtime_value).all():
+                    raise ValueError(f"Runtime contact context for {key!r} contains non-finite values.")
                 max_error = torch.max(torch.abs(runtime_value - recorded)).item()
                 slot_max_errors[key] = max_error
 
@@ -449,11 +504,11 @@ class TrainingRolloutEvaluator:
             + " | ".join(detail_rows)
         )
         if failures:
-            raise ValueError(
-                "Runtime contact-set geometry mismatch: "
-                + "; ".join(failures)
-                + f". Diagnostics: {summary}"
-            )
+            message = "Runtime contact-set geometry mismatch: " + "; ".join(failures) + f". Diagnostics: {summary}"
+            if self.contact_context_validation == "strict":
+                raise ValueError(message)
+            logger.warning("%s Contact validation is diagnostic-only.", message)
+            return
         logger.warning("Runtime contact slots differed, but unordered contact sets matched: %s", summary)
 
     def _step_action(self, action: torch.Tensor) -> torch.Tensor:

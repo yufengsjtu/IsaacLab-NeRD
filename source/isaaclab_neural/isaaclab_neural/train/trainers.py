@@ -337,6 +337,8 @@ class VanillaTrainer:
         self.eval_dataset_path = eval_cfg.get("dataset_path")
         self.eval_passive = bool(eval_cfg.get("passive", True))
         self.eval_require_terrain_context = bool(eval_cfg.get("require_terrain_context", False))
+        self.eval_contact_context_validation = eval_cfg.get("contact_context_validation")
+        self.eval_state_context_tolerance = float(eval_cfg.get("state_context_tolerance", 1.0e-5))
         self.eval_contact_context_tolerance = float(eval_cfg.get("contact_context_tolerance", 1.0e-4))
         self.eval_contact_context_normal_tolerance = float(
             eval_cfg.get("contact_context_normal_tolerance", 1.0e-3)
@@ -356,6 +358,8 @@ class VanillaTrainer:
             eval_horizon=self.eval_horizon,
             device=self.device,
             require_terrain_context=self.eval_require_terrain_context,
+            contact_context_validation=self.eval_contact_context_validation,
+            state_context_tolerance=self.eval_state_context_tolerance,
             contact_context_tolerance=self.eval_contact_context_tolerance,
             contact_context_normal_tolerance=self.eval_contact_context_normal_tolerance,
         )

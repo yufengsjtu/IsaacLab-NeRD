@@ -28,14 +28,22 @@ def _contacts(mask: torch.Tensor, points: torch.Tensor | None = None) -> dict[st
     }
 
 
-def _evaluator(runtime_contacts: dict[str, torch.Tensor]) -> TrainingRolloutEvaluator:
+def _evaluator(
+    runtime_contacts: dict[str, torch.Tensor],
+    *,
+    contact_context_validation: str = "warn",
+) -> TrainingRolloutEvaluator:
     evaluator = object.__new__(TrainingRolloutEvaluator)
     evaluator.require_terrain_context = True
+    evaluator.contact_context_validation = contact_context_validation
+    evaluator.state_context_tolerance = 1.0e-5
     evaluator.contact_context_tolerance = 1.0e-4
     evaluator.contact_context_normal_tolerance = 1.0e-3
     evaluator.neural_env = SimpleNamespace(
         solver_neural=SimpleNamespace(
             contacts=runtime_contacts,
+            states=torch.zeros(2, 4),
+            root_body_q=torch.zeros(2, 7),
         )
     )
     return evaluator
@@ -56,21 +64,37 @@ def _trajectories(recorded_contacts: dict[str, torch.Tensor]) -> dict[str, torch
     return trajectories
 
 
-def test_runtime_contact_mismatch_reports_dataset_and_terrain_coordinates():
+@pytest.mark.parametrize(
+    ("contact_mode", "expected_validation"),
+    (("newton_native", "warn"), ("fixed_ground", "strict")),
+)
+def test_contact_validation_default_depends_on_contact_mode(contact_mode, expected_validation):
+    neural_env = SimpleNamespace(
+        solver_neural=SimpleNamespace(
+            contact_mode=contact_mode,
+            num_states_history=1,
+        )
+    )
+
+    evaluator = TrainingRolloutEvaluator(neural_env)
+
+    assert evaluator.contact_context_validation == expected_validation
+
+
+def test_runtime_contact_mismatch_warns_with_dataset_and_terrain_coordinates(caplog):
     runtime_mask = torch.tensor([[True, False, False], [True, False, False]])
     recorded_mask = torch.tensor([[True, False, False], [True, True, False]])
     recorded_points = torch.zeros(2, 3, 3)
     recorded_points[1, 1, 0] = 1.0
 
-    with pytest.raises(ValueError) as error:
-        _evaluator(_contacts(runtime_mask))._validate_runtime_contact_context(
-            _trajectories(_contacts(recorded_mask, recorded_points)),
-            start=0,
-            end=2,
-            history_offset=0,
-        )
+    _evaluator(_contacts(runtime_mask))._validate_runtime_contact_context(
+        _trajectories(_contacts(recorded_mask, recorded_points)),
+        start=0,
+        end=2,
+        history_offset=0,
+    )
 
-    message = str(error.value)
+    message = caplog.text
     assert "mismatches=1/6" in message
     assert "trajectory=22" in message
     assert "step=40" in message
@@ -97,6 +121,20 @@ def test_runtime_contact_validation_rejects_nonfinite_float_fields():
     with pytest.raises(ValueError, match="non-finite"):
         evaluator._validate_runtime_contact_context(
             _trajectories(_contacts(mask)),
+            start=0,
+            end=2,
+            history_offset=0,
+        )
+
+
+def test_runtime_contact_validation_rejects_missing_dataset_fields():
+    mask = torch.tensor([[True, False, False], [True, True, False]])
+    trajectories = _trajectories(_contacts(mask))
+    del trajectories["contact_depths"]
+
+    with pytest.raises(ValueError, match="Dataset contact context is missing"):
+        _evaluator(_contacts(mask))._validate_runtime_contact_context(
+            trajectories,
             start=0,
             end=2,
             history_offset=0,
@@ -139,14 +177,34 @@ def test_runtime_contact_validation_warns_for_duplicate_contact(caplog):
     assert "unique_count_diff_max=0" in caplog.text
 
 
-def test_runtime_contact_validation_rejects_true_set_difference():
+def test_runtime_contact_validation_warns_for_true_set_difference(caplog):
+    dataset_mask = torch.tensor([[True, False, False], [False, False, False]])
+    runtime_mask = torch.tensor([[True, True, False], [False, False, False]])
+    runtime_points = torch.zeros(2, 3, 3)
+    runtime_points[0, 1, 0] = 1.0
+
+    _evaluator(_contacts(runtime_mask, runtime_points))._validate_runtime_contact_context(
+        _trajectories(_contacts(dataset_mask)),
+        start=0,
+        end=2,
+        history_offset=0,
+    )
+
+    assert "set_hausdorff_distance_max" in caplog.text
+    assert "diagnostic-only" in caplog.text
+
+
+def test_runtime_contact_validation_strict_mode_rejects_true_set_difference():
     dataset_mask = torch.tensor([[True, False, False], [False, False, False]])
     runtime_mask = torch.tensor([[True, True, False], [False, False, False]])
     runtime_points = torch.zeros(2, 3, 3)
     runtime_points[0, 1, 0] = 1.0
 
     with pytest.raises(ValueError, match="set_hausdorff_distance_max"):
-        _evaluator(_contacts(runtime_mask, runtime_points))._validate_runtime_contact_context(
+        _evaluator(
+            _contacts(runtime_mask, runtime_points),
+            contact_context_validation="strict",
+        )._validate_runtime_contact_context(
             _trajectories(_contacts(dataset_mask)),
             start=0,
             end=2,
@@ -163,6 +221,52 @@ def test_runtime_contact_validation_handles_empty_sets():
         end=2,
         history_offset=0,
     )
+
+
+def test_runtime_state_context_rejects_reset_mismatch():
+    mask = torch.zeros(2, 3, dtype=torch.bool)
+    evaluator = _evaluator(_contacts(mask))
+    trajectories = _trajectories(_contacts(mask))
+    trajectories["states"] = torch.zeros(2, 1, 4)
+    trajectories["root_body_q"] = torch.zeros(2, 1, 7)
+    evaluator.neural_env.solver_neural.states[1, 0] = 1.0e-3
+
+    with pytest.raises(ValueError, match="states_max_error"):
+        evaluator._validate_runtime_state_context(
+            trajectories,
+            start=0,
+            end=2,
+            history_offset=0,
+        )
+
+
+def test_runtime_state_context_rejects_root_pose_mismatch():
+    mask = torch.zeros(2, 3, dtype=torch.bool)
+    evaluator = _evaluator(_contacts(mask))
+    trajectories = _trajectories(_contacts(mask))
+    trajectories["states"] = torch.zeros(2, 1, 4)
+    trajectories["root_body_q"] = torch.zeros(2, 1, 7)
+    evaluator.neural_env.solver_neural.root_body_q[0, 2] = 1.0e-3
+
+    with pytest.raises(ValueError, match="root_body_q_max_error"):
+        evaluator._validate_runtime_state_context(
+            trajectories,
+            start=0,
+            end=2,
+            history_offset=0,
+        )
+
+
+def test_strict_history_context_requires_preload_support():
+    evaluator = _evaluator(_contacts(torch.zeros(2, 3, dtype=torch.bool)))
+
+    with pytest.raises(ValueError, match="history preloading support"):
+        evaluator._preload_history(
+            trajectories={},
+            start=0,
+            end=2,
+            history_offset=1,
+        )
 
 
 def test_sampled_trajectories_include_source_window_coordinates(monkeypatch):
