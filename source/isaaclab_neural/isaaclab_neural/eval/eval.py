@@ -64,6 +64,18 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--video-length", "--video_length", dest="video_length", type=int, default=400)
     parser.add_argument("--video-interval", "--video_interval", dest="video_interval", type=int, default=2000)
     parser.add_argument("--video-dir", "--video_dir", dest="video_dir", type=str, default="./videos/eval")
+    parser.add_argument(
+        "--plot-rewards",
+        action="store_true",
+        default=False,
+        help="Save the per-step mean reward curve after evaluation.",
+    )
+    parser.add_argument(
+        "--reward-plot-path",
+        type=str,
+        default=None,
+        help="Reward plot output path. Defaults to <video-dir>/rewards.png.",
+    )
 
     from isaaclab_tasks.utils import add_launcher_args
 
@@ -257,15 +269,55 @@ def wrap_record_video(env, args: argparse.Namespace):
     )
 
 
+def save_reward_plot(reward_means: list[float], args: argparse.Namespace) -> None:
+    """Save the per-step mean reward and its moving average."""
+    if not args.plot_rewards:
+        return
+    if not reward_means:
+        raise ValueError("Cannot plot rewards because evaluation produced no steps.")
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_path = (
+        Path(args.reward_plot_path).expanduser()
+        if args.reward_plot_path is not None
+        else Path(args.video_dir).expanduser() / "rewards.png"
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    steps = list(range(len(reward_means)))
+    figure, axis = plt.subplots(figsize=(10, 5))
+    axis.plot(steps, reward_means, linewidth=1.0, alpha=0.55, label="Mean reward")
+    if len(reward_means) > 1:
+        window = min(20, len(reward_means))
+        moving_average = torch.as_tensor(reward_means).unfold(0, window, 1).mean(dim=1).tolist()
+        moving_steps = list(range(window - 1, len(reward_means)))
+        axis.plot(moving_steps, moving_average, linewidth=2.0, label=f"{window}-step moving average")
+    axis.set(xlabel="Environment step", ylabel="Mean reward", title=f"Evaluation reward: {args.task}")
+    axis.grid(alpha=0.3)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=150)
+    plt.close(figure)
+    print(f"[reward-plot] saved to: {output_path}")
+
+
 def run_zero_action(env, args: argparse.Namespace) -> None:
     print(f"[reset] type={type(env.reset()).__name__}")
     action = zero_action(env)
+    reward_means = []
     print(
         f"[eval] task={args.task}, num_envs={args.num_envs}, steps={args.num_steps}, "
         f"action_shape={tuple(action.shape)}, action_source=zero"
     )
     for step_id in range(args.num_steps):
-        print(f"[step {step_id}] {summarize_step(env.step(action))}")
+        result = env.step(action)
+        reward_means.append(float(torch.as_tensor(result[1]).float().mean()))
+        print(f"[step {step_id}] {summarize_step(result)}")
+    save_reward_plot(reward_means, args)
     env.close()
 
 
@@ -276,16 +328,20 @@ def run_policy(env, agent_cfg, args: argparse.Namespace) -> None:
 
     env, policy, runner = build_policy_env(env, agent_cfg, args.policy_checkpoint, args.device)
     obs = env.get_observations()
+    reward_means = []
     print(f"[eval] task={args.task}, num_envs={args.num_envs}, steps={args.num_steps}, action_source=rsl_rl")
     for step_id in range(args.num_steps):
         with torch.inference_mode():
             actions = policy(obs)
             obs, rew, dones, extras = env.step(actions)
             reset_policy(policy, runner, dones)
+        reward_mean = float(torch.as_tensor(rew).float().mean())
+        reward_means.append(reward_mean)
         print(
-            f"[step {step_id}] reward_mean={float(torch.as_tensor(rew).float().mean()):.6f}, "
+            f"[step {step_id}] reward_mean={reward_mean:.6f}, "
             f"dones={int(torch.as_tensor(dones).sum())}, info_keys={list(extras.keys())[:5]}"
         )
+    save_reward_plot(reward_means, args)
     env.close()
 
 

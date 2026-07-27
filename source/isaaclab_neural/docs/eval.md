@@ -226,6 +226,19 @@ Add these flags to any eval command:
 --video-dir ./videos/eval
 ```
 
+## Reward Plot
+
+Add ``--plot-rewards`` to save the per-step reward averaged across all
+environments, together with a moving-average curve:
+
+```bash
+--plot-rewards \
+--reward-plot-path ./videos/eval/rewards.png
+```
+
+If ``--reward-plot-path`` is omitted, the plot is saved as
+``<video-dir>/rewards.png``.
+
 ## Expected Output
 
 Zero-action mode prints lines like:
