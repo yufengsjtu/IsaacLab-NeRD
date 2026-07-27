@@ -1,0 +1,58 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+workflow:
+  base_name: anymal-rough-contact-tokens-context-diagnostic
+  dataset_subdir: anymal-rough-contact-tokens-context-diagnostic
+
+resources:
+  num_gpu: 1
+  num_cpu: 15
+  memory: 64Gi
+  storage: 384Gi
+  platform: ovx-l40s
+
+experiment:
+  env_name: Anymal-C-Rough-Native-ContactTokens
+  robot_name: Anymal-C
+  data_gen_task: Isaac-Velocity-Rough-Anymal-C-Dataset-Gen-v0
+  deployment_task: Isaac-Velocity-Rough-Anymal-C-v0
+  train_task: Isaac-Velocity-Rough-Anymal-C-NeRD-v0
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native_contact_tokens.yaml
+  train_preset: newton_mjwarp
+  contact_mode: newton_native
+  contact_representation: contact_tokens
+  num_contacts_per_env: 64
+  max_contact_tokens: 64
+  require_terrain_context: true
+  contact_packing_policy: body_round_robin_pair_atomic
+  states_frame: body
+  sample_mode: action
+  initial_states_source: env
+  train_transitions: 1
+  valid_transitions: 20480
+  data_gen_num_envs: 1024
+  train_num_envs: 64
+  trajectory_length: 20
+  write_chunk_transitions: 0
+  randomize_pd_gains: false
+  diagnostic_only: true
+  diagnostic_dataset: dataset_contact_tokens_context_seed40.hdf5
+  diagnostic_num_envs: 64
+  diagnostic_random_samples: 64
+  diagnostic_random_seed: 0
+  diagnostic_eval_horizon: 10
+  diagnostic_contact_tolerance: 1.0e-4
+  diagnostic_contact_normal_tolerance: 1.0e-3
+  diagnostic_contact_velocity_tolerance: 1.0e-3
+  diagnostic_contact_context_validation: warn
+  diagnostic_negative_seed_test: false
+  dataset_specs:
+    - filename: dataset_contact_tokens_context_seed40.hdf5
+      seed: 40
+      split: valid
+      task_kind: default
+      zero_actions: false
+      use_policy: false

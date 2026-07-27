@@ -13,8 +13,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from isaaclab_neural.generate.adapter import DataGenerationAdapter
 from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM, CONTACT_REPRESENTATION_TOKENS
+from isaaclab_neural.generate.adapter import DataGenerationAdapter
 
 
 class ActionTrajectorySampler:
@@ -55,6 +55,7 @@ class ActionTrajectorySampler:
             "next_states": torch.empty((num_envs, trajectory_length, self.adapter.state_dim), device=self.data_device),
             "joint_f": torch.empty((num_envs, trajectory_length, self.adapter.joint_f_dim), device=self.data_device),
             "root_body_q": torch.empty((num_envs, trajectory_length, 7), device=self.data_device),
+            "root_body_qd": torch.empty((num_envs, trajectory_length, 6), device=self.data_device),
             "gravity_dir": torch.zeros((num_envs, trajectory_length, 3), device=self.data_device),
         }
         if use_contact_tokens:
@@ -70,6 +71,16 @@ class ActionTrajectorySampler:
                     device=self.data_device,
                 ),
             }
+            buffers["contact_token_body_ids"] = torch.empty(
+                (num_envs, trajectory_length, max_tokens),
+                dtype=torch.long,
+                device=self.data_device,
+            )
+            buffers["contact_token_world_ids"] = torch.empty(
+                (num_envs, trajectory_length, max_tokens),
+                dtype=torch.long,
+                device=self.data_device,
+            )
         else:
             buffers["contacts"] = {
                 "contact_masks": torch.empty(
@@ -96,6 +107,7 @@ class ActionTrajectorySampler:
                     (num_envs, trajectory_length, num_contacts_per_env), device=self.data_device
                 ),
             }
+        buffers["trajectory_context"] = self._trajectory_context()
         if record_actions:
             buffers["actions"] = torch.empty(
                 (num_envs, trajectory_length, self.adapter.action_dim), device=self.data_device
@@ -104,10 +116,67 @@ class ActionTrajectorySampler:
         buffers["gravity_dir"][:, :, up_axis] = -1.0
         return buffers
 
+    def _trajectory_context(self) -> dict[str, torch.Tensor]:
+        """Capture the source environment and terrain patch for each trajectory."""
+        num_envs = self.adapter.num_envs
+        source_env_id = torch.arange(num_envs, dtype=torch.int64, device=self.data_device)
+        terrain_level = torch.full((num_envs,), -1, dtype=torch.int64, device=self.data_device)
+        terrain_type = torch.full((num_envs,), -1, dtype=torch.int64, device=self.data_device)
+        env_origin = torch.zeros((num_envs, 3), dtype=torch.float32, device=self.data_device)
+
+        scene = getattr(self.adapter.env, "scene", None)
+        terrain = getattr(scene, "terrain", None)
+        if terrain is not None:
+            if getattr(terrain, "terrain_levels", None) is not None:
+                terrain_level.copy_(terrain.terrain_levels.to(self.data_device))
+            if getattr(terrain, "terrain_types", None) is not None:
+                terrain_type.copy_(terrain.terrain_types.to(self.data_device))
+            if getattr(terrain, "env_origins", None) is not None:
+                env_origin.copy_(terrain.env_origins.to(self.data_device))
+
+        state_world_ids = self.adapter.state_world_ids.to(self.data_device)
+        root_world_ids = self.adapter.root_world_ids.to(self.data_device)
+        contact_world_ids = self.adapter.contact_world_ids.to(self.data_device)
+        if not torch.equal(state_world_ids, root_world_ids) or not torch.equal(state_world_ids, contact_world_ids):
+            raise RuntimeError(
+                "State, root, and contact rows must represent the same Newton worlds: "
+                f"state={state_world_ids.tolist()}, root={root_world_ids.tolist()}, "
+                f"contact={contact_world_ids.tolist()}."
+            )
+        return {
+            "source_env_id": source_env_id,
+            "state_world_id": state_world_ids,
+            "root_world_id": root_world_ids,
+            "contact_world_id": contact_world_ids,
+            "terrain_level": terrain_level,
+            "terrain_type": terrain_type,
+            "env_origin": env_origin,
+        }
+
     def _copy_before_step(self, buffers: dict[str, Any], step: int) -> None:
         inputs = self.adapter.raw_neural_inputs()
         self._copy_input(buffers["states"][:, step], inputs["states"])
         self._copy_input(buffers["root_body_q"][:, step], inputs["root_body_q"])
+        self._copy_input(buffers["root_body_qd"][:, step], inputs["root_body_qd"])
+        if "contact_token_body_ids" in buffers:
+            body_ids = self.adapter.contact_token_body_ids
+            if body_ids is None:
+                raise RuntimeError("Contact-token generation is missing owner-body ids.")
+            self._copy_input(buffers["contact_token_body_ids"][:, step], body_ids)
+            token_valid = inputs["contact_tokens"][..., 0] > 0.5
+            token_world_ids = self.adapter.contact_token_world_ids
+            if token_world_ids is None:
+                raise RuntimeError("Contact-token generation is missing owner-world ids.")
+            expected_world_ids = self.adapter.contact_world_ids.unsqueeze(-1).expand_as(body_ids)
+            mismatched = token_valid.squeeze(1) & (token_world_ids != expected_world_ids)
+            if mismatched.any():
+                rows, slots = torch.nonzero(mismatched, as_tuple=True)
+                raise RuntimeError(
+                    "Packed contact-token rows do not match owner Newton worlds: "
+                    f"rows={rows[:8].tolist()}, slots={slots[:8].tolist()}, "
+                    f"owners={token_world_ids[mismatched][:8].tolist()}."
+                )
+            self._copy_input(buffers["contact_token_world_ids"][:, step], token_world_ids)
         contacts = buffers["contacts"]
         for key in contacts:
             self._copy_input(contacts[key][:, step], inputs[key])

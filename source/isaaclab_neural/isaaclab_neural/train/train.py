@@ -67,6 +67,30 @@ def configure_env(env_cfg, args) -> None:
         env_cfg.sim.device = args.device
 
 
+def configure_eval_terrain(env_cfg, cfg) -> dict | None:
+    """Apply dataset terrain provenance before constructing the evaluation environment."""
+    eval_cfg = cfg["algorithm"].get("eval", {})
+    if eval_cfg.get("mode", "dataset") != "dataset":
+        return None
+    if not eval_cfg.get("require_terrain_context", False):
+        return None
+    dataset_path = eval_cfg.get("dataset_path")
+    if dataset_path is None:
+        return None
+
+    from isaaclab_neural.data import read_terrain_context, set_terrain_seed
+
+    terrain_context = read_terrain_context(dataset_path)
+    if terrain_context is None:
+        if eval_cfg.get("require_terrain_context", False):
+            raise ValueError(
+                f"Evaluation dataset {dataset_path!r} has no terrain context. Regenerate it with the current generator."
+            )
+        return None
+    set_terrain_seed(env_cfg, int(terrain_context["seed"]))
+    return terrain_context
+
+
 def build_launch_cfg(env_cfg):
     """Return a Newton launch cfg while keeping the runtime env on NerdNewtonCfg."""
     physics_cfg = getattr(getattr(env_cfg, "sim", None), "physics", None)
@@ -150,6 +174,7 @@ def main(env_cfg, _agent_cfg=None) -> None:
     cfg, checkpoint = load_training_cfg(args_cli)
     validate_cfg(cfg)
     configure_env(env_cfg, args_cli)
+    expected_terrain_context = configure_eval_terrain(env_cfg, cfg)
     neural_solver_cfg = dict(cfg["env"].get("neural_solver_cfg", {}))
     neural_solver_cfg.pop("use_cuda_graph", None)
     solver_cfg = NerdSolverCfg(**neural_solver_cfg)
@@ -160,6 +185,14 @@ def main(env_cfg, _agent_cfg=None) -> None:
 
     with launch_simulation(build_launch_cfg(env_cfg), args_cli):
         import gymnasium as gym
+
+        if expected_terrain_context is not None:
+            from isaaclab_neural.data import build_terrain_context, validate_terrain_context
+
+            actual_terrain_context = build_terrain_context(env_cfg, int(expected_terrain_context["seed"]))
+            if actual_terrain_context is None:
+                raise ValueError("Evaluation dataset contains terrain context but the task has no terrain generator.")
+            validate_terrain_context(expected_terrain_context, actual_terrain_context)
 
         with newton_material_binding_api_autofix():
             env = gym.make(args_cli.task, cfg=env_cfg, device=args_cli.device, solver_cfg=solver_cfg).unwrapped

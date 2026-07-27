@@ -117,6 +117,12 @@ class NewtonContactAdapter:
             dtype=torch.long,
             device=self.device,
         )
+        self.contact_token_body_ids = torch.full(
+            (self.num_envs, self.max_contact_tokens),
+            -1,
+            dtype=torch.long,
+            device=self.device,
+        )
         self._token_encoder: ContactSetEncoder | None = None
         if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
             self._token_encoder = ContactSetEncoder(
@@ -140,6 +146,8 @@ class NewtonContactAdapter:
         self.contact_points_1.zero_()
         self.contact_tokens.zero_()
         self.contact_token_overflow.zero_()
+        if hasattr(self, "contact_token_body_ids"):
+            self.contact_token_body_ids.fill_(-1)
 
     def update(
         self,
@@ -164,6 +172,9 @@ class NewtonContactAdapter:
             overflow = self._token_encoder.last_overflow
             if overflow is not None:
                 self.contact_token_overflow.copy_(overflow)
+            body_ids = self._token_encoder.last_body_ids
+            if body_ids is not None:
+                self.contact_token_body_ids.copy_(body_ids)
             valid_tokens = int((self.contact_tokens[..., 0] > 0.5).sum().item())
             self._raw_contacts_total += contact_count
             self._packed_contacts_total += valid_tokens
@@ -471,7 +482,7 @@ class NewtonContactAdapter:
         surface1_local = point1 if offset1 is None else point1 + offset1
         surface0_world = self._points_to_world(shape0, surface0_local, state)
         surface1_world = self._points_to_world(shape1, surface1_local, state)
-        normal_distance = torch.sum(normal * (point1_world - point0_world), dim=-1)
+        normal_distance = torch.sum(normal * (surface1_world - surface0_world), dim=-1)
         surface_separation = normal_distance - thickness0 - thickness1
         return surface_separation, point0_world, point1_world, surface0_world, surface1_world
 

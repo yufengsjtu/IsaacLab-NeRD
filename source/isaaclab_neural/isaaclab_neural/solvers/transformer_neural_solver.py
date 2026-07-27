@@ -6,6 +6,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 from collections import deque
+from collections.abc import Mapping
 
 import torch
 from newton import Contacts, State
@@ -23,6 +24,52 @@ class TransformerNeuralSolver(NeuralSolver):
 
     def reset_states_history(self):
         self.states_history = deque(maxlen=self.num_states_history)
+
+    def preload_states_history(self, history: Mapping[str, torch.Tensor]) -> None:
+        """Replace solver history with validated raw dataset inputs.
+
+        Args:
+            history: Raw model inputs with shape ``[num_envs, history, features]``.
+        """
+        required = {"root_body_q", "states", "joint_f", "gravity_dir", *self.contacts.keys()}
+        missing = sorted(required - set(history))
+        if missing:
+            raise ValueError(f"History is missing required model inputs: {missing}.")
+
+        states = history["states"]
+        if states.ndim != 3 or states.shape[0] != self.num_envs:
+            raise ValueError(
+                f"History states must have shape [num_envs, history, state_dim], got {tuple(states.shape)}."
+            )
+        history_length = states.shape[1]
+        if history_length == 0 or history_length > self.num_states_history:
+            raise ValueError(
+                f"History length must be between 1 and {self.num_states_history}, got {history_length}."
+            )
+
+        live_inputs = {
+            "root_body_q": self.root_body_q,
+            "states": self.states,
+            "joint_f": self.joint_f,
+            "gravity_dir": self.gravity_dir,
+            **self.contacts,
+        }
+        for key in required:
+            value = history[key]
+            expected = live_inputs[key]
+            expected_shape = (self.num_envs, history_length, *expected.shape[1:])
+            if tuple(value.shape) != expected_shape:
+                raise ValueError(f"History {key} must have shape {expected_shape}, got {tuple(value.shape)}.")
+
+        self.reset_states_history()
+        for step in range(history_length):
+            entry = {
+                key: value[:, step].to(device=self.torch_device).clone()
+                for key, value in history.items()
+                if key in required
+            }
+            entry["states_embedding"] = self.embed_states(entry["states"])
+            self.states_history.append(entry)
 
     def reset(self, env_ids=None):
         """Reset transformer history globally or for selected environments."""
@@ -58,16 +105,18 @@ class TransformerNeuralSolver(NeuralSolver):
 
     def _update_states(self, newton_states: State, contacts: Contacts, joint_f):
         super()._update_states(newton_states, contacts, joint_f)
-        self.states_history.append(
-            {
-                "root_body_q": self.root_body_q.clone(),
-                "states": self.states.clone(),
-                "states_embedding": self.states_embedding.clone(),
-                "joint_f": self.joint_f.clone(),
-                "gravity_dir": self.gravity_dir.clone(),
-                **self.contacts,
-            }
-        )
+        self.states_history.append(self._history_snapshot())
+
+    def _history_snapshot(self) -> dict[str, torch.Tensor]:
+        """Clone mutable solver inputs before storing one online history frame."""
+        return {
+            "root_body_q": self.root_body_q.clone(),
+            "states": self.states.clone(),
+            "states_embedding": self.states_embedding.clone(),
+            "joint_f": self.joint_f.clone(),
+            "gravity_dir": self.gravity_dir.clone(),
+            **{key: value.clone() for key, value in self.contacts.items()},
+        }
 
     def get_neural_model_inputs(self):
         if len(self.states_history) == 0:  # for dummy call

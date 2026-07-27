@@ -27,6 +27,7 @@ experiment:
   contact_representation: contact_tokens
   num_contacts_per_env: 64
   max_contact_tokens: 64
+  require_terrain_context: true
   contact_packing_policy: body_round_robin_pair_atomic
   sample_mode: action
   initial_states_source: env

@@ -60,6 +60,12 @@ algorithm:
     action_mode: joint_f
     rollout_horizon: 10
     num_rollouts: 1024
+    require_terrain_context: True
+    contact_context_validation: warn
+    state_context_tolerance: 1.0e-5
+    contact_context_tolerance: 1.0e-4
+    contact_context_normal_tolerance: 1.0e-3
+    contact_context_velocity_tolerance: 1.0e-3
     dataset_path: ./data/datasets/Anymal-C-Rough-Native-ContactTokens/dataset_lstm_actuator_policy_valid.hdf5
 
 inputs:

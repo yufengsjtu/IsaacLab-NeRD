@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import h5py
 import numpy as np
+import pytest
 import torch
 import torch.distributed as dist
 from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
@@ -28,6 +29,8 @@ def _write_token_dataset(path, *, num_trajectories: int = 5, trajectory_length: 
         group = handle.create_group("data")
         group.attrs["mode"] = "trajectory"
         group.attrs["total_transitions"] = num_trajectories * trajectory_length
+        group.attrs["contact_token_frame"] = "world_v1"
+        group.attrs["contact_identity_schema"] = "world_owner_v1"
         group.create_dataset("states", data=states)
         group.create_dataset("next_states", data=states)
         group.create_dataset("joint_f", data=np.zeros((num_trajectories, trajectory_length, 1), dtype=np.float32))
@@ -35,6 +38,14 @@ def _write_token_dataset(path, *, num_trajectories: int = 5, trajectory_length: 
         group.create_dataset(
             "contact_token_overflow",
             data=np.zeros((num_trajectories, trajectory_length), dtype=np.int64),
+        )
+        group.create_dataset(
+            "contact_token_body_ids",
+            data=np.zeros((num_trajectories, trajectory_length, 3), dtype=np.int64),
+        )
+        group.create_dataset(
+            "contact_token_world_ids",
+            data=np.zeros((num_trajectories, trajectory_length, 3), dtype=np.int64),
         )
         group.create_dataset("root_body_q", data=np.zeros((num_trajectories, trajectory_length, 7), dtype=np.float32))
         group.create_dataset("gravity_dir", data=np.zeros((num_trajectories, trajectory_length, 3), dtype=np.float32))
@@ -56,6 +67,18 @@ def test_eager_trajectory_rank_shards_are_disjoint_and_complete(tmp_path) -> Non
     ) == list(range(5))
     assert len(shard0) + len(shard1) == len(full)
     assert shard0[0]["contact_tokens"].shape == (2, 3, CONTACT_TOKEN_DIM)
+    assert shard0[0]["contact_token_body_ids"].dtype == torch.long
+    assert shard0[0]["contact_token_world_ids"].dtype == torch.long
+
+
+def test_contact_token_loader_rejects_ambiguous_frame_metadata(tmp_path) -> None:
+    path = tmp_path / "legacy_tokens.hdf5"
+    _write_token_dataset(path)
+    with h5py.File(path, "r+") as handle:
+        del handle["data"].attrs["contact_token_frame"]
+
+    with pytest.raises(ValueError, match="contact_token_frame='world_v1'"):
+        TrajectoryDataset(path, sample_sequence_length=2)
 
 
 def test_eager_sharding_applies_global_max_capacity_before_rank_split(tmp_path) -> None:

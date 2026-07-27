@@ -4,14 +4,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 workflow:
-  base_name: anymal-c-rough-newton-native
+  base_name: anymal-rough-policy-eval-random-diagnostic
   dataset_subdir: anymal-c-rough-newton-native
 
 resources:
-  num_gpu: 8
-  num_cpu: 96
-  memory: 512Gi
-  storage: 512Gi
+  num_gpu: 1
+  num_cpu: 15
+  memory: 64Gi
+  storage: 128Gi
   platform: ovx-l40s
 
 experiment:
@@ -22,48 +22,29 @@ experiment:
   train_task: Isaac-Velocity-Rough-Anymal-C-NeRD-v0
   train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native.yaml
   train_preset: newton_mjwarp
-  num_gpus: 8
   contact_mode: newton_native
-  contact_representation: flat
   require_terrain_context: true
   num_contacts_per_env: 64
   contact_packing_policy: penetration_priority
-  sample_mode: action
+  states_frame: body
   initial_states_source: env
-  randomize_pd_gains: true
-  train_transitions: 20000000
+  train_transitions: 1
   valid_transitions: 1000000
   data_gen_num_envs: 1024
   train_num_envs: 64
   trajectory_length: 400
-  write_chunk_transitions: 5000000
-  update_dataset_statistics: true
+  write_chunk_transitions: 409600
+  randomize_pd_gains: false
   policy_checkpoint: ./pretrained/control_policy/anymal_c_rough_terrain/model_1499.pt
+  diagnostic_only: true
+  diagnostic_dataset: dataset_lstm_actuator_policy_valid.hdf5
+  diagnostic_num_envs: 64
+  diagnostic_random_samples: 1024
+  diagnostic_random_seed: 0
+  diagnostic_eval_horizon: 10
+  diagnostic_contact_tolerance: 1.0e-4
+  diagnostic_contact_normal_tolerance: 1.0e-3
   dataset_specs:
-    - filename: dataset_train.hdf5
-      seed: 0
-      split: train
-      task_kind: default
-      zero_actions: false
-      use_policy: false
-    - filename: dataset_valid.hdf5
-      seed: 10
-      split: valid
-      task_kind: default
-      zero_actions: false
-      use_policy: false
-    - filename: dataset_zero_action_valid.hdf5
-      seed: 20
-      split: valid
-      task_kind: default
-      zero_actions: true
-      use_policy: false
-    - filename: dataset_lstm_actuator_zero_action_valid.hdf5
-      seed: 30
-      split: valid
-      task_kind: deployment
-      zero_actions: true
-      use_policy: false
     - filename: dataset_lstm_actuator_policy_valid.hdf5
       seed: 40
       split: valid

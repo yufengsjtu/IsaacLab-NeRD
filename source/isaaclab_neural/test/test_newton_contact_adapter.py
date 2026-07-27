@@ -83,7 +83,7 @@ def test_surface_offset_moves_effective_contact_point():
     offset1 = torch.tensor([[0.0, 0.0, 0.0]])
     normal = torch.tensor([[0.0, 0.0, 1.0]])
 
-    _, _, _, surface0, surface1 = adapter._read_separation_and_world_points(
+    separation, _, _, surface0, surface1 = adapter._read_separation_and_world_points(
         torch.tensor([1]),
         torch.tensor([0]),
         point0,
@@ -98,6 +98,7 @@ def test_surface_offset_moves_effective_contact_point():
 
     torch.testing.assert_close(surface0, torch.tensor([[0.0, 0.0, -0.1]]))
     torch.testing.assert_close(surface1, point1)
+    torch.testing.assert_close(separation, torch.tensor([0.1]))
 
 
 def test_body_round_robin_pair_atomic_is_rejected_for_flat_packing():

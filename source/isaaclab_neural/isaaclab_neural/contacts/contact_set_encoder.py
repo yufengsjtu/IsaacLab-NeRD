@@ -130,6 +130,7 @@ class ContactSetEncoder:
             if self._body_com.shape[0] != int(model.body_count):
                 raise ValueError("model.body_com must provide one offset per body.")
         self._overflow: torch.Tensor | None = None
+        self._body_ids: torch.Tensor | None = None
         self._overflow_total = 0
         self._frames = 0
 
@@ -137,6 +138,11 @@ class ContactSetEncoder:
     def last_overflow(self) -> torch.Tensor | None:
         """Per-environment overflow count from the last ``encode`` call."""
         return self._overflow
+
+    @property
+    def last_body_ids(self) -> torch.Tensor | None:
+        """Global owner-body ids for the last packed token frame."""
+        return self._body_ids
 
     def reset_overflow_stats(self) -> None:
         """Reset cumulative overflow telemetry."""
@@ -162,10 +168,11 @@ class ContactSetEncoder:
     ) -> torch.Tensor:
         """Pack raw Newton contacts into ``[num_envs, max_contact_tokens, 17]`` tokens."""
         rows = self._directed_rows(raw_contacts, state)
-        packed, overflow = self._pack_rows(rows)
+        packed, overflow, body_ids = self._pack_rows(rows)
         if self._overflow is None or self._overflow.device != packed.device:
             self._overflow = torch.zeros(self.num_envs, dtype=torch.long, device=packed.device)
         self._overflow.copy_(overflow)
+        self._body_ids = body_ids
         self._overflow_total += int(overflow.sum().item())
         return packed
 
@@ -286,14 +293,15 @@ class ContactSetEncoder:
             velocity_world=torch.cat((first.velocity_world, second.velocity_world)),
         )
 
-    def _pack_rows(self, rows: _DirectedContactRows) -> tuple[torch.Tensor, torch.Tensor]:
+    def _pack_rows(self, rows: _DirectedContactRows) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         worlds = self.num_envs
         capacity = self.max_contact_tokens
         device = self.device
         packed = torch.zeros((worlds, capacity, CONTACT_TOKEN_DIM), dtype=torch.float32, device=device)
         overflow = torch.zeros(worlds, dtype=torch.long, device=device)
         if rows.valid.numel() == 0:
-            return packed, overflow
+            body_ids = torch.full((worlds, capacity), -1, dtype=torch.long, device=device)
+            return packed, overflow, body_ids
 
         pairs = rows.valid.shape[0] // 2
         if rows.valid.shape[0] % 2 != 0:
@@ -382,6 +390,9 @@ class ContactSetEncoder:
         flat = candidates.new_zeros((dump_row + 1, CONTACT_TOKEN_DIM))
         flat.index_copy_(0, destination, candidates)
         packed = flat[:dump_row].reshape(worlds, capacity, CONTACT_TOKEN_DIM)
+        flat_body_ids = torch.full((dump_row + 1,), -1, dtype=torch.long, device=device)
+        flat_body_ids.index_copy_(0, destination, rows.body_id)
+        packed_body_ids = flat_body_ids[:dump_row].reshape(worlds, capacity)
         packed[..., CONTACT_TOKEN_VALID_INDEX] = (packed[..., CONTACT_TOKEN_VALID_INDEX] > 0.5).to(torch.float32)
 
         dropped = rows.valid & ~keep_row
@@ -389,7 +400,7 @@ class ContactSetEncoder:
             dropped_counts = torch.zeros(worlds + 1, dtype=torch.long, device=device)
             dropped_counts.scatter_add_(0, world_row[dropped], torch.ones_like(world_row[dropped]))
             overflow.copy_(dropped_counts[:worlds])
-        return packed, overflow
+        return packed, overflow, packed_body_ids
 
     def _shape_body_ids(self, shapes: torch.Tensor) -> torch.Tensor:
         body_ids = torch.full(shapes.shape, -1, dtype=torch.long, device=shapes.device)
@@ -461,6 +472,7 @@ def transform_contact_tokens_to_body_frame(
         contact_tokens = contact_tokens.unsqueeze(1)
         root_body_q = root_body_q.unsqueeze(1)
 
+    contact_tokens = contact_tokens.clone()
     batch, time, tokens, _ = contact_tokens.shape
     valid = contact_tokens[..., CONTACT_TOKEN_VALID_INDEX] > 0.5
     flat_tokens = contact_tokens.reshape(batch * time * tokens, CONTACT_TOKEN_DIM)

@@ -9,7 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from isaaclab_neural.contacts.contact_set_encoder import ContactSetEncoder, transform_contact_tokens_to_body_frame
+from isaaclab_neural.contacts.contact_set_encoder import (
+    ContactSetEncoder,
+    transform_contact_tokens_to_body_frame,
+)
 from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
 from isaaclab_neural.contacts.tensor_utils import ContactTokenMoments
 from isaaclab_neural.models.contact_set_model import ContactSetEncoderBlock
@@ -281,11 +284,17 @@ def test_eager_trajectory_dataset_preserves_contact_token_rank(tmp_path):
     with h5py.File(path, "w") as handle:
         group = handle.create_group("data")
         group.attrs["mode"] = "trajectory"
+        group.attrs["contact_token_frame"] = "world_v1"
+        group.attrs["contact_identity_schema"] = "world_owner_v1"
         group.create_dataset("states", data=np.zeros((2, 4, 8), dtype=np.float32))
         group.create_dataset("next_states", data=np.zeros((2, 4, 8), dtype=np.float32))
         group.create_dataset("joint_f", data=np.zeros((2, 4, 3), dtype=np.float32))
         group.create_dataset("contact_tokens", data=tokens)
+        group.create_dataset("contact_token_body_ids", data=np.zeros((2, 4, 3), dtype=np.int64))
+        token_world_ids = np.broadcast_to(np.arange(2, dtype=np.int64)[:, None, None], (2, 4, 3))
+        group.create_dataset("contact_token_world_ids", data=token_world_ids)
         group.create_dataset("root_body_q", data=np.zeros((2, 4, 7), dtype=np.float32))
+        group.create_dataset("root_body_qd", data=np.zeros((2, 4, 6), dtype=np.float32))
         group.create_dataset("gravity_dir", data=np.zeros((2, 4, 3), dtype=np.float32))
 
     dataset = TrajectoryDataset(path, sample_sequence_length=2, max_capacity=100)

@@ -18,7 +18,12 @@ from torch.utils.data import Dataset
 from isaaclab_neural.utils.commons import DATASET_MODES
 
 BOOL_DATASET_KEYS = {"contact_masks"}
-INTEGER_DATASET_KEYS = {"contact_body_ids", "contact_token_overflow"}
+INTEGER_DATASET_KEYS = {
+    "contact_body_ids",
+    "contact_token_body_ids",
+    "contact_token_overflow",
+    "contact_token_world_ids",
+}
 DatasetLoadMode = Literal["eager", "lazy"]
 
 
@@ -57,6 +62,30 @@ def _resolve_dataset_path(hdf5_dataset_path: str | Path) -> Path:
     return dataset_path
 
 
+def validate_contact_token_metadata(data_group: h5py.Group) -> None:
+    """Reject contact-token datasets with ambiguous frame or identity metadata."""
+    if "contact_tokens" not in data_group:
+        return
+    token_frame = _decode_attr(data_group.attrs.get("contact_token_frame", ""))
+    identity_schema = _decode_attr(data_group.attrs.get("contact_identity_schema", ""))
+    if token_frame != "world_v1" or identity_schema != "world_owner_v1":
+        raise ValueError(
+            "Contact-token dataset requires contact_token_frame='world_v1' and "
+            "contact_identity_schema='world_owner_v1'; regenerate this dataset."
+        )
+    required_ids = {"contact_token_body_ids", "contact_token_world_ids"}
+    missing_ids = sorted(required_ids - set(data_group.keys()))
+    if missing_ids:
+        raise ValueError(f"Contact-token dataset is missing identity fields: {missing_ids}.")
+    invalid_dtypes = {
+        key: str(cast(h5py.Dataset, data_group[key]).dtype)
+        for key in required_ids
+        if not np.issubdtype(cast(h5py.Dataset, data_group[key]).dtype, np.integer)
+    }
+    if invalid_dtypes:
+        raise ValueError(f"Contact-token identity fields must use integer dtypes: {invalid_dtypes}.")
+
+
 def _read_hdf5_metadata(
     hdf5_dataset_path: str | Path,
     *,
@@ -67,6 +96,7 @@ def _read_hdf5_metadata(
     dataset_path = _resolve_dataset_path(hdf5_dataset_path)
     with h5py.File(dataset_path, "r", swmr=True, libver="latest") as dataset_file:
         data_group = cast(h5py.Group, dataset_file["data"])
+        validate_contact_token_metadata(data_group)
         mode = _decode_attr(data_group.attrs["mode"])
         if mode not in DATASET_MODES:
             raise ValueError(f"Unsupported dataset mode: {mode!r}. Expected one of {DATASET_MODES}.")
@@ -126,6 +156,11 @@ class _LazyHdf5Accessor:
 
     def dataset(self, key: str) -> h5py.Dataset:
         return cast(h5py.Dataset, self._ensure_open()[key])
+
+    def trajectory_context_dataset(self, key: str) -> h5py.Dataset:
+        """Return one per-trajectory context dataset from the open file."""
+        self._ensure_open()
+        return cast(h5py.Dataset, cast(h5py.File, self._file)["context"]["trajectories"][key])
 
     def close(self) -> None:
         if self._file is not None:
@@ -203,6 +238,7 @@ class BatchTransitionDataset:
 
         with h5py.File(dataset_path, "r", swmr=True, libver="latest") as dataset_file:
             data_group = cast(h5py.Group, dataset_file["data"])
+            validate_contact_token_metadata(data_group)
             mode = _decode_attr(data_group.attrs["mode"])
             if mode not in DATASET_MODES:
                 raise ValueError(f"Unsupported dataset mode: {mode!r}. Expected one of {DATASET_MODES}.")
@@ -378,6 +414,7 @@ class TrajectoryDataset(Dataset):
         self.world_size = world_size
         self.is_rank_sharded = world_size > 1
         self.dataset: dict[str, np.ndarray] = {}
+        self.trajectory_context: dict[str, np.ndarray] = {}
         self.traj_lengths: np.ndarray = np.array([], dtype="int32")
         self.global_trajectory_indices = np.array([], dtype=np.int64)
         self.sample_sequence_length = sample_sequence_length
@@ -391,6 +428,7 @@ class TrajectoryDataset(Dataset):
         """Load a trajectory HDF5 dataset into memory."""
         with h5py.File(_resolve_dataset_path(hdf5_dataset_path), "r", swmr=True, libver="latest") as dataset_file:
             data_group = cast(h5py.Group, dataset_file["data"])
+            validate_contact_token_metadata(data_group)
             mode = _decode_attr(data_group.attrs["mode"])
             if mode != "trajectory":
                 raise ValueError(f"TrajectoryDataset requires dataset mode 'trajectory', got {mode!r}.")
@@ -410,6 +448,7 @@ class TrajectoryDataset(Dataset):
             trajectory_selection = slice(self.rank, num_trajectories, self.world_size)
 
             self.dataset = {}
+            self.trajectory_context = {}
             traj_lengths = None
             for key in data_group.keys():
                 if key == "traj_lengths":
@@ -422,6 +461,15 @@ class TrajectoryDataset(Dataset):
                     self.dataset[key] = data
                 else:
                     self.dataset[key] = data.reshape(data.shape[0], data.shape[1], -1)
+            if "context" in dataset_file and "trajectories" in dataset_file["context"]:
+                trajectory_group = cast(h5py.Group, dataset_file["context"]["trajectories"])
+                collisions = set(self.dataset).intersection(trajectory_group.keys())
+                if collisions:
+                    raise ValueError(f"Data and trajectory context keys overlap: {sorted(collisions)}.")
+                for key in trajectory_group.keys():
+                    self.trajectory_context[key] = np.asarray(
+                        cast(h5py.Dataset, trajectory_group[key])[trajectory_selection]
+                    )
 
             if traj_lengths is None:
                 traj_lengths = np.full(
@@ -460,10 +508,12 @@ class TrajectoryDataset(Dataset):
             raise IndexError(f"Index {index} out of range for dataset of length {len(self)}.")
 
         traj_index, traj_step_index = self.mapping_index2traj[index]
-        return {
+        sample = {
             key: _torch_tensor(value[traj_index, traj_step_index : traj_step_index + self.sample_sequence_length])
             for key, value in self.dataset.items()
         }
+        sample.update({key: _torch_tensor(value[traj_index]) for key, value in self.trajectory_context.items()})
+        return sample
 
     def shuffle(self) -> None:
         """No-op kept for API symmetry with :class:`BatchTransitionDataset`."""
@@ -494,6 +544,14 @@ class LazyTrajectoryDataset(Dataset):
         self.data_keys = list(metadata["data_keys"])
         self.traj_lengths = cast(np.ndarray, metadata["traj_lengths"])
         self._hdf5 = _LazyHdf5Accessor(self.dataset_path)
+        self.trajectory_context_keys: list[str] = []
+        with h5py.File(self.dataset_path, "r", swmr=True, libver="latest") as dataset_file:
+            if "context" in dataset_file and "trajectories" in dataset_file["context"]:
+                trajectory_group = cast(h5py.Group, dataset_file["context"]["trajectories"])
+                collisions = set(self.data_keys).intersection(trajectory_group.keys())
+                if collisions:
+                    raise ValueError(f"Data and trajectory context keys overlap: {sorted(collisions)}.")
+                self.trajectory_context_keys = list(trajectory_group.keys())
         self.update_sample_sequence_length(sample_sequence_length)
 
     def update_sample_sequence_length(self, sample_sequence_length: int) -> None:
@@ -541,6 +599,8 @@ class LazyTrajectoryDataset(Dataset):
                 sample[key] = torch.as_tensor(data.astype("int64"), dtype=torch.long)
             else:
                 sample[key] = torch.as_tensor(data.astype("float32"), dtype=torch.float32)
+        for key in self.trajectory_context_keys:
+            sample[key] = _torch_tensor(np.asarray(self._hdf5.trajectory_context_dataset(key)[traj_index]))
         return sample
 
     def shuffle(self) -> None:

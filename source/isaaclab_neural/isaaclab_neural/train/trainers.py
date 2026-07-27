@@ -11,6 +11,7 @@ import inspect
 import math
 import os
 import shutil
+import traceback
 from pathlib import Path
 from typing import Any, cast
 
@@ -43,6 +44,19 @@ from isaaclab_neural.utils.python_utils import format_dict, print_info, print_ok
 from isaaclab_neural.utils.running_mean_std import RunningMeanStd
 from isaaclab_neural.utils.time_report import TimeProfiler, TimeReport
 from isaaclab_neural.utils.torch_utils import grad_norm, num_params_torch_model
+
+NON_MODEL_DATA_KEYS = {
+    "contact_token_body_ids",
+    "contact_token_world_ids",
+    "root_body_qd",
+    "source_env_id",
+    "state_world_id",
+    "root_world_id",
+    "contact_world_id",
+    "terrain_level",
+    "terrain_type",
+    "env_origin",
+}
 
 
 def _resolve_auto_bool(value: bool | str | None, *, automatic: bool) -> bool:
@@ -415,6 +429,16 @@ class VanillaTrainer:
         self.num_eval_rollouts = int(eval_cfg.get("num_rollouts", self.neural_env.num_envs))
         self.eval_dataset_path = eval_cfg.get("dataset_path")
         self.eval_passive = bool(eval_cfg.get("passive", True))
+        self.eval_require_terrain_context = bool(eval_cfg.get("require_terrain_context", False))
+        self.eval_contact_context_validation = eval_cfg.get("contact_context_validation")
+        self.eval_state_context_tolerance = float(eval_cfg.get("state_context_tolerance", 1.0e-5))
+        self.eval_contact_context_tolerance = float(eval_cfg.get("contact_context_tolerance", 1.0e-4))
+        self.eval_contact_context_normal_tolerance = float(
+            eval_cfg.get("contact_context_normal_tolerance", 1.0e-3)
+        )
+        self.eval_contact_context_velocity_tolerance = float(
+            eval_cfg.get("contact_context_velocity_tolerance", 1.0e-3)
+        )
         self.eval_render = bool(cli_cfg.get("render", False))
 
         if self.action_mode not in ("action", "joint_f"):
@@ -429,6 +453,12 @@ class VanillaTrainer:
             hdf5_dataset_path=self.eval_dataset_path,
             eval_horizon=self.eval_horizon,
             device=self.device,
+            require_terrain_context=self.eval_require_terrain_context,
+            contact_context_validation=self.eval_contact_context_validation,
+            state_context_tolerance=self.eval_state_context_tolerance,
+            contact_context_tolerance=self.eval_contact_context_tolerance,
+            contact_context_normal_tolerance=self.eval_contact_context_normal_tolerance,
+            contact_context_velocity_tolerance=self.eval_contact_context_velocity_tolerance,
         )
 
     def _init_optimizer(self, algo_cfg: dict[str, Any]) -> None:
@@ -624,6 +654,8 @@ class VanillaTrainer:
 
     @torch.no_grad()
     def preprocess_data_batch(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        for key in NON_MODEL_DATA_KEYS.intersection(data):
+            data.pop(key)
         for key, value in data.items():
             data[key] = value.to(self.device, non_blocking=self.non_blocking_data_transfer)
         if "contact_masks" in data:
@@ -802,23 +834,36 @@ class VanillaTrainer:
                     shuffle=True,
                 )
                 avg_valid_losses, avg_valid_losses_itemized = {}, {}
+                main_process_exception = None
+                main_process_traceback = None
                 if self.is_main_process:
-                    valid_loader_iters = _reset_validation_iterators(valid_loaders)
-                    for valid_dataset_name in self.valid_datasets:
-                        avg_valid_losses[valid_dataset_name], avg_valid_losses_itemized[valid_dataset_name], _ = (
-                            self.one_epoch(
-                                train=False,
-                                dataloader=valid_loaders[valid_dataset_name],
-                                dataloader_iter=valid_loader_iters[valid_dataset_name],
-                                num_batches=min(self.num_valid_batches, len(valid_loaders[valid_dataset_name])),
-                                distributed_reduce=False,
+                    try:
+                        valid_loader_iters = _reset_validation_iterators(valid_loaders)
+                        for valid_dataset_name in self.valid_datasets:
+                            avg_valid_losses[valid_dataset_name], avg_valid_losses_itemized[valid_dataset_name], _ = (
+                                self.one_epoch(
+                                    train=False,
+                                    dataloader=valid_loaders[valid_dataset_name],
+                                    dataloader_iter=valid_loader_iters[valid_dataset_name],
+                                    num_batches=min(self.num_valid_batches, len(valid_loaders[valid_dataset_name])),
+                                    distributed_reduce=False,
+                                )
                             )
-                        )
-                with TimeProfiler(self.time_report, "eval"):
-                    if self.is_main_process and self.eval_interval > 0 and (epoch + 1) % self.eval_interval == 0:
-                        self.eval(epoch)
-                    if self.is_distributed:
-                        dist.barrier()
+                        with TimeProfiler(self.time_report, "eval"):
+                            if self.eval_interval > 0 and (epoch + 1) % self.eval_interval == 0:
+                                self.eval(epoch)
+                    except Exception as exc:
+                        main_process_exception = exc
+                        main_process_traceback = traceback.format_exc()
+                if self.is_distributed:
+                    error_payload = [main_process_traceback]
+                    dist.broadcast_object_list(error_payload, src=0)
+                    main_process_traceback = error_payload[0]
+                if main_process_traceback is not None:
+                    message = f"Main-process validation or rollout evaluation failed:\n{main_process_traceback}"
+                    if main_process_exception is not None:
+                        raise RuntimeError(message) from main_process_exception
+                    raise RuntimeError(message)
 
             if self.is_main_process and epoch % self.log_interval == 0:
                 self._log_training_epoch_summary(

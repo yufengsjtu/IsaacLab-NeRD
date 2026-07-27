@@ -8,12 +8,15 @@
 from __future__ import annotations
 
 import argparse
+import io
 import shutil
 import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from numbers import Integral
 from pathlib import Path
+from typing import TextIO, cast
 
 import h5py
 
@@ -30,18 +33,19 @@ class DatasetSpec:
     use_policy: bool
 
 
-class Tee:
+class Tee(io.TextIOBase):
     """Write output to multiple streams."""
 
-    def __init__(self, *streams):
+    def __init__(self, *streams: TextIO):
         self._streams = streams
 
-    def write(self, data: str):
+    def write(self, data: str) -> int:
         for stream in self._streams:
             stream.write(data)
             stream.flush()
+        return len(data)
 
-    def flush(self):
+    def flush(self) -> None:
         for stream in self._streams:
             stream.flush()
 
@@ -90,26 +94,127 @@ def dataset_cache_complete(
     required_files: list[str],
     experiment: dict,
 ) -> bool:
+    specs_by_filename = {spec.filename: spec for spec in parse_dataset_specs(experiment)}
     for filename in required_files:
         dataset_path = candidate_dir / filename
         if not dataset_path.is_file():
             return False
-        if experiment.get("contact_representation", "flat") != "contact_tokens":
-            continue
-        expected_capacity = int(experiment.get("max_contact_tokens", 64))
+        if not h5py.is_hdf5(dataset_path):
+            print(f"Rejected malformed cached dataset: {dataset_path}")
+            return False
+        require_tokens = experiment.get("contact_representation", "flat") == "contact_tokens"
+        require_terrain_context = bool(experiment.get("require_terrain_context", False))
         with h5py.File(dataset_path, "r") as handle:
             if "data" not in handle:
                 print(f"Rejected cached dataset without a data group: {dataset_path}")
                 return False
-            data_group = handle["data"]
-            representation = str(data_group.attrs.get("contact_representation", ""))
-            capacity = int(data_group.attrs.get("max_contact_tokens", -1))
-            if representation != "contact_tokens" or capacity != expected_capacity:
+            data_group = cast(h5py.Group, handle["data"])
+            spec = specs_by_filename[filename]
+            states = cast(h5py.Dataset, data_group["states"]) if "states" in data_group else None
+            expected_transitions = int(
+                experiment["train_transitions"] if spec.split == "train" else experiment["valid_transitions"]
+            )
+            expected_trajectory_length = int(experiment["trajectory_length"])
+            if (
+                data_group.attrs.get("mode") != "trajectory"
+                or data_group.attrs.get("env") != experiment["env_name"]
+                or states is None
+                or states.ndim != 3
+                or states.shape[1] != expected_trajectory_length
+                or int(data_group.attrs.get("total_transitions", -1)) < expected_transitions
+            ):
+                print(f"Rejected cached dataset with incompatible trajectory metadata: {dataset_path}")
+                return False
+            step_shape = states.shape[:2]
+            inconsistent_fields = [
+                key
+                for key, value in data_group.items()
+                if isinstance(value, h5py.Dataset) and value.ndim >= 2 and value.shape[:2] != step_shape
+            ]
+            if inconsistent_fields:
                 print(
-                    f"Rejected cached dataset {dataset_path}: expected contact_tokens capacity "
-                    f"{expected_capacity}, found representation={representation!r}, capacity={capacity}."
+                    f"Rejected cached dataset with inconsistent trajectory fields "
+                    f"{sorted(inconsistent_fields)}: {dataset_path}"
                 )
                 return False
+            if require_tokens:
+                expected_capacity = int(experiment.get("max_contact_tokens", 64))
+                representation = str(data_group.attrs.get("contact_representation", ""))
+                capacity = int(data_group.attrs.get("max_contact_tokens", -1))
+                identity_schema = str(data_group.attrs.get("contact_identity_schema", ""))
+                token_frame = str(data_group.attrs.get("contact_token_frame", ""))
+                required_token_fields = {
+                    "contact_tokens",
+                    "contact_token_body_ids",
+                    "contact_token_world_ids",
+                    "root_body_q",
+                    "root_body_qd",
+                    "gravity_dir",
+                    "states",
+                    "next_states",
+                    "joint_f",
+                }
+                missing_token_fields = sorted(required_token_fields - set(data_group.keys()))
+                if (
+                    representation != "contact_tokens"
+                    or capacity != expected_capacity
+                    or identity_schema != "world_owner_v1"
+                    or token_frame != "world_v1"
+                    or missing_token_fields
+                ):
+                    print(
+                        f"Rejected cached dataset {dataset_path}: expected contact_tokens capacity "
+                        f"{expected_capacity} with root kinematics, found representation={representation!r}, "
+                        f"capacity={capacity}, identity_schema={identity_schema!r}, token_frame={token_frame!r}, "
+                        f"missing_fields={missing_token_fields}."
+                    )
+                    return False
+            if require_terrain_context:
+                data_group = cast(h5py.Group, handle["data"])
+                missing_root_kinematics = sorted({"root_body_q", "root_body_qd"} - set(data_group.keys()))
+                if missing_root_kinematics:
+                    print(
+                        f"Rejected cached dataset without replay root kinematics "
+                        f"{missing_root_kinematics}: {dataset_path}"
+                    )
+                    return False
+                trajectory_keys = {"source_env_id", "terrain_level", "terrain_type", "env_origin"}
+                if require_tokens and experiment.get("diagnostic_only", False):
+                    trajectory_keys.update({"state_world_id", "root_world_id", "contact_world_id"})
+                context_group = cast(h5py.Group, handle["context"]) if "context" in handle else None
+                trajectory_group = (
+                    cast(h5py.Group, context_group["trajectories"])
+                    if context_group is not None and "trajectories" in context_group
+                    else None
+                )
+                has_context = (
+                    context_group is not None
+                    and "terrain" in context_group
+                    and trajectory_group is not None
+                    and trajectory_keys.issubset(trajectory_group.keys())
+                )
+                terrain_attrs = (
+                    set(cast(h5py.Group, context_group["terrain"]).attrs.keys())
+                    if context_group is not None and "terrain" in context_group
+                    else set()
+                )
+                required_terrain_attrs = {
+                    "schema_version",
+                    "seed",
+                    "config_sha256",
+                    "mesh_sha256",
+                    "origins_sha256",
+                    "num_rows",
+                    "num_cols",
+                }
+                has_context = has_context and required_terrain_attrs.issubset(terrain_attrs)
+                if has_context and context_group is not None:
+                    terrain_group = cast(h5py.Group, context_group["terrain"])
+                    terrain_seed = terrain_group.attrs["seed"]
+                    has_context = isinstance(terrain_seed, Integral) and int(terrain_seed) == spec.seed
+                if not has_context:
+                    print(f"Rejected cached dataset without required terrain context: {dataset_path}")
+                    return False
     return True
 
 
@@ -318,6 +423,67 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
     subprocess.run(command, check=True)
 
 
+def run_context_diagnostic(experiment: dict, specs: list[DatasetSpec], dataset_dir: Path):
+    """Validate terrain and contact reconstruction for a generated dataset."""
+    diagnostic_filename = str(experiment.get("diagnostic_dataset", specs[0].filename))
+    dataset_path = dataset_dir / str(experiment["env_name"]) / diagnostic_filename
+    command = [
+        sys.executable,
+        "-m",
+        "isaaclab_neural.eval.contact_reconstruction_diagnostic",
+        "--task",
+        str(experiment["train_task"]),
+        "--dataset",
+        str(dataset_path),
+        "--num-envs",
+        str(experiment.get("diagnostic_num_envs", experiment["data_gen_num_envs"])),
+        "--step",
+        str(experiment.get("diagnostic_step", 0)),
+        "--require-terrain-context",
+        "--headless",
+        *contact_args(experiment),
+    ]
+    if experiment.get("states_frame"):
+        command += ["--states-frame", str(experiment["states_frame"])]
+    if experiment.get("diagnostic_contact_tolerance") is not None:
+        command += ["--contact-tolerance", str(experiment["diagnostic_contact_tolerance"])]
+    if experiment.get("diagnostic_contact_normal_tolerance") is not None:
+        command += ["--contact-normal-tolerance", str(experiment["diagnostic_contact_normal_tolerance"])]
+    if experiment.get("diagnostic_contact_velocity_tolerance") is not None:
+        command += ["--contact-velocity-tolerance", str(experiment["diagnostic_contact_velocity_tolerance"])]
+    if experiment.get("diagnostic_contact_context_validation") is not None:
+        command += [
+            "--contact-context-validation",
+            str(experiment["diagnostic_contact_context_validation"]),
+        ]
+    if experiment.get("diagnostic_random_samples"):
+        command += ["--random-samples", str(experiment["diagnostic_random_samples"])]
+        command += ["--random-seed", str(experiment.get("diagnostic_random_seed", 0))]
+        command += ["--eval-horizon", str(experiment.get("diagnostic_eval_horizon", 10))]
+    if experiment.get("train_preset"):
+        command.append(f"presets={experiment['train_preset']}")
+    subprocess.run(command, check=True)
+    if experiment.get("diagnostic_negative_seed_test", False):
+        dataset_spec = next(spec for spec in specs if spec.filename == diagnostic_filename)
+        negative_command = [*command, "--terrain-seed-override", str(dataset_spec.seed + 1)]
+        result = subprocess.run(
+            negative_command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        print(result.stdout, end="")
+        if result.returncode == 0:
+            raise RuntimeError("Negative terrain-seed diagnostic unexpectedly passed.")
+        if "Terrain context mismatch" not in result.stdout:
+            raise RuntimeError(
+                "Negative terrain-seed diagnostic failed for an unexpected reason "
+                f"(exit code {result.returncode})."
+            )
+        print(f"Negative terrain-seed diagnostic failed as expected with exit code {result.returncode}.")
+
+
 def start_tensorboard(output_root: Path, port: int):
     log_file = (output_root / "tensorboard.log").open("w", encoding="utf-8")
     process = subprocess.Popen(
@@ -355,8 +521,6 @@ def run(args: argparse.Namespace):
     print(f"Training envs per rank: {experiment['train_num_envs']}")
     print(f"Training config: {experiment['train_cfg']}")
 
-    start_tensorboard(output_root, args.tensorboard_port)
-
     datasets_available = False
     if args.dataset_cache_mode != "off" and args.dataset_input_path:
         datasets_available = load_dataset_cache_from_input(
@@ -386,6 +550,11 @@ def run(args: argparse.Namespace):
             nvdataset_data_description=args.nvdataset_data_description,
         )
 
+    if experiment.get("diagnostic_only", False):
+        run_context_diagnostic(experiment, specs, dataset_dir)
+        return
+
+    start_tensorboard(output_root, args.tensorboard_port)
     run_training(experiment, output_root, args)
 
 
@@ -420,7 +589,7 @@ def main():
     with log_path.open("a", encoding="utf-8") as log_file:
         tee_stdout = Tee(sys.stdout, log_file)
         tee_stderr = Tee(sys.stderr, log_file)
-        with redirect_stdout(tee_stdout), redirect_stderr(tee_stderr):
+        with redirect_stdout(cast(TextIO, tee_stdout)), redirect_stderr(cast(TextIO, tee_stderr)):
             run(args)
 
 

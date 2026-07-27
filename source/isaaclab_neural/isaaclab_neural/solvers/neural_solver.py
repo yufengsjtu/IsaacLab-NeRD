@@ -31,6 +31,17 @@ from isaaclab_neural.solvers.kernels import determine_angular_dofs
 from isaaclab_neural.utils import torch_utils
 
 
+def _resolve_root_body_ids(model, articulation_starts: np.ndarray, num_envs: int) -> np.ndarray:
+    """Return the root-link body id for each articulation row."""
+    joint_child = getattr(model, "joint_child", None)
+    if joint_child is not None:
+        root_body_ids = np.asarray(joint_child.numpy())[articulation_starts[:num_envs]]
+        if np.all(root_body_ids >= 0):
+            return root_body_ids.astype(np.int64, copy=False)
+
+    raise ValueError("Cannot resolve articulation root bodies from Newton joint_child metadata.")
+
+
 class NeuralSolver(SolverBase):
     """
     An integrator that uses a neural network to predict the next state.
@@ -108,9 +119,40 @@ class NeuralSolver(SolverBase):
         self.dof_qd_per_env = int(qd_starts[i1] - qd_starts[i0])
         self.state_dim = self.dof_q_per_env + self.dof_qd_per_env
         self.num_envs = model.articulation_count
+        if int(model.world_count) != self.num_envs:
+            raise ValueError(
+                "NeuralSolver requires one Newton world per articulation, "
+                f"got world_count={model.world_count} and articulation_count={self.num_envs}."
+            )
+        if model.body_count % self.num_envs != 0 or model.joint_count % self.num_envs != 0:
+            raise ValueError("NeuralSolver requires uniform body and joint counts across environments.")
         self.num_joints_per_env = model.joint_count // self.num_envs
         self.num_bodies_per_env = model.body_count // self.num_envs
         self.joint_f_dim = self.model.joint_f.shape[0] // self.num_envs
+        joint_world_array = getattr(model, "joint_world", None)
+        if joint_world_array is None:
+            self.state_world_ids = torch.arange(self.num_envs, device=self.torch_device)
+        else:
+            joint_world = joint_world_array.numpy()
+            self.state_world_ids = torch.as_tensor(
+                joint_world[art_starts[: self.num_envs]], device=self.torch_device, dtype=torch.long
+            )
+        if sorted(self.state_world_ids.tolist()) != list(range(self.num_envs)):
+            raise ValueError(f"Generalized state rows do not map one-to-one to Newton worlds: {self.state_world_ids}.")
+        root_body_ids = _resolve_root_body_ids(model, art_starts, self.num_envs)
+        self.root_body_ids = torch.as_tensor(root_body_ids, device=self.torch_device, dtype=torch.long)
+        if torch.unique(self.root_body_ids).numel() != self.num_envs:
+            raise ValueError(f"Articulation root body ids are not unique: {self.root_body_ids}.")
+        if model.body_world is None:
+            self.root_world_ids = self.state_world_ids.clone()
+        else:
+            body_world = torch.as_tensor(model.body_world.numpy(), device=self.torch_device, dtype=torch.long)
+            self.root_world_ids = body_world.index_select(0, self.root_body_ids)
+        if not torch.equal(self.root_world_ids, self.state_world_ids):
+            raise ValueError(
+                "Generalized-state and root-body rows map to different Newton worlds: "
+                f"state={self.state_world_ids}, root={self.root_world_ids}."
+            )
         self.num_contacts_per_env = num_contacts_per_env
         self.contact_mode = contact_mode
         self.contact_representation = contact_representation
@@ -128,6 +170,7 @@ class NeuralSolver(SolverBase):
 
         # initialize model input variables
         self.root_body_q = torch.empty((self.num_envs, 7), device=self.torch_device)
+        self.root_body_qd = torch.empty((self.num_envs, 6), device=self.torch_device)
         self.states = torch.empty((self.num_envs, self.state_dim), device=self.torch_device)
         self.joint_f = torch.empty((self.num_envs, self.joint_f_dim), device=self.torch_device)
         if self.contact_mode == "fixed_ground":
@@ -320,7 +363,8 @@ class NeuralSolver(SolverBase):
     def _update_states(self, newton_states: State, contacts: Contacts, joint_f):
         self._acquire_states_to_torch(newton_states, self.states)
         self.wrap2PI(self.states)
-        self.root_body_q = wp.to_torch(newton_states.body_q)[0 :: self.num_bodies_per_env, :]
+        self.root_body_q = wp.to_torch(newton_states.body_q).index_select(0, self.root_body_ids)
+        self.root_body_qd = wp.to_torch(newton_states.body_qd).index_select(0, self.root_body_ids)
         if self.joint_f_dim > 0:
             self.joint_f = wp.to_torch(joint_f).view(self.num_envs, self.joint_f_dim)
         if self.contact_mode == "fixed_ground":
@@ -470,11 +514,22 @@ class NeuralSolver(SolverBase):
                 model_inputs.pop(key, None)
 
         if "contact_tokens" in model_inputs:
-            model_inputs["contact_tokens"] = transform_contact_tokens_to_body_frame(
-                model_inputs["contact_tokens"],
-                model_inputs["root_body_q"],
-                translation_only=(self.states_frame == "body_translation_only"),
-            )
+            if self.states_frame != "world":
+                root_body_q = model_inputs["root_body_q"]
+                batch, time = root_body_q.shape[:2]
+                if self.anchor_frame_step == "first":
+                    token_frame_q = root_body_q[:, 0:1].expand(batch, time, 7)
+                elif self.anchor_frame_step == "last":
+                    token_frame_q = root_body_q[:, -1:].expand(batch, time, 7)
+                elif self.anchor_frame_step == "every":
+                    token_frame_q = root_body_q
+                else:
+                    raise NotImplementedError(f"Unsupported anchor_frame_step: {self.anchor_frame_step!r}.")
+                model_inputs["contact_tokens"] = transform_contact_tokens_to_body_frame(
+                    model_inputs["contact_tokens"],
+                    token_frame_q,
+                    translation_only=(self.states_frame == "body_translation_only"),
+                )
 
         # post processing
         self.wrap2PI(model_inputs["states"])
@@ -510,6 +565,7 @@ class NeuralSolver(SolverBase):
         # exactly once, matching online inference.
         model_inputs = {
             "root_body_q": self.root_body_q,
+            "root_body_qd": self.root_body_qd,
             "states": self.states,
             "joint_f": self.joint_f,
             "gravity_dir": self.gravity_dir,

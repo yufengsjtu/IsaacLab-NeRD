@@ -111,6 +111,7 @@ class DataGenerationAdapter:
         self.model = self.backend.model
         self.state = self.backend.state
         self.control = self.backend.control
+        self._body_world_torch: torch.Tensor | None = None
 
         self.contact_mode = solver_cfg.contact_mode
         self.abstract_contacts = None
@@ -168,6 +169,48 @@ class DataGenerationAdapter:
     def state_dim(self) -> int:
         """Flat generalized state dimension."""
         return int(self.solver.states.shape[-1])
+
+    @property
+    def state_world_ids(self) -> torch.Tensor:
+        """Newton world id represented by each generalized-state row."""
+        return self.solver.state_world_ids
+
+    @property
+    def root_world_ids(self) -> torch.Tensor:
+        """Newton world id represented by each cached root-body row."""
+        return self.solver.root_world_ids
+
+    @property
+    def contact_world_ids(self) -> torch.Tensor:
+        """Newton world id represented by each packed contact row."""
+        return torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+
+    @property
+    def contact_token_body_ids(self) -> torch.Tensor | None:
+        """Packed global owner-body ids, if contact tokens are active."""
+        if self.contact_adapter is None:
+            return None
+        return getattr(self.contact_adapter, "contact_token_body_ids", None)
+
+    @property
+    def contact_token_world_ids(self) -> torch.Tensor | None:
+        """Newton world ids derived from each packed token's owner body."""
+        body_ids = self.contact_token_body_ids
+        if body_ids is None:
+            return None
+        world_ids = torch.full_like(body_ids, -1)
+        valid = body_ids >= 0
+        if not valid.any():
+            return world_ids
+        body_world = getattr(self.model, "body_world", None)
+        if body_world is None:
+            raise RuntimeError("Newton body_world metadata is required to record contact-token owner worlds.")
+        body_world_torch = getattr(self, "_body_world_torch", None)
+        if body_world_torch is None or body_world_torch.device != body_ids.device:
+            body_world_torch = torch.as_tensor(body_world.numpy(), device=body_ids.device, dtype=torch.long)
+            self._body_world_torch = body_world_torch
+        world_ids[valid] = body_world_torch.index_select(0, body_ids[valid])
+        return world_ids
 
     @property
     def joint_f_dim(self) -> int:
