@@ -97,13 +97,13 @@ class NerdAnymalCRoughEnvCfg(AnymalCRoughEnvCfg):
         self.events.push_robot = None  # type: ignore[assignment]
 
         # Add root-height termination
-        self.terminations.low_root_height = DoneTerm(  # type: ignore[attr-defined]
-            func=base_mdp.root_height_below_minimum,
-            params={
-                "minimum_height": ROOT_HEIGHT_MINIMUM,
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
-        )
+        # self.terminations.low_root_height = DoneTerm(  # type: ignore[attr-defined]
+        #     func=base_mdp.root_height_below_minimum,
+        #     params={
+        #         "minimum_height": ROOT_HEIGHT_MINIMUM,
+        #         "asset_cfg": SceneEntityCfg("robot"),
+        #     },
+        # )
 
         self.sim.physics = NerdNewtonCfg(
             solver_cfg=NerdSolverCfg(
