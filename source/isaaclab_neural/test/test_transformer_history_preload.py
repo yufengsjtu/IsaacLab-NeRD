@@ -81,6 +81,24 @@ def test_preload_states_history_rejects_mismatched_contact_shape():
         raise AssertionError("Expected mismatched history shape to be rejected.")
 
 
+def test_preload_states_history_squeezes_scalar_overflow_feature_axis():
+    solver = _FakeTransformerSolver()
+    solver.contacts = {
+        "contact_tokens": torch.zeros(2, 3, 17),
+        "contact_token_overflow": torch.zeros(2, dtype=torch.long),
+    }
+    history = {
+        **{key: value for key, value in _history().items() if not key.startswith("contact_")},
+        "contact_tokens": torch.zeros(2, 9, 3, 17),
+        "contact_token_overflow": torch.zeros(2, 9, 1, dtype=torch.long),
+    }
+
+    TransformerNeuralSolver.preload_states_history(solver, history)
+
+    assert solver.states_history[0]["contact_token_overflow"].shape == (2,)
+    assert solver.states_history[0]["contact_token_overflow"].dtype == torch.long
+
+
 def test_online_history_snapshot_does_not_alias_contact_buffers():
     solver = _FakeTransformerSolver()
     solver.root_body_q = torch.zeros(2, 7)

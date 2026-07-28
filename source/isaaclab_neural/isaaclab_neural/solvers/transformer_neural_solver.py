@@ -54,19 +54,22 @@ class TransformerNeuralSolver(NeuralSolver):
             "gravity_dir": self.gravity_dir,
             **self.contacts,
         }
+        normalized_history: dict[str, torch.Tensor] = {}
         for key in required:
             value = history[key]
             expected = live_inputs[key]
+            if expected.ndim == 1 and value.ndim == 3 and value.shape[-1] == 1:
+                value = value.squeeze(-1)
             expected_shape = (self.num_envs, history_length, *expected.shape[1:])
             if tuple(value.shape) != expected_shape:
                 raise ValueError(f"History {key} must have shape {expected_shape}, got {tuple(value.shape)}.")
+            normalized_history[key] = value
 
         self.reset_states_history()
         for step in range(history_length):
             entry = {
                 key: value[:, step].to(device=self.torch_device).clone()
-                for key, value in history.items()
-                if key in required
+                for key, value in normalized_history.items()
             }
             entry["states_embedding"] = self.embed_states(entry["states"])
             self.states_history.append(entry)

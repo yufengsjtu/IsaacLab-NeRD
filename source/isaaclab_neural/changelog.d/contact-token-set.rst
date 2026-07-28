@@ -16,6 +16,8 @@ Fixed
   ``None`` flat ``contact_*`` keys that incorrectly required ``contact_masks``.
 * Fixed :meth:`~isaaclab_neural.solvers.transformer_neural_solver.TransformerNeuralSolver.get_neural_model_inputs`
   history batching to support 2-D overflow and 4-D ``contact_tokens`` tensors.
+* Fixed transformer history preloading to accept the singleton feature axis used by trajectory datasets for
+  ``contact_token_overflow``.
 * Fixed contact-token regime evaluation so invalid padding tokens with gap ``0`` are not treated as touchdown.
 * Fixed Newton-native surface separation to include contact surface offsets.
 * Fixed contact-token generation to derive root and owner worlds from Newton metadata instead of body strides.
