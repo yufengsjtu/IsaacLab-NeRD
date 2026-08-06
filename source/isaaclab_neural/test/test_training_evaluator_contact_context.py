@@ -387,3 +387,75 @@ def test_sampled_trajectories_include_source_window_coordinates(monkeypatch):
 
     torch.testing.assert_close(trajectories["_dataset_trajectory_index"], torch.tensor([7, 5]))
     torch.testing.assert_close(trajectories["_dataset_window_start"], torch.tensor([30, 10]))
+
+
+def _terrain_restore_evaluator(*, require_terrain_context: bool, terrain) -> TrainingRolloutEvaluator:
+    evaluator = object.__new__(TrainingRolloutEvaluator)
+    evaluator.require_terrain_context = require_terrain_context
+    evaluator.neural_env = SimpleNamespace(
+        neural_adapter=SimpleNamespace(isaaclab_env=SimpleNamespace(scene=SimpleNamespace(terrain=terrain)))
+    )
+    return evaluator
+
+
+def test_restore_terrain_context_skips_levels_on_flat_terrain():
+    terrain = SimpleNamespace(
+        device=torch.device("cpu"),
+        env_origins=torch.zeros(2, 3),
+    )
+    trajectories = {
+        "terrain_level": torch.tensor([-1, -1]),
+        "terrain_type": torch.tensor([-1, -1]),
+        "env_origin": torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+    }
+
+    _terrain_restore_evaluator(require_terrain_context=False, terrain=terrain)._restore_terrain_context(
+        trajectories,
+        start=0,
+        end=2,
+    )
+
+    torch.testing.assert_close(terrain.env_origins, trajectories["env_origin"])
+
+
+def test_restore_terrain_context_writes_curriculum_attributes():
+    terrain = SimpleNamespace(
+        device=torch.device("cpu"),
+        terrain_levels=torch.zeros(2, dtype=torch.long),
+        terrain_types=torch.zeros(2, dtype=torch.long),
+        env_origins=torch.zeros(2, 3),
+    )
+    trajectories = {
+        "terrain_level": torch.tensor([1, 2]),
+        "terrain_type": torch.tensor([3, 4]),
+        "env_origin": torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+    }
+
+    _terrain_restore_evaluator(require_terrain_context=True, terrain=terrain)._restore_terrain_context(
+        trajectories,
+        start=0,
+        end=2,
+    )
+
+    torch.testing.assert_close(terrain.terrain_levels, trajectories["terrain_level"])
+    torch.testing.assert_close(terrain.terrain_types, trajectories["terrain_type"])
+    torch.testing.assert_close(terrain.env_origins, trajectories["env_origin"])
+
+
+def test_restore_terrain_context_strict_rejects_flat_terrain():
+    terrain = SimpleNamespace(
+        device=torch.device("cpu"),
+        env_origins=torch.zeros(2, 3),
+    )
+    trajectories = {
+        "terrain_level": torch.tensor([-1, -1]),
+        "terrain_type": torch.tensor([-1, -1]),
+        "env_origin": torch.zeros(2, 3),
+    }
+
+    with pytest.raises(ValueError, match="curriculum terrain attributes"):
+        _terrain_restore_evaluator(require_terrain_context=True, terrain=terrain)._restore_terrain_context(
+            trajectories,
+            start=0,
+            end=2,
+        )

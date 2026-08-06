@@ -770,7 +770,12 @@ def print_metrics(title: str, metrics: dict[str, float]) -> None:
 
 
 def restore_terrain_patch(env, batch: dict[str, torch.Tensor], *, required: bool) -> None:
-    """Restore recorded terrain patch assignments for the selected trajectories."""
+    """Restore recorded terrain patch assignments for the selected trajectories.
+
+    Flat/grid terrains only expose ``env_origins``. Curriculum terrains also
+    expose ``terrain_levels`` / ``terrain_types``. Restore only attributes that
+    exist so flat diagnostics do not fail on sentinel level/type metadata.
+    """
     keys = {"terrain_level", "terrain_type", "env_origin"}
     if not keys.issubset(batch):
         if required:
@@ -783,9 +788,21 @@ def restore_terrain_patch(env, batch: dict[str, torch.Tensor], *, required: bool
             raise ValueError("The diagnostic task has no terrain importer.")
         return
     num_envs = batch["states"].shape[0]
-    terrain.terrain_levels[:num_envs].copy_(batch["terrain_level"].to(terrain.device, dtype=torch.long))
-    terrain.terrain_types[:num_envs].copy_(batch["terrain_type"].to(terrain.device, dtype=torch.long))
-    terrain.env_origins[:num_envs].copy_(batch["env_origin"].to(terrain.device, dtype=torch.float32))
+    has_curriculum_terrain = (
+        getattr(terrain, "terrain_levels", None) is not None
+        and getattr(terrain, "terrain_types", None) is not None
+    )
+    if required and not has_curriculum_terrain:
+        raise ValueError(
+            "Strict terrain restoration requires curriculum terrain attributes "
+            "(terrain_levels and terrain_types), but the active TerrainImporter "
+            "only provides a flat/grid layout."
+        )
+    if has_curriculum_terrain:
+        terrain.terrain_levels[:num_envs].copy_(batch["terrain_level"].to(terrain.device, dtype=torch.long))
+        terrain.terrain_types[:num_envs].copy_(batch["terrain_type"].to(terrain.device, dtype=torch.long))
+    if getattr(terrain, "env_origins", None) is not None:
+        terrain.env_origins[:num_envs].copy_(batch["env_origin"].to(terrain.device, dtype=torch.float32))
 
 
 def validate_contact_metrics(

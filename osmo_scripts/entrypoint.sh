@@ -11,6 +11,7 @@ NVDATASET_CODE_DIR="${NVDATASET_CODE_DIR:-/tmp/nvdatasets/code}"
 NVDATASET_DATA_DIR="${NVDATASET_DATA_DIR:-/tmp/nvdatasets/data}"
 NVDATASET_OUTPUT_DIR="${NVDATASET_OUTPUT_DIR:-$WORKFLOW_ID}"
 DATASET_CACHE_MODE="${DATASET_CACHE_MODE:-auto}"
+NVDATASET_INDEX_URL="${NVDATASET_INDEX_URL:-https://artifactory.pdx.nvidia.com/artifactory/api/pypi/sw-ngc-data-platform-pypi-local/simple}"
 
 export OUTPUT_LOCAL_PATH
 export NGC_API_KEY="${NGC_API_KEY:-}"
@@ -44,9 +45,7 @@ install_python_shims() {
 
 install_nvdataset_deps() {
     python3 -m pip install --quiet --force-reinstall cffi
-    python3 -m pip install --quiet \
-        --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/sw-ngc-data-platform-pypi/simple \
-        "PyJWT[crypto]" python-dateutil nvdataset
+    python3 -m pip install --quiet -U --extra-index-url "$NVDATASET_INDEX_URL" nvdataset
     python3 /tmp/nvdataset_io.py check
 
     export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"

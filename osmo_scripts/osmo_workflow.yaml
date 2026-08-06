@@ -33,6 +33,7 @@ workflow:
       NVDATASET_OUTPUT_DATASET: "{{ nvdataset_output_dataset }}"
       NVDATASET_OUTPUT_DESCRIPTION: "{{ nvdataset_output_description }}"
       NVDATASET_OUTPUT_DIR: "{{ workflow_name }}"
+      NVDATASET_INDEX_URL: "{{ nvdataset_index_url }}"
       ENABLE_WANDB: "{{ enable_wandb }}"
       WANDB_PROJECT_NAME: "{{ wandb_project_name }}"
       WANDB_EXP_NAME: "{{ wandb_exp_name }}"
@@ -75,6 +76,7 @@ default-values:
   nvdataset_data_description: IsaacLab-NeRD generated HDF5 datasets.
   nvdataset_output_dataset: IsaacLab-NeRD-Output
   nvdataset_output_description: IsaacLab-NeRD OSMO training outputs.
+  nvdataset_index_url: https://artifactory.pdx.nvidia.com/artifactory/api/pypi/sw-ngc-data-platform-pypi-local/simple
   enable_wandb: "false"
   wandb_project_name: nerd-newton
   wandb_exp_name: ""

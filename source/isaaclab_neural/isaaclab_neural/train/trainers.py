@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import inspect
-import math
 import os
 import shutil
 import traceback
@@ -19,7 +18,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import yaml
-from newton import JointType
 from torch.nn.parallel import DistributedDataParallel
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.utils.data import DataLoader
@@ -193,7 +191,6 @@ class VanillaTrainer:
 
         self.batch_size = int(algo_cfg["batch_size"])
         self.num_valid_batches = int(algo_cfg.get("num_valid_batches", 50))
-        self.student_forcing_enabled = False
         dataset_cfg = algo_cfg["dataset"]
         self.dataset_max_capacity = dataset_cfg.get("max_capacity", 100_000_000)
         self.dataset_load_mode = dataset_cfg.get("load_mode", "eager")
@@ -613,10 +610,6 @@ class VanillaTrainer:
                     f"dim={self.dataset_rms['contact_tokens'].mean.numel()}"
                 )
 
-    def get_student_forcing_probability(self, epoch: int) -> float:
-        """Return the student forcing probability for trainers that support it."""
-        raise NotImplementedError("Student forcing is not supported by this trainer.")
-
     def compute_or_sync_dataset_statistics(self, dataset) -> None:
         """Compute dataset statistics once, then share them with DDP ranks."""
         if self.is_distributed and self.train_dataset_rank_sharded:
@@ -819,9 +812,6 @@ class VanillaTrainer:
             self.time_report.reset_timer()
             with TimeProfiler(self.time_report, "epoch"):
                 self.lr = self.get_scheduled_learning_rate(epoch, self.num_epochs)
-                if self.student_forcing_enabled:
-                    self.p_student = self.get_student_forcing_probability(epoch)
-                    print_info(f"Student forcing probability: {self.p_student}")
                 for param_group in self.optimizer.param_groups:
                     param_group["lr"] = self.lr
                 self.logger.init_epoch(epoch)
@@ -1049,207 +1039,3 @@ class SequenceModelTrainer(VanillaTrainer):
                     hdf5_dataset_path=valid_dataset_path,
                 )
         self.collate_fn = None
-
-
-class MultiStepTrainer(SequenceModelTrainer):
-    """Multi-step trainer with scheduled student forcing in world frame."""
-
-    def __init__(self, neural_env, cfg, checkpoint=None, device="cuda:0"):
-        super().__init__(neural_env, cfg, checkpoint, device)
-        if cfg["cli"]["train"]:
-            student_forcing_cfg = cfg["algorithm"].get("student_forcing", {})
-            self.student_forcing_enabled = True
-            self.student_forcing_schedule = student_forcing_cfg.get("schedule", "linear")
-            self.student_forcing_start_epoch = student_forcing_cfg.get("start_epoch", 0)
-            self.student_forcing_end_epoch = student_forcing_cfg.get("end_epoch", self.num_epochs)
-            self.student_forcing_start_prob = student_forcing_cfg.get("start_prob", 0.0)
-            self.student_forcing_end_prob = student_forcing_cfg.get("end_prob", 1.0)
-
-    @torch.no_grad()
-    def preprocess_data_batch(self, data):
-        for key, value in data.items():
-            data[key] = value.to(self.device, non_blocking=self.non_blocking_data_transfer)
-        data["states_w"] = data["states"].clone()
-        data["next_states_w"] = data["next_states"].clone()
-        data["gravity_dir_w"] = data["gravity_dir"].clone()
-        return super().preprocess_data_batch(data)
-
-    def get_student_forcing_probability(self, epoch: int) -> float:
-        if epoch < self.student_forcing_start_epoch:
-            return self.student_forcing_start_prob
-        if epoch >= self.student_forcing_end_epoch:
-            return self.student_forcing_end_prob
-        progress = (epoch - self.student_forcing_start_epoch) / (
-            self.student_forcing_end_epoch - self.student_forcing_start_epoch
-        )
-        if self.student_forcing_schedule == "linear":
-            return self.student_forcing_start_prob + progress * (
-                self.student_forcing_end_prob - self.student_forcing_start_prob
-            )
-        if self.student_forcing_schedule == "exponential":
-            return self.student_forcing_start_prob + progress**2 * (
-                self.student_forcing_end_prob - self.student_forcing_start_prob
-            )
-        if self.student_forcing_schedule == "sigmoid":
-            sigmoid = 1 / (1 + math.exp(-(progress - 0.5) * 12))
-            return self.student_forcing_start_prob + sigmoid * (
-                self.student_forcing_end_prob - self.student_forcing_start_prob
-            )
-        raise ValueError(f"Unknown schedule: {self.student_forcing_schedule}")
-
-    def compute_loss(self, data, train):
-        batch_size, seq_length, _ = data["states_w"].shape
-        device = data["states_w"].device
-        if not hasattr(self, "p_student"):
-            self.p_student = self.get_student_forcing_probability(self.current_epoch)
-        if self.neural_model_unwrapped.is_rnn:
-            self.neural_model_unwrapped.init_rnn(batch_size)
-
-        total_loss = 0.0
-        input_states_w = data["states_w"][:, 0:1, :].clone()
-        all_predicted_next_states_w = []
-        for time_index in range(seq_length):
-            if self.neural_solver.base_joint_type == JointType.FREE:
-                root_body_q = torch.cat([input_states_w[..., :3], input_states_w[..., 3:7]], dim=-1)
-            else:
-                root_body_q = torch.zeros((batch_size, time_index + 1, 7), device=device)
-            input_states_model, _, _, _, _, input_gravity_dir_model = self.neural_solver.convert_coordinate_frame(
-                root_body_q=root_body_q,
-                states=input_states_w,
-                next_states=None,
-                contact_points_0=None,
-                contact_points_1=None,
-                contact_normals=None,
-                gravity_dir=data["gravity_dir_w"][:, : time_index + 1, :],
-            )
-            model_inputs = {
-                "states": input_states_model,
-                "states_embedding": self.neural_solver.embed_states(input_states_model),
-                "gravity_dir": input_gravity_dir_model,
-                "root_body_q": root_body_q,
-            }
-            exclude_keys = {
-                "states",
-                "states_embedding",
-                "gravity_dir",
-                "root_body_q",
-                "states_w",
-                "next_states_w",
-                "gravity_dir_w",
-            }
-            for key, value in data.items():
-                if key not in exclude_keys:
-                    model_inputs[key] = value[:, : time_index + 1, :]
-            prediction = self._forward_model(model_inputs, train, single_step=True)
-            predicted_next_state_model = self.neural_solver.convert_prediction_to_next_states(
-                states=input_states_model[:, -1, :],
-                prediction=prediction.squeeze(1),
-                dt=self.neural_env.frame_dt,
-            )
-            predicted_next_state_w = self.neural_solver.convert_states_back_to_world(
-                root_body_q=root_body_q,
-                states=predicted_next_state_model,
-            )
-            predicted_next_state_w = self.neural_solver.wrap2PI_differentiable(predicted_next_state_w)
-            total_loss += self.loss_func(
-                predicted_next_state_w * self.loss_weights,
-                data["next_states_w"][:, time_index, :] * self.loss_weights,
-            )
-            all_predicted_next_states_w.append(predicted_next_state_w.detach())
-            if time_index < seq_length - 1:
-                use_student = torch.rand(batch_size, device=device) < self.p_student
-                next_state_w = torch.where(
-                    use_student.view(-1, 1), predicted_next_state_w, data["states_w"][:, time_index + 1, :]
-                )
-                input_states_w = torch.cat([input_states_w, next_state_w.unsqueeze(1)], dim=1)
-
-        loss = total_loss / seq_length
-        with torch.no_grad():
-            predicted = torch.stack(all_predicted_next_states_w, dim=1)
-            loss_itemized = self._sequence_loss_itemized(predicted, data["next_states_w"])
-            loss_itemized["student_forcing_prob"] = self.p_student
-        return loss, loss_itemized
-
-    def _sequence_loss_itemized(self, predicted_next_states, next_states):
-        return {
-            "state_MSE": torch.nn.MSELoss()(predicted_next_states, next_states).detach().cpu().item(),
-            "q_error_norm": torch.norm(
-                predicted_next_states[..., : self.neural_solver.dof_q_per_env]
-                - next_states[..., : self.neural_solver.dof_q_per_env],
-                dim=-1,
-            )
-            .mean()
-            .detach()
-            .cpu()
-            .item(),
-            "qd_error_norm": torch.norm(
-                predicted_next_states[..., self.neural_solver.dof_q_per_env :]
-                - next_states[..., self.neural_solver.dof_q_per_env :],
-                dim=-1,
-            )
-            .mean()
-            .detach()
-            .cpu()
-            .item(),
-        }
-
-
-class MultiStepTrainerNew(MultiStepTrainer):
-    """Multi-step trainer variant for first-anchor-frame configs."""
-
-    def __init__(self, neural_env, cfg, checkpoint=None, device="cuda:0"):
-        if cfg["env"]["neural_solver_cfg"].get("anchor_frame_step") != "first":
-            raise ValueError("anchor_frame_step must be 'first' for MultiStepTrainerNew")
-        super().__init__(neural_env, cfg, checkpoint, device)
-
-    def compute_loss(self, data, train):
-        batch_size, seq_length, _ = data["states"].shape
-        device = data["states"].device
-        if not hasattr(self, "p_student"):
-            self.p_student = self.get_student_forcing_probability(self.current_epoch)
-        if self.p_student < 1e-6:
-            return VanillaTrainer.compute_loss(self, data, train)
-        if self.neural_model_unwrapped.is_rnn:
-            self.neural_model_unwrapped.init_rnn(batch_size)
-
-        total_loss = 0.0
-        input_states = data["states"][:, 0:1, :].clone()
-        all_predicted_next_states = []
-        for time_index in range(seq_length):
-            input_states_embedding = self.neural_solver.embed_states(input_states)
-            model_inputs = {
-                "states": input_states,
-                "states_embedding": input_states_embedding,
-            }
-            for key, value in data.items():
-                if key not in {"states", "states_embedding"}:
-                    model_inputs[key] = value[:, : time_index + 1, :]
-
-            prediction = self._forward_model(model_inputs, train, single_step=True)
-            predicted_next_states = self.neural_solver.convert_prediction_to_next_states(
-                states=input_states[:, -1, :],
-                prediction=prediction.squeeze(1),
-                dt=self.neural_env.frame_dt,
-            )
-            predicted_next_states = self.neural_solver.wrap2PI_differentiable(predicted_next_states)
-            total_loss += self.loss_func(
-                predicted_next_states * self.loss_weights,
-                data["next_states"][:, time_index, :] * self.loss_weights,
-            )
-            all_predicted_next_states.append(predicted_next_states.detach())
-
-            if time_index < seq_length - 1:
-                use_student = torch.rand(batch_size, device=device) < self.p_student
-                next_state = torch.where(
-                    use_student.view(-1, 1),
-                    predicted_next_states,
-                    data["states"][:, time_index + 1, :],
-                )
-                input_states = torch.cat([input_states, next_state.unsqueeze(1)], dim=1)
-
-        loss = total_loss / seq_length
-        with torch.no_grad():
-            predicted = torch.stack(all_predicted_next_states, dim=1)
-            loss_itemized = self._sequence_loss_itemized(predicted, data["next_states"])
-            loss_itemized["student_forcing_prob"] = self.p_student
-        return loss, loss_itemized

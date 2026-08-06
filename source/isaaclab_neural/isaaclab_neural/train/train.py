@@ -20,7 +20,7 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import isaaclab_neural.envs  # noqa: F401 - registers built-in NeRD tasks
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
-from isaaclab_neural.train import MultiStepTrainer, MultiStepTrainerNew, SequenceModelTrainer, VanillaTrainer
+from isaaclab_neural.train import SequenceModelTrainer, VanillaTrainer
 from isaaclab_neural.train.arguments import get_parser
 from isaaclab_neural.utils.checkpoint import get_cfg_from_checkpoint, load_checkpoint
 from isaaclab_neural.utils.python_utils import get_time_stamp, handle_cfg_overrides, print_warning, set_random_seed
@@ -28,8 +28,6 @@ from isaaclab_neural.utils.python_utils import get_time_stamp, handle_cfg_overri
 ALGORITHMS = {
     "VanillaTrainer": VanillaTrainer,
     "SequenceModelTrainer": SequenceModelTrainer,
-    "MultiStepTrainer": MultiStepTrainer,
-    "MultiStepTrainerNew": MultiStepTrainerNew,
 }
 
 

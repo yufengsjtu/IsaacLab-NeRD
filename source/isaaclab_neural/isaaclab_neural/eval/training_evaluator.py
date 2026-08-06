@@ -380,7 +380,13 @@ class TrainingRolloutEvaluator:
         start: int,
         end: int,
     ) -> None:
-        """Map evaluation slots to the trajectory's recorded terrain patch."""
+        """Map evaluation slots to the trajectory's recorded terrain patch.
+
+        Flat/grid terrains only expose ``env_origins``. Curriculum terrains also
+        expose ``terrain_levels`` / ``terrain_types``. Restore only the
+        attributes that exist so flat eval does not fail when datasets still
+        store sentinel ``terrain_level`` / ``terrain_type`` values.
+        """
         keys = {"terrain_level", "terrain_type", "env_origin"}
         if not keys.issubset(trajectories):
             if self.require_terrain_context:
@@ -391,9 +397,28 @@ class TrainingRolloutEvaluator:
             if self.require_terrain_context:
                 raise ValueError("Strict rollout evaluation requires an environment terrain.")
             return
-        terrain.terrain_levels[: end - start].copy_(trajectories["terrain_level"][start:end].to(terrain.device))
-        terrain.terrain_types[: end - start].copy_(trajectories["terrain_type"][start:end].to(terrain.device))
-        terrain.env_origins[: end - start].copy_(trajectories["env_origin"][start:end].to(terrain.device))
+
+        has_curriculum_terrain = (
+            getattr(terrain, "terrain_levels", None) is not None
+            and getattr(terrain, "terrain_types", None) is not None
+        )
+        if self.require_terrain_context and not has_curriculum_terrain:
+            raise ValueError(
+                "Strict rollout evaluation requires curriculum terrain attributes "
+                "(terrain_levels and terrain_types), but the active TerrainImporter "
+                "only provides a flat/grid layout."
+            )
+        if has_curriculum_terrain:
+            terrain.terrain_levels[: end - start].copy_(
+                trajectories["terrain_level"][start:end].to(terrain.device)
+            )
+            terrain.terrain_types[: end - start].copy_(
+                trajectories["terrain_type"][start:end].to(terrain.device)
+            )
+        if getattr(terrain, "env_origins", None) is not None:
+            terrain.env_origins[: end - start].copy_(
+                trajectories["env_origin"][start:end].to(terrain.device)
+            )
 
     def _validate_runtime_state_context(
         self,

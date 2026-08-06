@@ -15,6 +15,7 @@ NVDATASET_CODE_DATASET="${NVDATASET_CODE_DATASET:-IsaacLab-NeRD-Code}"
 NVDATASET_DATA_DATASET="${NVDATASET_DATA_DATASET:-IsaacLab-NeRD-Datasets}"
 NVDATASET_OUTPUT_DATASET="${NVDATASET_OUTPUT_DATASET:-IsaacLab-NeRD-Output}"
 NVDATASET_OUTPUT_DESCRIPTION="${NVDATASET_OUTPUT_DESCRIPTION:-IsaacLab-NeRD OSMO training outputs for $RUN_ID.}"
+NVDATASET_INDEX_URL="${NVDATASET_INDEX_URL:-https://artifactory.pdx.nvidia.com/artifactory/api/pypi/sw-ngc-data-platform-pypi-local/simple}"
 DATASET_CACHE_MODE="${DATASET_CACHE_MODE:-auto}"
 OSMO_EXPERIMENT_PRESET="${OSMO_EXPERIMENT_PRESET:-anymal_newton_native}"
 PRESET_FILE="${PRESET_FILE:-}"
@@ -251,9 +252,7 @@ echo "=== Ensuring local nvdataset package ==="
 export NVDATASET_TENANTID
 export NGC_API_KEY
 if ! python3 "$SCRIPT_DIR/lib/nvdataset_io.py" check >/dev/null 2>&1; then
-    python3 -m pip install --quiet \
-        --extra-index-url https://urm.nvidia.com/artifactory/api/pypi/sw-ngc-data-platform-pypi/simple \
-        cffi "PyJWT[crypto]" python-dateutil nvdataset
+    python3 -m pip install --quiet -U --extra-index-url "$NVDATASET_INDEX_URL" nvdataset
     python3 "$SCRIPT_DIR/lib/nvdataset_io.py" check
 fi
 
@@ -314,6 +313,7 @@ SUBMIT_ARGS=(
     "nvdataset_data_dataset=$NVDATASET_DATA_DATASET"
     "nvdataset_output_dataset=$NVDATASET_OUTPUT_DATASET"
     "nvdataset_output_description=$NVDATASET_OUTPUT_DESCRIPTION"
+    "nvdataset_index_url=$NVDATASET_INDEX_URL"
 )
 if [[ "$ENABLE_WANDB" == "1" ]]; then
     SUBMIT_ARGS+=(
