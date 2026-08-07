@@ -322,10 +322,13 @@ class NeuralSolver(SolverBase):
         contacts: Contacts = None,
         dt: float = 0.01,
     ):
+        from isaaclab_neural.utils import step_profile
+
         assert self.neural_model is not None, (
             "Cannot simulate via neural integrator as a neural model has not been setup yet."
         )
-        self._update_states(state_in, contacts, control.joint_f)
+        with step_profile.section("solver_update_states"):
+            self._update_states(state_in, contacts, control.joint_f)
 
         # Keep torch inference on Warp's CUDA stream so state reads, model
         # execution, and state writes preserve ordering without extra syncs.
@@ -340,7 +343,8 @@ class NeuralSolver(SolverBase):
             # get the inputs for neural model
             model_inputs = self.get_neural_model_inputs()
             # compute the prediction using neural model, shape (num_envs, 1, dim)
-            prediction = self.neural_model.forward(model_inputs, single_step=True)
+            with step_profile.section("model_forward"):
+                prediction = self.neural_model.forward(model_inputs, single_step=True)
 
             # convert the prediction to next states
             cur_states = model_inputs["states"][:, -1, :]
@@ -354,13 +358,16 @@ class NeuralSolver(SolverBase):
             self._assign_states_from_torch(state_out, next_states_world)
 
         # update maximal coordinates
-        newton_utils.eval_fk(self.model, state_out)
+        with step_profile.section("eval_fk"):
+            newton_utils.eval_fk(self.model, state_out)
 
     """
     Update the states, joint_f, and contacts in neural solver from a Newton state.
     """
 
     def _update_states(self, newton_states: State, contacts: Contacts, joint_f):
+        from isaaclab_neural.utils import step_profile
+
         self._acquire_states_to_torch(newton_states, self.states)
         self.wrap2PI(self.states)
         self.root_body_q = wp.to_torch(newton_states.body_q).index_select(0, self.root_body_ids)
@@ -370,8 +377,10 @@ class NeuralSolver(SolverBase):
         if self.contact_mode == "fixed_ground":
             self.contacts = self._get_contacts_for_neural_model_input(contacts)
         else:
-            self.contact_adapter.update(contacts, newton_states)
-            self.contacts = self.contact_adapter.to_neural_inputs()
+            with step_profile.section("adapter_update"):
+                self.contact_adapter.update(contacts, newton_states)
+            with step_profile.section("to_neural_inputs"):
+                self.contacts = self.contact_adapter.to_neural_inputs()
 
     def get_contact_masks(
         self,

@@ -209,25 +209,28 @@ class NewtonNerdManager(NewtonManager):
 
     @classmethod
     def _prepare_nerd_contacts(cls):
-        if cls._nerd_contact_mode == "fixed_ground":
-            from isaaclab_neural.contacts import collision_detection_fixed_ground
+        from isaaclab_neural.utils import step_profile
 
-            if cls._contacts is None:
-                raise RuntimeError("NeRD fixed_ground contact buffer has not been initialized.")
-            collision_detection_fixed_ground(
-                cls._model,
-                cls._state_0,
-                cls._contacts,
-                ground_shape_index=cls._nerd_ground_shape_index,
-            )
-            return cls._contacts
-        elif cls._nerd_contact_mode == "newton_native":
-            if cls._collision_pipeline is None or cls._contacts is None:
-                raise RuntimeError("NeRD newton_native contact pipeline has not been initialized.")
-            cls._collision_pipeline.collide(cls._state_0, cls._contacts)
-            return cls._contacts
-        else:
-            raise RuntimeError(f"Unsupported active NeRD contact mode: {cls._nerd_contact_mode}")
+        with step_profile.section("contact_prepare"):
+            if cls._nerd_contact_mode == "fixed_ground":
+                from isaaclab_neural.contacts import collision_detection_fixed_ground
+
+                if cls._contacts is None:
+                    raise RuntimeError("NeRD fixed_ground contact buffer has not been initialized.")
+                collision_detection_fixed_ground(
+                    cls._model,
+                    cls._state_0,
+                    cls._contacts,
+                    ground_shape_index=cls._nerd_ground_shape_index,
+                )
+                return cls._contacts
+            elif cls._nerd_contact_mode == "newton_native":
+                if cls._collision_pipeline is None or cls._contacts is None:
+                    raise RuntimeError("NeRD newton_native contact pipeline has not been initialized.")
+                cls._collision_pipeline.collide(cls._state_0, cls._contacts)
+                return cls._contacts
+            else:
+                raise RuntimeError(f"Unsupported active NeRD contact mode: {cls._nerd_contact_mode}")
 
     @classmethod
     def _simulate_full(cls) -> None:
@@ -235,15 +238,18 @@ class NewtonNerdManager(NewtonManager):
             super()._simulate_full()
             return
 
+        from isaaclab_neural.utils import step_profile
+
         physics_dt = cls._solver_dt * cls._num_substeps
         contacts = cls._contacts
         for _ in range(cls._decimation):
             contacts = cls._prepare_nerd_contacts()
 
-            if cls._adapter is not None:
-                cls._adapter.step(cls._state_0, cls._control, physics_dt)
-            for cb in cls._post_actuator_callbacks:
-                cb()
+            with step_profile.section("actuator"):
+                if cls._adapter is not None:
+                    cls._adapter.step(cls._state_0, cls._control, physics_dt)
+                for cb in cls._post_actuator_callbacks:
+                    cb()
 
             cls._run_solver_substeps(contacts)
 
@@ -269,10 +275,6 @@ class NewtonNerdManager(NewtonManager):
         if cls._newton_imu_sensors:
             for sensor in cls._newton_imu_sensors:
                 sensor.update(cls._state_0)
-        if cls._report_contacts and cls._nerd_contact_mode == "newton_native":
-            eval_contacts = contacts if contacts is not None else cls._contacts
-            for sensor in cls._newton_contact_sensors.values():
-                sensor.update(cls._state_0, eval_contacts)
 
     @classmethod
     def sync_neural_solver(cls, *, update_history: bool = True) -> None:

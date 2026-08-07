@@ -14,6 +14,7 @@ from .anymal_c_dataset_gen_cfg import AnymalCDatasetGenFlatEnvCfg, AnymalCDatase
 from .anymal_nerd_env import NerdAnymalCRoughEnv, NerdAnymalCRoughEnvCfg
 from .cartpole_nerd_env import NerdCartpoleEnv, NerdCartpoleEnvCfg
 from .neural_env_wrapper import NerdManagerBasedRLEnv, NeuralEnvAdapter
+from .agents import anymal_c_nerd_rsl_rl_ppo_cfg as anymal_c_nerd_agents
 
 gym.register(
     id="Isaac-Cartpole-NeRD-v0",
@@ -36,7 +37,9 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{NerdAnymalCFlatEnvCfg.__module__}:NerdAnymalCFlatEnvCfg",
         "rl_games_cfg_entry_point": f"{anymal_c_agents.__name__}:rl_games_flat_ppo_cfg.yaml",
-        "rsl_rl_cfg_entry_point": f"{anymal_c_agents.__name__}.rsl_rl_ppo_cfg:AnymalCFlatPPORunnerCfg",
+        "rsl_rl_cfg_entry_point": (
+            f"{anymal_c_nerd_agents.__name__}:AnymalCFlatNeRDPPORunnerCfg"
+        ),
         "rsl_rl_with_symmetry_cfg_entry_point": f"{anymal_c_agents.__name__}.rsl_rl_ppo_cfg:AnymalCFlatPPORunnerWithSymmetryCfg",
         "skrl_cfg_entry_point": f"{anymal_c_agents.__name__}:skrl_flat_ppo_cfg.yaml",
     },

@@ -33,6 +33,7 @@ from common import (
 from packaging import version
 
 import isaaclab_tasks  # noqa: F401
+import isaaclab_neural.envs  # noqa: F401 - registers NeRD gym tasks
 
 logger = logging.getLogger(__name__)
 

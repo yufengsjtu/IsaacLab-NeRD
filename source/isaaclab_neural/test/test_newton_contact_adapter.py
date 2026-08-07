@@ -198,6 +198,7 @@ def test_contact_adapter_reports_truncation():
     adapter.device = torch.device("cpu")
     adapter.packing_policy = "penetration_priority"
     adapter.body_world = [0] * 8
+    adapter.body_world_torch = torch.tensor(adapter.body_world, dtype=torch.long)
     adapter.bodies_per_env = 8
     adapter.contact_masks = torch.zeros(1, 1, dtype=torch.bool)
     adapter.contact_normals = torch.zeros(1, 1, 3)
@@ -215,6 +216,9 @@ def test_contact_adapter_reports_truncation():
     adapter._dropped_contacts_total = 0
     adapter._truncated_frames = 0
     adapter._truncation_warning_emitted = False
+    adapter._packed_contacts_gpu = torch.zeros((), dtype=torch.long)
+    adapter._dropped_contacts_gpu = torch.zeros((), dtype=torch.long)
+    adapter._truncated_frames_gpu = torch.zeros((), dtype=torch.long)
     raw = {
         "surface_separation": torch.tensor([-0.2, -0.1]),
         "shape0": torch.tensor([1, 1]),
@@ -240,3 +244,79 @@ def test_contact_adapter_reports_truncation():
         "truncated_frames": 1,
         "truncated_frame_ratio": 1.0,
     }
+
+
+def _flat_pack_fixture() -> tuple[NewtonContactAdapter, dict[str, torch.Tensor]]:
+    adapter = _adapter()
+    adapter.num_envs = 2
+    adapter.num_contacts_per_env = 2
+    adapter.contact_representation = "flat"
+    adapter.device = torch.device("cpu")
+    adapter.packing_policy = "penetration_priority"
+    adapter.body_world = [0, 0, 0, 0, 1, 1, 1, 1]
+    adapter.body_world_torch = torch.tensor(adapter.body_world, dtype=torch.long)
+    adapter.bodies_per_env = 4
+    adapter.shape_body = [-1, 3, 7, 1, 5]
+    adapter.shape_body_torch = torch.tensor(adapter.shape_body, dtype=torch.long)
+    for name, shape, dtype in (
+        ("contact_masks", (2, 2), torch.bool),
+        ("contact_normals", (2, 2, 3), torch.float32),
+        ("contact_depths", (2, 2), torch.float32),
+        ("contact_thicknesses_0", (2, 2), torch.float32),
+        ("contact_thicknesses_1", (2, 2), torch.float32),
+        ("contact_points_0", (2, 2, 3), torch.float32),
+        ("contact_points_1", (2, 2, 3), torch.float32),
+    ):
+        setattr(adapter, name, torch.zeros(shape, dtype=dtype))
+    adapter.contact_tokens = torch.zeros(2, 2, 17)
+    adapter.contact_token_overflow = torch.zeros(2, dtype=torch.long)
+    adapter.contact_token_body_ids = torch.full((2, 2), -1, dtype=torch.long)
+    adapter._token_encoder = None
+    adapter._packed_contacts_gpu = torch.zeros((), dtype=torch.long)
+    adapter._dropped_contacts_gpu = torch.zeros((), dtype=torch.long)
+    adapter._truncated_frames_gpu = torch.zeros((), dtype=torch.long)
+    adapter._contact_frames = 0
+    adapter._raw_contacts_total = 0
+    adapter._packed_contacts_total = 0
+    adapter._dropped_contacts_total = 0
+    adapter._truncated_frames = 0
+    adapter._truncation_warning_emitted = True
+    raw = {
+        # env0 gets three contacts (one dropped); env1 gets two.
+        "surface_separation": torch.tensor([-0.3, -0.2, -0.1, -0.25, -0.05]),
+        "shape0": torch.tensor([1, 1, 1, 2, 2]),  # bodies 3 (env0), 7 (env1)
+        "shape1": torch.tensor([0, 0, 0, 0, 0]),
+        "point0_world": torch.tensor(
+            [
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0],
+                [5.0, 0.0, 0.0],
+            ]
+        ),
+        "point1_world": torch.zeros(5, 3),
+        "normal": torch.tensor([[0.0, 0.0, -1.0]]).expand(5, 3).clone(),
+        "thickness0": torch.zeros(5),
+        "thickness1": torch.zeros(5),
+    }
+    return adapter, raw
+
+
+def test_vectorized_flat_packing_matches_sequential():
+    adapter_vec, raw = _flat_pack_fixture()
+    adapter_seq, _ = _flat_pack_fixture()
+
+    adapter_vec.reset_buffers()
+    adapter_vec._pack_flat_contacts(raw)
+
+    adapter_seq.reset_buffers()
+    adapter_seq._pack_flat_contacts_sequential(raw)
+
+    torch.testing.assert_close(adapter_vec.contact_masks, adapter_seq.contact_masks)
+    torch.testing.assert_close(adapter_vec.contact_normals, adapter_seq.contact_normals)
+    torch.testing.assert_close(adapter_vec.contact_depths, adapter_seq.contact_depths)
+    torch.testing.assert_close(adapter_vec.contact_points_0, adapter_seq.contact_points_0)
+    torch.testing.assert_close(adapter_vec.contact_points_1, adapter_seq.contact_points_1)
+    assert adapter_vec.truncation_summary()["packed_contacts"] == adapter_seq.truncation_summary()["packed_contacts"]
+    assert adapter_vec.truncation_summary()["dropped_contacts"] == adapter_seq.truncation_summary()["dropped_contacts"]

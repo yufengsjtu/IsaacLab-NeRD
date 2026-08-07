@@ -7,6 +7,7 @@ import logging
 from typing import Literal
 
 import newton
+import numpy as np
 import torch
 import warp as wp
 
@@ -65,13 +66,29 @@ class NewtonContactAdapter:
         self.primary_body_mask, self.contact_side_rule = self._derive_primary_body_mask()
         self.bodies_per_env = int(model.body_count // model.world_count)
         self.body_world = model.body_world.numpy() if model.body_world is not None else None
+        self.body_world_torch = (
+            torch.as_tensor(self.body_world, dtype=torch.long, device=self.device)
+            if self.body_world is not None
+            else None
+        )
+        body_local_ids = np.empty(int(model.body_count), dtype=np.int64)
+        if self.body_world is None:
+            body_local_ids[:] = np.arange(int(model.body_count)) % self.bodies_per_env
+        else:
+            for world_id in range(self.num_envs):
+                world_bodies = np.flatnonzero(self.body_world == world_id)
+                body_local_ids[world_bodies] = np.arange(world_bodies.size)
+        self.body_local_ids = torch.as_tensor(body_local_ids, dtype=torch.long, device=self.device)
         self._contact_frames = 0
         self._raw_contacts_total = 0
         self._packed_contacts_total = 0
         self._dropped_contacts_total = 0
         self._truncated_frames = 0
         self._truncation_warning_emitted = False
-
+        # Deferred GPU counters (synced only in truncation_summary / warnings).
+        self._packed_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
+        self._dropped_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
+        self._truncated_frames_gpu = torch.zeros((), dtype=torch.long, device=self.device)
         self.contact_masks = torch.zeros(
             (self.num_envs, self.num_contacts_per_env),
             dtype=torch.bool,
@@ -85,6 +102,18 @@ class NewtonContactAdapter:
         self.contact_depths = torch.zeros(
             (self.num_envs, self.num_contacts_per_env),
             dtype=torch.float32,
+            device=self.device,
+        )
+        self.contact_body_ids_0 = torch.full(
+            (self.num_envs, self.num_contacts_per_env),
+            -1,
+            dtype=torch.long,
+            device=self.device,
+        )
+        self.contact_body_ids_1 = torch.full(
+            (self.num_envs, self.num_contacts_per_env),
+            -1,
+            dtype=torch.long,
             device=self.device,
         )
         self.contact_thicknesses_0 = torch.zeros(
@@ -140,6 +169,9 @@ class NewtonContactAdapter:
         self.contact_masks.zero_()
         self.contact_normals.zero_()
         self.contact_depths.zero_()
+        if hasattr(self, "contact_body_ids_0"):
+            self.contact_body_ids_0.fill_(-1)
+            self.contact_body_ids_1.fill_(-1)
         self.contact_thicknesses_0.zero_()
         self.contact_thicknesses_1.zero_()
         self.contact_points_0.zero_()
@@ -175,21 +207,108 @@ class NewtonContactAdapter:
             body_ids = self._token_encoder.last_body_ids
             if body_ids is not None:
                 self.contact_token_body_ids.copy_(body_ids)
-            valid_tokens = int((self.contact_tokens[..., 0] > 0.5).sum().item())
+            valid_tokens = (self.contact_tokens[..., 0] > 0.5).sum()
+            overflow_sum = self.contact_token_overflow.sum()
             self._raw_contacts_total += contact_count
-            self._packed_contacts_total += valid_tokens
-            if int(self.contact_token_overflow.sum().item()) > 0:
-                self._truncated_frames += 1
-                self._dropped_contacts_total += int(self.contact_token_overflow.sum().item())
-                if not self._truncation_warning_emitted:
-                    logger.warning(
-                        "Contact token packing dropped tokens because max_contact_tokens=%d. "
-                        "Further truncation warnings are suppressed; inspect truncation_summary() for totals.",
-                        self.max_contact_tokens,
-                    )
-                    self._truncation_warning_emitted = True
+            self._packed_contacts_gpu += valid_tokens.to(dtype=torch.long)
+            dropped = overflow_sum.to(dtype=torch.long)
+            self._dropped_contacts_gpu += dropped
+            self._truncated_frames_gpu += (dropped > 0).to(dtype=torch.long)
+            if not self._truncation_warning_emitted and int(dropped.item()) > 0:
+                logger.warning(
+                    "Contact token packing dropped tokens because max_contact_tokens=%d. "
+                    "Further truncation warnings are suppressed; inspect truncation_summary() for totals.",
+                    self.max_contact_tokens,
+                )
+                self._truncation_warning_emitted = True
             return
 
+        self._pack_flat_contacts(raw)
+
+    def _pack_flat_contacts(self, raw: dict[str, torch.Tensor]) -> None:
+        """Vectorized flat packing matching sequential penetration/slot semantics."""
+        if not hasattr(self, "_packed_contacts_gpu"):
+            self._packed_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
+            self._dropped_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
+            self._truncated_frames_gpu = torch.zeros((), dtype=torch.long, device=self.device)
+
+        order = get_contact_order(raw, self.packing_policy)
+        shape0 = raw["shape0"][order]
+        shape1 = raw["shape1"][order]
+        normals = raw["normal"][order]
+        depths = raw["surface_separation"][order]
+        thickness0 = raw["thickness0"][order]
+        thickness1 = raw["thickness1"][order]
+        points0 = raw["point0_world"][order]
+        points1 = raw["point1_world"][order]
+
+        env_ids = self._contact_env_ids(shape0, shape1)
+        valid = (env_ids >= 0) & (env_ids < self.num_envs)
+        frame_raw = int(valid.sum().item())
+        self._raw_contacts_total += frame_raw
+        if frame_raw == 0:
+            return
+
+        env_ids_v = env_ids[valid]
+        n_valid = env_ids_v.shape[0]
+        # Rank contacts within each env in encounter (priority) order.
+        positions = torch.arange(n_valid, device=self.device, dtype=torch.long)
+        sorted_env, sort_idx = torch.sort(env_ids_v, stable=True)
+        is_start = torch.ones(n_valid, dtype=torch.bool, device=self.device)
+        if n_valid > 1:
+            is_start[1:] = sorted_env[1:] != sorted_env[:-1]
+        group_start_ids = torch.cumsum(is_start.to(dtype=torch.long), dim=0) - 1
+        start_pos = positions[is_start]
+        rank_sorted = positions - start_pos[group_start_ids]
+        rank = torch.empty_like(rank_sorted)
+        rank[sort_idx] = rank_sorted
+
+        keep = rank < self.num_contacts_per_env
+        dropped = (~keep).sum()
+        packed = keep.sum()
+        self._packed_contacts_gpu += packed.to(dtype=torch.long)
+        self._dropped_contacts_gpu += dropped.to(dtype=torch.long)
+        self._truncated_frames_gpu += (dropped > 0).to(dtype=torch.long)
+
+        if not self._truncation_warning_emitted and int(dropped.item()) > 0:
+            logger.warning(
+                "Newton-native contact packing dropped %d contacts because num_contacts_per_env=%d. "
+                "Further truncation warnings are suppressed; inspect truncation_summary() for totals.",
+                int(dropped.item()),
+                self.num_contacts_per_env,
+            )
+            self._truncation_warning_emitted = True
+
+        if not bool(keep.any()):
+            return
+
+        ordered_valid_idx = torch.nonzero(valid, as_tuple=False).squeeze(-1)
+        keep_local = torch.nonzero(keep, as_tuple=False).squeeze(-1)
+        src = ordered_valid_idx[keep_local]
+        env_keep = env_ids_v[keep_local]
+        slot_keep = rank[keep_local]
+
+        self.contact_masks[env_keep, slot_keep] = True
+        self.contact_normals[env_keep, slot_keep] = normals[src]
+        self.contact_depths[env_keep, slot_keep] = depths[src]
+        if hasattr(self, "contact_body_ids_0"):
+            body0 = self._shape_body_ids(shape0[src])
+            body1 = self._shape_body_ids(shape1[src])
+            valid_body0 = body0 >= 0
+            valid_body1 = body1 >= 0
+            self.contact_body_ids_0[env_keep[valid_body0], slot_keep[valid_body0]] = self.body_local_ids[
+                body0[valid_body0]
+            ]
+            self.contact_body_ids_1[env_keep[valid_body1], slot_keep[valid_body1]] = self.body_local_ids[
+                body1[valid_body1]
+            ]
+        self.contact_thicknesses_0[env_keep, slot_keep] = thickness0[src]
+        self.contact_thicknesses_1[env_keep, slot_keep] = thickness1[src]
+        self.contact_points_0[env_keep, slot_keep] = points0[src]
+        self.contact_points_1[env_keep, slot_keep] = points1[src]
+
+    def _pack_flat_contacts_sequential(self, raw: dict[str, torch.Tensor]) -> None:
+        """Reference Python packing used by equivalence tests."""
         order = get_contact_order(raw, self.packing_policy)
         write_counts = torch.zeros(
             self.num_envs,
@@ -229,44 +348,47 @@ class NewtonContactAdapter:
         self._dropped_contacts_total += frame_dropped_contacts
         if frame_dropped_contacts > 0:
             self._truncated_frames += 1
-            if not self._truncation_warning_emitted:
-                logger.warning(
-                    "Newton-native contact packing dropped %d contacts because num_contacts_per_env=%d. "
-                    "Further truncation warnings are suppressed; inspect truncation_summary() for totals.",
-                    frame_dropped_contacts,
-                    self.num_contacts_per_env,
-                )
-                self._truncation_warning_emitted = True
 
     def to_neural_inputs(self) -> dict[str, torch.Tensor]:
-        """Return cloned tensors with the same shape convention as fixed-ground contacts."""
+        """Return contact tensors shaped like fixed-ground neural inputs.
+
+        Returns views into the adapter buffers. Callers that retain contacts
+        across frames (e.g. transformer history) must clone before the next
+        :meth:`update`, which :class:`TransformerNeuralSolver` already does.
+        """
         if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
             return {
-                "contact_tokens": self.contact_tokens.clone(),
-                "contact_token_overflow": self.contact_token_overflow.clone(),
+                "contact_tokens": self.contact_tokens,
+                "contact_token_overflow": self.contact_token_overflow,
             }
 
         B = self.num_envs
         C = self.num_contacts_per_env
         return {
-            "contact_masks": self.contact_masks.clone(),
-            "contact_normals": self.contact_normals.reshape(B, C * 3).clone(),
-            "contact_depths": self.contact_depths.clone(),
-            "contact_thicknesses_0": self.contact_thicknesses_0.clone(),
-            "contact_thicknesses_1": self.contact_thicknesses_1.clone(),
-            "contact_points_0": self.contact_points_0.reshape(B, C * 3).clone(),
-            "contact_points_1": self.contact_points_1.reshape(B, C * 3).clone(),
+            "contact_masks": self.contact_masks,
+            "contact_normals": self.contact_normals.reshape(B, C * 3),
+            "contact_depths": self.contact_depths,
+            "contact_thicknesses_0": self.contact_thicknesses_0,
+            "contact_thicknesses_1": self.contact_thicknesses_1,
+            "contact_points_0": self.contact_points_0.reshape(B, C * 3),
+            "contact_points_1": self.contact_points_1.reshape(B, C * 3),
         }
 
     def truncation_summary(self) -> dict[str, int | float]:
         """Return cumulative native contact packing statistics."""
+        packed_gpu = int(getattr(self, "_packed_contacts_gpu", torch.tensor(0)).item())
+        dropped_gpu = int(getattr(self, "_dropped_contacts_gpu", torch.tensor(0)).item())
+        truncated_gpu = int(getattr(self, "_truncated_frames_gpu", torch.tensor(0)).item())
+        packed = self._packed_contacts_total + packed_gpu
+        dropped = self._dropped_contacts_total + dropped_gpu
+        truncated = self._truncated_frames + truncated_gpu
         summary = {
             "frames": self._contact_frames,
             "raw_contacts": self._raw_contacts_total,
-            "packed_contacts": self._packed_contacts_total,
-            "dropped_contacts": self._dropped_contacts_total,
-            "truncated_frames": self._truncated_frames,
-            "truncated_frame_ratio": self._truncated_frames / max(self._contact_frames, 1),
+            "packed_contacts": packed,
+            "dropped_contacts": dropped,
+            "truncated_frames": truncated,
+            "truncated_frame_ratio": truncated / max(self._contact_frames, 1),
         }
         if self._token_encoder is not None:
             summary.update(self._token_encoder.overflow_summary())
@@ -514,6 +636,27 @@ class NewtonContactAdapter:
         if env_id >= 0:
             return env_id
         return self._shape_to_env_id(shape1)
+
+    def _contact_env_ids(self, shape0: torch.Tensor, shape1: torch.Tensor) -> torch.Tensor:
+        """Vectorized env id for each contact (``-1`` when unresolved)."""
+        env0 = self._shapes_to_env_ids(shape0)
+        env1 = self._shapes_to_env_ids(shape1)
+        return torch.where(env0 >= 0, env0, env1)
+
+    def _shapes_to_env_ids(self, shapes: torch.Tensor) -> torch.Tensor:
+        body_ids = self._shape_body_ids(shapes)
+        env_ids = torch.full(body_ids.shape, -1, dtype=torch.long, device=shapes.device)
+        valid = body_ids >= 0
+        if not bool(valid.any()):
+            return env_ids
+        if getattr(self, "body_world_torch", None) is not None:
+            env_ids[valid] = self.body_world_torch[body_ids[valid]]
+        elif self.body_world is not None:
+            body_world = torch.as_tensor(self.body_world, dtype=torch.long, device=shapes.device)
+            env_ids[valid] = body_world[body_ids[valid]]
+        else:
+            env_ids[valid] = body_ids[valid] // self.bodies_per_env
+        return env_ids
 
     def _shape_to_env_id(self, shape_id: int) -> int:
         if shape_id < 0 or shape_id >= len(self.shape_body):
