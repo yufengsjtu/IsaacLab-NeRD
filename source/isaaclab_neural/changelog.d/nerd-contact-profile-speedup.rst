@@ -17,4 +17,5 @@ Added
 * Added opt-in NeRD step profiling via ``NERD_STEP_PROFILE=1``
   (:mod:`isaaclab_neural.utils.step_profile`) and
   :mod:`isaaclab_neural.eval.benchmark_nerd_contact_modes` to compare
-  ``fixed_ground`` vs ``newton_native`` step costs.
+  stock ground-truth MJWarp, NeRD ``fixed_ground``, and NeRD
+  ``newton_native`` step costs.

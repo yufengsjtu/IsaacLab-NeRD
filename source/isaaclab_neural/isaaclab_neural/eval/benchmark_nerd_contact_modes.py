@@ -3,11 +3,15 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Benchmark NeRD ``fixed_ground`` vs ``newton_native`` step costs.
+"""Benchmark NeRD and ground-truth solver step costs.
 
 Enables :mod:`isaaclab_neural.utils.step_profile` and reports ms/step for each
-hot-path section. Use ``--compare`` to run both contact modes in isolated
-subprocesses (PhysicsManager is process-global).
+hot-path section. Use ``--compare`` to run ``fixed_ground``, ``newton_native``,
+and stock ground-truth MJWarp in isolated subprocesses (PhysicsManager is
+process-global).
+
+Ground-truth workers only report wall-clock / ``env_step_total`` (NeRD section
+timers such as ``model_forward`` do not apply).
 
 Example:
     ./isaaclab.sh -p -m isaaclab_neural.eval.benchmark_nerd_contact_modes \\
@@ -30,11 +34,20 @@ from pathlib import Path
 from typing import Any
 
 RESULT_PREFIX = "__NERD_CONTACT_BENCH__ "
+DEFAULT_NERD_TASK = "Isaac-Velocity-Flat-Anymal-C-NeRD-v0"
+DEFAULT_GT_TASK = "Isaac-Velocity-Flat-Anymal-C-v0"
+CONTACT_MODES = ("fixed_ground", "newton_native", "ground_truth")
 
 
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
-    parser = argparse.ArgumentParser(description="Benchmark NeRD contact-mode stepping cost.")
-    parser.add_argument("--task", type=str, default="Isaac-Velocity-Flat-Anymal-C-NeRD-v0")
+    parser = argparse.ArgumentParser(description="Benchmark NeRD / GT solver stepping cost.")
+    parser.add_argument("--task", type=str, default=DEFAULT_NERD_TASK, help="NeRD task id for NeRD workers.")
+    parser.add_argument(
+        "--gt-task",
+        type=str,
+        default=DEFAULT_GT_TASK,
+        help="Stock GT task id used when --contact-mode ground_truth or --compare.",
+    )
     parser.add_argument("--agent", type=str, default="rsl_rl_cfg_entry_point")
     parser.add_argument("--num_envs", type=int, default=256)
     parser.add_argument("--warmup", type=int, default=20, help="Warmup env steps before timing.")
@@ -42,11 +55,11 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--contact-mode",
-        choices=["fixed_ground", "newton_native"],
+        choices=list(CONTACT_MODES),
         default=None,
         help="Single-mode run. Required unless --compare.",
     )
-    parser.add_argument("--neural-model-path", type=str, default=None, help="Dynamics ckpt for single-mode.")
+    parser.add_argument("--neural-model-path", type=str, default=None, help="Dynamics ckpt for NeRD single-mode.")
     parser.add_argument("--neural-model-path-fg", type=str, default=None, help="FG ckpt for --compare.")
     parser.add_argument(
         "--neural-model-path-native",
@@ -55,7 +68,18 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="newton_native ckpt for --compare.",
     )
     parser.add_argument("--num-contacts-per-env", type=int, default=64)
-    parser.add_argument("--compare", action="store_true", default=False, help="Run FG and native via subprocess.")
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        default=False,
+        help="Run fixed_ground, newton_native, and ground_truth via subprocess.",
+    )
+    parser.add_argument(
+        "--skip-gt",
+        action="store_true",
+        default=False,
+        help="With --compare, skip the stock ground-truth worker.",
+    )
     parser.add_argument("--output-json", type=str, default=None, help="Write results JSON to this path.")
     parser.add_argument("--worker", action="store_true", default=False, help=argparse.SUPPRESS)
 
@@ -79,26 +103,46 @@ def _zero_action(env) -> Any:
     return torch.zeros(shape, device=getattr(env, "device", "cpu"), dtype=torch.float32)
 
 
-def _print_compare(fg: dict[str, Any], native: dict[str, Any]) -> None:
-    fg_ms = float(fg["wall_ms_per_step"])
-    native_ms = float(native["wall_ms_per_step"])
-    ratio = native_ms / max(fg_ms, 1e-9)
-    print("\n=== NeRD contact-mode compare ===")
-    print(f"fixed_ground : {fg_ms:.3f} ms/step")
-    print(f"newton_native: {native_ms:.3f} ms/step ({ratio:.2f}x FG)")
-    section_names = sorted(set(fg.get("sections_ms_per_step", {})) | set(native.get("sections_ms_per_step", {})))
-    print(f"{'section':<24} {'FG ms':>10} {'native ms':>12} {'ratio':>8}")
-    for name in section_names:
-        a = float(fg.get("sections_ms_per_step", {}).get(name, 0.0))
-        b = float(native.get("sections_ms_per_step", {}).get(name, 0.0))
-        r = b / max(a, 1e-9) if a > 0 else float("inf") if b > 0 else 0.0
-        print(f"{name:<24} {a:10.3f} {b:12.3f} {r:8.2f}")
+def _print_compare(results: dict[str, dict[str, Any]]) -> None:
+    """Print a wall-clock and section table for the collected worker results."""
+    order = [name for name in ("ground_truth", "fixed_ground", "newton_native") if name in results]
+    if not order:
+        return
+
+    print("\n=== Solver step-cost compare ===")
+    for name in order:
+        ms = float(results[name]["wall_ms_per_step"])
+        task = results[name].get("task", "")
+        print(f"{name:<14}: {ms:.3f} ms/step  ({task})")
+
+    baseline_name = "ground_truth" if "ground_truth" in results else order[0]
+    baseline_ms = float(results[baseline_name]["wall_ms_per_step"])
+    print(f"\nWall-clock vs {baseline_name}:")
+    for name in order:
+        ms = float(results[name]["wall_ms_per_step"])
+        ratio = ms / max(baseline_ms, 1e-9)
+        print(f"  {name:<14}: {ratio:.2f}x")
+
+    section_names: set[str] = set()
+    for payload in results.values():
+        section_names.update(payload.get("sections_ms_per_step", {}))
+    if not section_names:
+        return
+
+    header = f"{'section':<24}" + "".join(f" {name:>12}" for name in order)
+    print("\n" + header)
+    for section in sorted(section_names):
+        row = f"{section:<24}"
+        for name in order:
+            value = float(results[name].get("sections_ms_per_step", {}).get(section, 0.0))
+            row += f" {value:12.3f}"
+        print(row)
 
 
 def _spawn_worker(
     *,
     contact_mode: str,
-    neural_model_path: str,
+    neural_model_path: str | None,
     args: argparse.Namespace,
     hydra_args: list[str],
 ) -> dict[str, Any]:
@@ -115,8 +159,6 @@ def _spawn_worker(
         "--worker",
         "--contact-mode",
         contact_mode,
-        "--neural-model-path",
-        neural_model_path,
         "--num_envs",
         str(args.num_envs),
         "--warmup",
@@ -129,9 +171,13 @@ def _spawn_worker(
         str(args.num_contacts_per_env),
         "--task",
         args.task,
+        "--gt-task",
+        args.gt_task,
         "--agent",
         args.agent,
     ]
+    if neural_model_path is not None:
+        cmd.extend(["--neural-model-path", neural_model_path])
     if getattr(args, "headless", False):
         cmd.append("--headless")
     if getattr(args, "device", None):
@@ -165,31 +211,51 @@ args_cli, hydra_args = parse_args()
 if args_cli.compare and not args_cli.worker:
     if not args_cli.neural_model_path_fg or not args_cli.neural_model_path_native:
         raise SystemExit("--compare requires --neural-model-path-fg and --neural-model-path-native.")
-    fg = _spawn_worker(
+
+    combined: dict[str, dict[str, Any]] = {}
+    if not args_cli.skip_gt:
+        combined["ground_truth"] = _spawn_worker(
+            contact_mode="ground_truth",
+            neural_model_path=None,
+            args=args_cli,
+            hydra_args=hydra_args,
+        )
+    combined["fixed_ground"] = _spawn_worker(
         contact_mode="fixed_ground",
         neural_model_path=args_cli.neural_model_path_fg,
         args=args_cli,
         hydra_args=hydra_args,
     )
-    native = _spawn_worker(
+    combined["newton_native"] = _spawn_worker(
         contact_mode="newton_native",
         neural_model_path=args_cli.neural_model_path_native,
         args=args_cli,
         hydra_args=hydra_args,
     )
-    combined = {"fixed_ground": fg, "newton_native": native}
-    _print_compare(fg, native)
+    _print_compare(combined)
     if args_cli.output_json:
         Path(args_cli.output_json).write_text(json.dumps(combined, indent=2) + "\n", encoding="utf-8")
         print(f"Wrote {args_cli.output_json}")
     raise SystemExit(0)
 
-if args_cli.contact_mode is None or args_cli.neural_model_path is None:
-    raise SystemExit("Provide --contact-mode and --neural-model-path, or use --compare.")
+if args_cli.contact_mode is None:
+    raise SystemExit("Provide --contact-mode, or use --compare.")
+if args_cli.contact_mode != "ground_truth" and args_cli.neural_model_path is None:
+    raise SystemExit("NeRD modes require --neural-model-path (or use --compare).")
 
-# Single-mode / worker path: register tasks then Hydra-launch like train/play.
-import isaaclab_neural.envs  # noqa: E402,F401
-from isaaclab_neural.rl.rsl_rl import cli_args as nerd_cli  # noqa: E402
+# Resolve which gym task this worker should instantiate.
+worker_task = args_cli.gt_task if args_cli.contact_mode == "ground_truth" else args_cli.task
+is_ground_truth = args_cli.contact_mode == "ground_truth"
+
+# Register tasks then Hydra-launch like train/play.
+import isaaclab_tasks  # noqa: E402,F401
+
+if not is_ground_truth:
+    import isaaclab_neural.envs  # noqa: E402,F401
+    from isaaclab_neural.rl.rsl_rl import cli_args as nerd_cli  # noqa: E402
+else:
+    nerd_cli = None  # type: ignore[assignment]
+
 from isaaclab_neural.utils import step_profile  # noqa: E402
 from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix  # noqa: E402
 
@@ -200,9 +266,9 @@ os.environ["NERD_STEP_PROFILE"] = "1"
 step_profile.enable(cuda_synchronize=True)
 
 
-@hydra_task_config(args_cli.task, args_cli.agent)
+@hydra_task_config(worker_task, args_cli.agent)
 def main(env_cfg, agent_cfg) -> None:
-    """Run a single contact-mode timed stepping benchmark."""
+    """Run a single-mode timed stepping benchmark (NeRD or ground truth)."""
     del agent_cfg
     import torch
     from isaaclab_tasks.utils import launch_simulation
@@ -211,22 +277,28 @@ def main(env_cfg, agent_cfg) -> None:
     env_cfg.seed = args_cli.seed
     env_cfg.sim.device = args_cli.device
 
-    # Restrict contact-count override to native mode.
-    if args_cli.contact_mode != "newton_native":
-        args_cli.num_contacts_per_env = None
-    solver_cfg = nerd_cli.apply_neural_model_to_env_cfg(env_cfg, args_cli)
+    solver_cfg = None
+    if is_ground_truth:
+        launch_cfg = env_cfg
+    else:
+        # Restrict contact-count override to native mode.
+        if args_cli.contact_mode != "newton_native":
+            args_cli.num_contacts_per_env = None
+        assert nerd_cli is not None
+        solver_cfg = nerd_cli.apply_neural_model_to_env_cfg(env_cfg, args_cli)
+        launch_cfg = nerd_cli.build_launch_cfg(env_cfg)
 
     step_profile.reset()
     result: dict[str, Any]
 
-    with launch_simulation(nerd_cli.build_launch_cfg(env_cfg), args_cli):
+    with launch_simulation(launch_cfg, args_cli):
         import gymnasium as gym
 
         gym_kwargs = {"cfg": env_cfg, "device": args_cli.device}
         if solver_cfg is not None:
             gym_kwargs["solver_cfg"] = solver_cfg
         with newton_material_binding_api_autofix():
-            env = gym.make(args_cli.task, **gym_kwargs)
+            env = gym.make(worker_task, **gym_kwargs)
 
         action = _zero_action(env)
         env.reset()
@@ -250,6 +322,7 @@ def main(env_cfg, agent_cfg) -> None:
         ms_per_step = {name: (total * 1000.0 / args_cli.steps) for name, total in sections.items() if total > 0}
         result = {
             "contact_mode": args_cli.contact_mode,
+            "task": worker_task,
             "neural_model_path": args_cli.neural_model_path,
             "num_envs": args_cli.num_envs,
             "warmup": args_cli.warmup,

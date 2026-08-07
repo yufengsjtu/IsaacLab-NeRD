@@ -29,8 +29,49 @@ upstream flat Anymal-C velocity task it:
 - Points ``rsl_rl_cfg_entry_point`` at ``AnymalCFlatNeRDPPORunnerCfg``
   (experiment ``anymal_c_flat_nerd``; ``clip_actions`` unset)
 - Default physics is ``fixed_ground``
-- Validated flat training uses ``--contact-mode newton_native
-  --num-contacts-per-env 64`` with ``push_robot`` disabled
+
+## Validated flat recipe
+
+Reproduced successfully on ``contact_encoder_set`` (runs
+``2026-08-07_15-38-10`` and ``2026-08-07_16-58-45``):
+
+```bash
+./isaaclab.sh -p -m isaaclab_neural.rl.rsl_rl.train \
+  --task Isaac-Velocity-Flat-Anymal-C-NeRD-v0 \
+  --neural-model-path <native_dynamics.pt> \
+  --contact-mode newton_native --num-contacts-per-env 64 \
+  --num_envs 4096 --max_iterations 500 --headless \
+  presets=newton_mjwarp
+```
+
+Required MDP (already set in ``NerdAnymalCFlatEnvCfg``):
+
+- ``push_robot`` disabled
+- tracking weights ``2.0`` / ``1.0``
+- geometry contact rewards/termination on under ``newton_native``
+- 48-D stock flat observations; ``clip_actions`` unset
+
+Late-training metrics to expect (~iter 500):
+
+| metric | typical |
+|---|---:|
+| ``Metrics/success_rate`` | ~0.99–1.0 |
+| ``Metrics/base_velocity/error_vel_xy`` | ~0.11 |
+| ``Metrics/base_velocity/error_vel_yaw`` | ~0.10 |
+| mean episode length | ~980–1000 |
+| ``Episode_Termination/base_contact`` | ~0.02 |
+
+Play the final checkpoint:
+
+```bash
+./isaaclab.sh -p -m isaaclab_neural.rl.rsl_rl.play \
+  --task Isaac-Velocity-Flat-Anymal-C-NeRD-v0 \
+  --neural-model-path <native_dynamics.pt> \
+  --contact-mode newton_native --num-contacts-per-env 64 \
+  --checkpoint logs/rsl_rl/anymal_c_flat_nerd/<run>/model_499.pt \
+  --num_envs 16 --num_steps 1000 \
+  presets=newton_mjwarp
+```
 
 ## Prerequisites
 
@@ -120,7 +161,11 @@ NERD_STEP_PROFILE=1 ./isaaclab.sh -p -m isaaclab_neural.rl.rsl_rl.train \
   presets=newton_mjwarp
 ```
 
-Compare modes end-to-end (isolated workers; writes JSON):
+Compare modes end-to-end (isolated workers; writes JSON). ``--compare`` runs
+stock ground-truth MJWarp (``Isaac-Velocity-Flat-Anymal-C-v0``), NeRD
+``fixed_ground``, and NeRD ``newton_native``. Use ``--skip-gt`` to omit GT.
+GT only reports wall-clock / ``env_step_total`` (NeRD section timers do not
+apply).
 
 ```bash
 ./isaaclab.sh -p -m isaaclab_neural.eval.benchmark_nerd_contact_modes \
@@ -132,19 +177,29 @@ Compare modes end-to-end (isolated workers; writes JSON):
   presets=newton_mjwarp
 ```
 
-Reported sections include ``contact_prepare``, ``adapter_update``,
+Ground-truth only:
+
+```bash
+./isaaclab.sh -p -m isaaclab_neural.eval.benchmark_nerd_contact_modes \
+  --contact-mode ground_truth \
+  --num_envs 256 --warmup 20 --steps 100 --headless \
+  presets=newton_mjwarp
+```
+
+Reported NeRD sections include ``contact_prepare``, ``adapter_update``,
 ``to_neural_inputs``, ``model_forward``, ``eval_fk``, and ``env_step_total``.
 
-Example (64 envs, Anymal flat, after vectorized packing / view-based
-``to_neural_inputs``):
+Example (256 envs, Anymal flat, 100 timed steps; wall-clock ms/step):
 
-| section | fixed_ground | newton_native |
-|---|---:|---:|
-| env_step_total | ~22 ms | ~33 ms |
-| contact_prepare | ~0.2 ms | ~2.6 ms |
-| adapter_update | n/a | ~8 ms |
-| to_neural_inputs | n/a | ~0.05 ms |
-| model_forward | ~6 ms | ~6 ms |
+| section | ground_truth | fixed_ground | newton_native |
+|---|---:|---:|---:|
+| env_step_total | ~12 | ~91 | ~209 |
+| adapter_update | n/a | 0 | ~123 |
+| model_forward | n/a | ~17 | ~17 |
+| contact_prepare | n/a | ~3 | ~5 |
+
+Native is dominated by ``adapter_update`` (Newton collision + contact packing),
+not by ``model_forward``.
 
 Native flat packing is vectorized (no Python contact loop). Do not change contact
 slot count or packing policy solely for speed without re-checking dynamics.
