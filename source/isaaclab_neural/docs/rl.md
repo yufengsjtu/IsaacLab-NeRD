@@ -81,36 +81,31 @@ Play the final checkpoint:
 ./isaaclab.sh -p -m pip install -e source/isaaclab_neural --no-deps
 ```
 
-2. Provide a trained NeRD dynamics checkpoint (Transformer / fixed_ground for
-   the default flat task), for example:
+2. Provide a trained NeRD dynamics checkpoint. For the **validated** flat RL
+   recipe use a ``newton_native`` Transformer checkpoint (64 contacts). Example
+   placeholder path:
 
 ```text
-./pre-trained_models/Anymal-C/nn/final_model.pt
+./data/trained_models/Anymal-C-Native/nn/final_model.pt
 ```
+
+A ``fixed_ground`` dynamics checkpoint is fine for FG-only experiments, but it
+is not the validated locomotion recipe below.
 
 Train dynamics first with `isaaclab_neural.train.train` if needed (see
 [train.md](train.md)).
 
 ## Train
 
-Preferred entry point:
+Prefer the [Validated flat recipe](#validated-flat-recipe) above
+(``newton_native``, 64 contacts, 4096 envs).
+
+Default-task smoke (uses env default ``fixed_ground`` unless you override):
 
 ```bash
 ./isaaclab.sh -p -m isaaclab_neural.rl.rsl_rl.train \
   --task Isaac-Velocity-Flat-Anymal-C-NeRD-v0 \
-  --neural-model-path ./pre-trained_models/Anymal-C/nn/final_model.pt \
-  --num_envs 4096 \
-  --max_iterations 300 \
-  --headless \
-  presets=newton_mjwarp
-```
-
-Smoke (short) run:
-
-```bash
-./isaaclab.sh -p -m isaaclab_neural.rl.rsl_rl.train \
-  --task Isaac-Velocity-Flat-Anymal-C-NeRD-v0 \
-  --neural-model-path ./pre-trained_models/Anymal-C/nn/final_model.pt \
+  --neural-model-path ./data/trained_models/Anymal-C/nn/final_model.pt \
   --num_envs 64 \
   --max_iterations 5 \
   --headless \
@@ -135,11 +130,14 @@ dedicated module so `--neural-model-path` is available):
 
 ## Play
 
+Match the dynamics ``contact_mode`` used at train time. Validated example:
+
 ```bash
 ./isaaclab.sh -p -m isaaclab_neural.rl.rsl_rl.play \
   --task Isaac-Velocity-Flat-Anymal-C-NeRD-v0 \
-  --neural-model-path ./pre-trained_models/Anymal-C/nn/final_model.pt \
-  --checkpoint logs/rsl_rl/anymal_c_flat_nerd/<run>/model_<step>.pt \
+  --neural-model-path ./data/trained_models/Anymal-C-Native/nn/final_model.pt \
+  --contact-mode newton_native --num-contacts-per-env 64 \
+  --checkpoint logs/rsl_rl/anymal_c_flat_nerd/<run>/model_499.pt \
   --num_envs 16 \
   --num_steps 200 \
   --headless \

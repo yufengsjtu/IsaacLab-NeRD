@@ -4,9 +4,11 @@
 
 - Cartpole fixed-ground
 - Anymal-C fixed-ground
-- Anymal-C Newton native contacts
+- Anymal-C Newton native contacts（**flat slots** 与 **contact tokens** 两套表示）
 
 所有命令假设当前目录是仓库根目录 `IsaacLab-NeRD`。
+
+动力学训练完成后，若要在 NeRD 上做 RSL-RL 速度跟踪，见 [RL policy learning](rl.md)。
 
 ## Setup
 
@@ -332,6 +334,22 @@ anchor_frame_step: every
 
 ## Anymal-C Newton Native
 
+Newton native 从 collision pipeline 记录动态 contacts。本分支支持两种
+**contact representation**（互不兼容，数据与 checkpoint 不可混用）：
+
+| | Flat slots（默认） | Contact tokens |
+|---|---|---|
+| ``contact_representation`` | ``flat``（可省略） | ``contact_tokens`` |
+| 容量字段 | ``num_contacts_per_env`` | ``max_contact_tokens`` |
+| 打包 | ``penetration_priority`` 等 flat packing | ``ContactSetEncoder`` 内 pair-atomic body round-robin |
+| HDF5 主字段 | ``contact_points_*`` / ``normals`` / ``depths`` / ``masks`` | ``contact_tokens`` ``[..., K, 17]`` + overflow |
+| 训练 cfg | ``transformer_native.yaml`` | ``transformer_native_contact_tokens.yaml`` |
+| 推荐数据目录 | ``./data/datasets/Anymal-C-Native/`` | ``./data/datasets/Anymal-C-Native-ContactTokens/`` |
+
+下面先写 **flat** 流程；**contact tokens** 见下一节。
+
+### Flat contact representation（默认）
+
 配置文件：
 
 ```text
@@ -342,17 +360,18 @@ source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_native.yaml
 
 ```yaml
 contact_mode: newton_native
+# contact_representation 默认 flat，可省略
 num_contacts_per_env: 64
 contact_packing_policy: penetration_priority
 states_frame: body
 anchor_frame_step: every
 ```
 
-Native 数据集记录 Newton collision pipeline 产生的动态 contacts，并打包成固定
-64 个 slots。打包默认使用 `penetration_priority`，即优先保留 signed surface
-separation 最小的接触，并用几何信息做确定性 tie-break。
+Native flat 数据集把 contacts 打包成固定 64 个 slots。打包默认使用
+`penetration_priority`，即优先保留 signed surface separation 最小的接触，并用
+几何信息做确定性 tie-break。
 
-Native contact 输入的约定是：
+Native flat contact 输入约定：
 
 - contact side 会 canonicalize 为 primary robot articulation first；
 - `contact_normals` 从 robot side 指向另一侧；
@@ -363,7 +382,7 @@ Native contact 输入的约定是：
 - contact RMS 统计只使用 `contact_masks=True` 的有效 contacts；样本过少的 slot 会回退到
   pooled field statistics。
 
-当前 native 输入包含 `contact_points_0` 和 `contact_points_1`；两者采集时保存为
+当前 native flat 输入包含 `contact_points_0` 和 `contact_points_1`；两者采集时保存为
 world frame，训练 preprocessing 时转换到 body frame。
 
 ### Generate Train Dataset
@@ -497,22 +516,64 @@ For a quick local test, reduce data generation scale first:
 --write-chunk-transitions 2000
 ```
 
-For native experiments, always regenerate datasets after changing contact schema, contact packing policy, `num_contacts_per_env`, or contact point frame semantics.
+For native experiments, always regenerate datasets after changing contact
+schema, ``contact_representation``, packing policy, ``num_contacts_per_env`` /
+``max_contact_tokens``, or contact point frame semantics.
 
 ## Contact Token Sets
 
-PhysicsNeMo-style contact token sets store directed contacts as
-``[trajectories, steps, max_contact_tokens, 17]`` tensors instead of flat
-64-slot fields. Enable them for dataset generation, training, and deployment
-with:
+PhysicsNeMo-style **contact tokens** store directed contacts as
+
+```text
+contact_tokens: [trajectories, steps, max_contact_tokens, 17]
+contact_token_overflow: [trajectories, steps]   # dropped contacts beyond K
+```
+
+instead of flat 64-slot fields. Use this path for set-encoder experiments; keep
+flat native for the default Anymal-C native baseline and for the validated
+flat RL recipe in [rl.md](rl.md).
+
+Token channels (``CONTACT_TOKEN_DIM = 17``):
+
+```text
+0  valid
+1  body_slot
+2  other_body_slot
+3  other_is_dynamic
+4-6   point xyz
+7-9   normal xyz
+10-12 lever_arm xyz
+13    gap (signed separation)
+14-16 relative_velocity xyz
+```
+
+### Config
+
+Flat smoke / Anymal-C native tokens:
+
+```text
+source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_native_contact_tokens.yaml
+```
+
+Rough A/B:
+
+```text
+source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native_contact_tokens.yaml
+```
+
+关键设置：
 
 ```yaml
 env:
+  # Solver/runtime env label in the training YAML (may differ from HDF5 folder name).
+  env_name: Anymal-C-Native
   neural_solver_cfg:
+    contact_mode: newton_native
     contact_representation: contact_tokens
     max_contact_tokens: 64
-    # Token mode always uses pair-atomic body round-robin inside ContactSetEncoder.
-    # This field is metadata for docs/config clarity; flat packing ignores it.
+    # Flat slot width is unused for capacity; kept for pipeline compatibility.
+    num_contacts_per_env: 64
+    # Metadata only; packing is implemented in ContactSetEncoder.
     contact_packing_policy: body_round_robin_pair_atomic
 inputs:
   low_dim: [states_embedding, joint_f, gravity_dir]
@@ -526,37 +587,124 @@ inputs:
 
 Notes:
 
-- Token capacity is controlled by ``max_contact_tokens`` (not ``num_contacts_per_env``).
-- Eager and lazy loaders preserve ``contact_tokens`` shape ``[..., K, 17]``.
+- Capacity is ``max_contact_tokens`` (not ``num_contacts_per_env``).
+- Eager/lazy loaders preserve ``contact_tokens`` shape ``[..., K, 17]``.
 - Token HDF5 must include ``root_body_q`` and ``gravity_dir`` for body-frame training.
+- Flat and token checkpoints / datasets are **not** interchangeable.
+- Generate path is ``{dataset_dir}/{env_name}/{dataset_name}``. To match the
+  token YAML paths, use ``--env-name Anymal-C-Native-ContactTokens`` with
+  ``--dataset-dir ./data/datasets``.
 
-Dataset generation:
+### Generate Train Dataset
 
 ```bash
 ./isaaclab.sh -p -m isaaclab_neural.generate.generate_dataset \
   --task Isaac-Velocity-Flat-Anymal-C-Dataset-Gen-v0 \
-  --dataset-dir ./data/datasets/Anymal-C-Native-ContactTokens \
+  --dataset-dir ./data/datasets \
   --dataset-name dataset_train.hdf5 \
-  --env-name Anymal-C-Native \
+  --env-name Anymal-C-Native-ContactTokens \
   --robot-name Anymal-C \
   --sample-mode action \
+  --initial-states-source env \
   --contact-mode newton_native \
   --contact-representation contact_tokens \
   --max-contact-tokens 64 \
-  --num-contacts-per-env 64
+  --num-contacts-per-env 64 \
+  --randomize-pd-gains \
+  --kp-min 30.0 \
+  --kp-max 200.0 \
+  --kd-min 0.0 \
+  --kd-max 4.0 \
+  --num-envs 1024 \
+  --num-transitions 20000000 \
+  --write-chunk-transitions 5000000 \
+  --trajectory-length 400 \
+  --seed 0 \
+  --headless \
+  --force-overwrite
 ```
 
-Training configs:
+### Generate Validation Datasets
 
-- Flat smoke: `source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_native_contact_tokens.yaml`
-- Rough A/B: `source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native_contact_tokens.yaml`
+```bash
+./isaaclab.sh -p -m isaaclab_neural.generate.generate_dataset \
+  --task Isaac-Velocity-Flat-Anymal-C-Dataset-Gen-v0 \
+  --dataset-dir ./data/datasets \
+  --dataset-name dataset_valid.hdf5 \
+  --env-name Anymal-C-Native-ContactTokens \
+  --robot-name Anymal-C \
+  --sample-mode action \
+  --initial-states-source env \
+  --contact-mode newton_native \
+  --contact-representation contact_tokens \
+  --max-contact-tokens 64 \
+  --num-contacts-per-env 64 \
+  --randomize-pd-gains \
+  --kp-min 30.0 \
+  --kp-max 200.0 \
+  --kd-min 0.0 \
+  --kd-max 4.0 \
+  --num-envs 1024 \
+  --num-transitions 1000000 \
+  --write-chunk-transitions 5000000 \
+  --trajectory-length 400 \
+  --seed 10 \
+  --headless \
+  --force-overwrite
 
-Diagnostics:
+./isaaclab.sh -p -m isaaclab_neural.generate.generate_dataset \
+  --task Isaac-Velocity-Flat-Anymal-C-Dataset-Gen-v0 \
+  --dataset-dir ./data/datasets \
+  --dataset-name dataset_zero_action_valid.hdf5 \
+  --env-name Anymal-C-Native-ContactTokens \
+  --robot-name Anymal-C \
+  --sample-mode action \
+  --initial-states-source env \
+  --contact-mode newton_native \
+  --contact-representation contact_tokens \
+  --max-contact-tokens 64 \
+  --num-contacts-per-env 64 \
+  --zero-actions \
+  --num-envs 1024 \
+  --num-transitions 1000000 \
+  --write-chunk-transitions 5000000 \
+  --trajectory-length 400 \
+  --seed 20 \
+  --headless \
+  --force-overwrite
+```
+
+### Train
+
+```bash
+./isaaclab.sh -p -m isaaclab_neural.train.train \
+  --task Isaac-Velocity-Flat-Anymal-C-NeRD-v0 \
+  --cfg ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_native_contact_tokens.yaml \
+  --logdir ./data/trained_models/Anymal-C-Native-ContactTokens \
+  --num-envs 1024 \
+  --seed 0 \
+  --headless \
+  --update-dataset-statistics \
+  --skip-check-log-override \
+  presets=newton_mjwarp
+```
+
+### Rough contact tokens
+
+Full-scale notes live in [train.md](train.md). For a local 1M-transition smoke
+(data gen + short train), see [smoke_train.md](smoke_train.md).
+
+### Diagnostics
 
 ```bash
 ./isaaclab.sh -p -m isaaclab_neural.eval.contact_distribution_stats --dataset PATH
 ./isaaclab.sh -p -m isaaclab_neural.eval.contact_regime_eval --dataset PATH --overflow-gate
+./isaaclab.sh -p -m isaaclab_neural.eval.contact_reconstruction_diagnostic \
+  --task Isaac-Velocity-Flat-Anymal-C-NeRD-v0 \
+  --checkpoint PATH \
+  --dataset PATH \
+  --num-envs 16
 ```
 
-Contact-token checkpoints are not compatible with flat contact checkpoints.
-Regenerate HDF5 whenever `max_contact_tokens` or token channel semantics change.
+Pass ``--overflow-gate`` to fail when capacity truncates tokens.
+Regenerate HDF5 whenever ``max_contact_tokens`` or the 17-channel schema changes.

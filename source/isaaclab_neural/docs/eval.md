@@ -8,6 +8,10 @@
 
 所有命令假设当前目录是仓库根目录 `IsaacLab-NeRD`。
 
+策略训练入口与已验证 flat 配方见 [RL policy learning](rl.md)。`eval.py` 更偏
+动力学 checkpoint smoke / 可选 policy 闭环；完整 PPO train/play 用
+`isaaclab_neural.rl.rsl_rl`。
+
 ## Setup
 
 ```bash
@@ -114,11 +118,14 @@ If the checkpoint is under a timestamped run, replace the checkpoint path, for e
 
 ### Policy Eval
 
+Use a policy trained on NeRD with matching contact mode (see [rl.md](rl.md)).
+Example with the flat NeRD experiment logdir:
+
 ```bash
 ./isaaclab.sh -p -m isaaclab_neural.eval.eval \
   --task Isaac-Velocity-Flat-Anymal-C-NeRD-v0 \
   --checkpoint ./data/trained_models/Anymal-C/nn/final_model.pt \
-  --policy-checkpoint /path/to/rsl_rl/Anymal-C-Velocity-Flat/model.pt \
+  --policy-checkpoint logs/rsl_rl/anymal_c_flat_nerd/<run>/model_499.pt \
   --policy-agent rsl_rl_cfg_entry_point \
   --num-envs 16 \
   --num-steps 200 \
@@ -159,11 +166,14 @@ Passing `--contact-mode newton_native --num-contacts-per-env 64` makes the CLI o
 
 ### Policy Eval
 
+Prefer a policy trained under ``newton_native`` (validated recipe in
+[rl.md](rl.md)):
+
 ```bash
 ./isaaclab.sh -p -m isaaclab_neural.eval.eval \
   --task Isaac-Velocity-Flat-Anymal-C-NeRD-v0 \
   --checkpoint ./data/trained_models/Anymal-C-Native/nn/final_model.pt \
-  --policy-checkpoint /path/to/rsl_rl/Anymal-C-Velocity-Flat/model.pt \
+  --policy-checkpoint logs/rsl_rl/anymal_c_flat_nerd/<run>/model_499.pt \
   --policy-agent rsl_rl_cfg_entry_point \
   --num-envs 16 \
   --num-steps 200 \
