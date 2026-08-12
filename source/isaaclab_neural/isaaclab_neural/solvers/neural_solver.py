@@ -162,6 +162,9 @@ class NeuralSolver(SolverBase):
             raise ValueError("NeuralSolver contact_mode='newton_native' requires a NewtonContactAdapter.")
         if self.contact_mode not in ["fixed_ground", "newton_native"]:
             raise ValueError(f"Unsupported NeuralSolver contact_mode: {self.contact_mode}")
+        self.num_contact_bodies_per_env = getattr(
+            self.contact_adapter, "num_primary_bodies_per_env", self.num_bodies_per_env
+        )
 
         # verify that all articulations in the Warp model are the same
         # (at least in terms of state dimensionality)

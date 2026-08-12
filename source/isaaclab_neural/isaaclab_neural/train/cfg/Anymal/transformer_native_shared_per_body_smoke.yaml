@@ -1,0 +1,101 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+env:
+  env_name: Anymal-C-Native
+  num_envs: 64
+  neural_solver_cfg:
+    name: TransformerNeuralSolver
+    states_frame: body
+    anchor_frame_step: every
+    states_embedding_type: identical
+    prediction_type: relative
+    orientation_prediction_parameterization: quaternion
+    num_states_history: 10
+    min_contact_event_threshold: 0.12
+    contact_mode: newton_native
+    contact_representation: contact_tokens
+    # Flat slot width is unused in token mode; capacity is max_contact_tokens.
+    num_contacts_per_env: 64
+    max_contact_tokens: 64
+    # Metadata only for token mode; packing is implemented in ContactSetEncoder.
+    contact_packing_policy: body_round_robin_pair_atomic
+
+algorithm:
+  name: SequenceModelTrainer
+  num_epochs: 1
+  num_iters_per_epoch: 100
+  sample_sequence_length: 10
+  batch_size: 64
+  num_valid_batches: 5
+  truncate_grad: True
+  grad_norm: 1.0
+  update_dataset_statistics: True
+  loss:
+    type: MSE
+    beta: 0.0
+  optimizer:
+    type: Adam
+    weight_decay: 0.0
+    lr_start: 1e-3
+    lr_end: 1e-4
+    lr_schedule: linear
+    betas: [0.9, 0.999]
+
+  dataset:
+    train_dataset_path: ./data/datasets/Anymal-C-Native-ContactTokens/dataset_train.hdf5
+    valid_datasets:
+      exp_trajectory: ./data/datasets/Anymal-C-Native-ContactTokens/dataset_valid.hdf5
+      zero_action_trajectory: ./data/datasets/Anymal-C-Native-ContactTokens/dataset_zero_action_valid.hdf5
+    # Keep the eager-loaded smoke dataset small enough for a 64 GiB worker.
+    max_capacity: 100000
+    load_mode: eager
+    num_data_workers: 2
+
+  eval:
+    interval: 1
+    mode: dataset
+    action_mode: joint_f
+    rollout_horizon: 10
+    num_rollouts: 64
+    dataset_path: ./data/datasets/Anymal-C-Native-ContactTokens/dataset_zero_action_valid.hdf5
+
+inputs:
+  low_dim: [
+    states_embedding,
+    joint_f,
+    gravity_dir
+  ]
+  contact_set:
+    dim: 17
+    encoder_type: shared_per_body
+    body_latent_dim: 16
+    hidden_dim: 64
+    max_other_bodies: 32
+
+network:
+  normalize_input: True
+  normalize_output: True
+
+  encoder:
+    low_dim:
+      layer_sizes: []
+      activation: relu
+      layernorm: False
+
+  transformer:
+    block_size: 32
+    n_layer: 6
+    n_head: 12
+    n_embd: 384
+    dropout: 0.0
+    bias: False
+
+  model:
+    output_tanh: False
+    mlp:
+      layer_sizes: [64]
+      activation: relu
+      layernorm: False

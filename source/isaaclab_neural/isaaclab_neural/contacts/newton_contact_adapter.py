@@ -64,6 +64,8 @@ class NewtonContactAdapter:
         self.shape_body = model.shape_body.numpy()
         self.shape_body_torch = torch.as_tensor(self.shape_body, dtype=torch.long, device=self.device)
         self.primary_body_mask, self.contact_side_rule = self._derive_primary_body_mask()
+        if int(model.body_count) % self.num_envs != 0:
+            raise ValueError("NewtonContactAdapter requires a uniform body count across environments.")
         self.bodies_per_env = int(model.body_count // model.world_count)
         self.body_world = model.body_world.numpy() if model.body_world is not None else None
         self.body_world_torch = (
@@ -71,6 +73,15 @@ class NewtonContactAdapter:
             if self.body_world is not None
             else None
         )
+        if self.body_world_torch is None:
+            primary_counts = self.primary_body_mask.reshape(self.num_envs, self.bodies_per_env).sum(dim=1)
+        else:
+            primary_counts = torch.stack(
+                [self.primary_body_mask[self.body_world_torch == world_id].sum() for world_id in range(self.num_envs)]
+            )
+        if not torch.all(primary_counts == primary_counts[0]):
+            raise ValueError("NewtonContactAdapter requires the same primary body count in every environment.")
+        self.num_primary_bodies_per_env = int(primary_counts[0].item())
         body_local_ids = np.empty(int(model.body_count), dtype=np.int64)
         if self.body_world is None:
             body_local_ids[:] = np.arange(int(model.body_count)) % self.bodies_per_env

@@ -177,6 +177,7 @@ class VanillaTrainer:
                 input_cfg=cfg["inputs"],
                 network_cfg=cfg["network"],
                 contact_mode=self.neural_solver.contact_mode,
+                num_bodies=self.neural_solver.num_contact_bodies_per_env,
                 device=self.device,
             )
         else:
@@ -430,12 +431,8 @@ class VanillaTrainer:
         self.eval_contact_context_validation = eval_cfg.get("contact_context_validation")
         self.eval_state_context_tolerance = float(eval_cfg.get("state_context_tolerance", 1.0e-5))
         self.eval_contact_context_tolerance = float(eval_cfg.get("contact_context_tolerance", 1.0e-4))
-        self.eval_contact_context_normal_tolerance = float(
-            eval_cfg.get("contact_context_normal_tolerance", 1.0e-3)
-        )
-        self.eval_contact_context_velocity_tolerance = float(
-            eval_cfg.get("contact_context_velocity_tolerance", 1.0e-3)
-        )
+        self.eval_contact_context_normal_tolerance = float(eval_cfg.get("contact_context_normal_tolerance", 1.0e-3))
+        self.eval_contact_context_velocity_tolerance = float(eval_cfg.get("contact_context_velocity_tolerance", 1.0e-3))
         self.eval_render = bool(cli_cfg.get("render", False))
 
         if self.action_mode not in ("action", "joint_f"):
