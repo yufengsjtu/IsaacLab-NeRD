@@ -1,11 +1,12 @@
 # OSMO Training Scripts
 
 This directory contains the OSMO entrypoints for running IsaacLab-NeRD training
-jobs with NV-Datasets.
+jobs with NV-Datasets or OpenStack Swift. NV-Datasets remains the default;
+select Swift with `--storage-backend swift`.
 
 ## Storage Layout
 
-The workflow uses three long-lived NV-Datasets datasets:
+The default workflow uses three long-lived NV-Datasets datasets:
 
 - `IsaacLab-NeRD-Code`: packaged source code. `start.sh` force-replaces this
   dataset before each submit.
@@ -15,13 +16,18 @@ The workflow uses three long-lived NV-Datasets datasets:
   outputs. Files are stored under `<workflow_name>/`, where `workflow_name`
   includes the run id.
 
+The opt-in Swift backend uses equivalent `isaaclab-nerd-code`,
+`isaaclab-nerd-datasets`, and `isaaclab-nerd-output` containers. Code is stored
+as `IsaacLab-NeRD.tar.gz`; datasets use `<dataset_subdir>/<env_name>/`; outputs
+use `<workflow_name>/`.
+
 ## Supported Features
 
 This folder provides a preset-driven OSMO launcher for end-to-end IsaacLab-NeRD
 experiments. The supported flow is:
 
 1. package the local repository,
-2. upload/replace the packaged source in NV-Datasets,
+2. upload/replace the packaged source in the selected storage backend,
 3. submit an OSMO workflow,
 4. download source and optional cached HDF5 datasets inside the pod,
 5. generate missing datasets,
@@ -54,8 +60,8 @@ HDF5 datasets to generate or load.
 
 ### Dataset Cache Modes
 
-`run_experiment.py` can reuse generated HDF5 datasets from
-`IsaacLab-NeRD-Datasets`.
+`run_experiment.py` can reuse generated HDF5 datasets from the configured
+NV-Datasets dataset or Swift container.
 
 - `auto`: try to load cached datasets; generate and upload them if missing.
 - `require`: fail if the required cached datasets are not present.
@@ -174,7 +180,7 @@ What W&B does **not** receive automatically:
 
 - periodic `model_epoch{N}.pt` checkpoints,
 - dataset-generation logs from earlier in `run_experiment.py`,
-- `entry.log` / `main_scripts.log` (those stay in NV-Datasets output upload).
+- `entry.log` / `main_scripts.log` (those stay in the configured output storage).
 
 Disable checkpoint uploads with `--no-wandb-save-checkpoints` on the training CLI,
 or pass that through `run_experiment.py` when invoking it directly.
@@ -201,6 +207,22 @@ Set NV-Datasets credentials first:
 export NGC_API_KEY=<your-nvapi-key>
 export NVDATASET_TENANTID=<your-tenant-id>
 ```
+
+To use Swift instead, provide legacy name/key authentication only through the
+environment:
+
+```bash
+export SWIFT_AUTH_URL=https://pdx.s8k.io
+export SWIFT_AUTH_VERSION=1
+export SWIFT_USER=team-isaac-lab
+read -rsp "Swift auth key: " SWIFT_AUTH_KEY && echo
+export SWIFT_AUTH_KEY
+./osmo_scripts/start.sh --storage-backend swift --pool <osmo-pool>
+```
+
+Override the default containers with `--code-container`, `--data-container`,
+and `--output-container`. Objects larger than 1 GiB use Swift static large
+objects; set `SWIFT_SEGMENT_SIZE_BYTES` to change the segment size.
 
 Submit the default Anymal Newton-native job:
 
@@ -242,12 +264,13 @@ Upload code without submitting:
   and submits it.
 - `osmo_workflow.yaml`: thin OSMO bootloader. It declares resources,
   credentials, environment variables, and the files needed before code download.
-- `entrypoint.sh`: task entrypoint. It installs NV-Datasets dependencies,
+- `entrypoint.sh`: task entrypoint. It installs the selected storage client,
   downloads code/data, extracts the code tree, runs init, runs the selected
   experiment preset, and uploads outputs on exit.
 - `run_experiment.py`: structured runner for cache lookup, dataset generation,
   generated dataset upload, TensorBoard, and training.
 - `lib/nvdataset_io.py`: shared NV-Datasets download/upload/replace helper.
+- `lib/swift_io.py`: shared Swift authentication, upload, and download helper.
 - `lib/package_code.py`: local source packaging helper.
 - `lib/preset.py`: preset resolver used by submit-time code.
 - `presets/*.yaml`: declarative experiment presets.

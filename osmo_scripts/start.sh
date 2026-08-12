@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Package code, upload it to NV-Datasets, set OSMO credentials, and submit a workflow.
+# Package code, upload it to object storage, set OSMO credentials, and submit a workflow.
 
 set -euo pipefail
 
@@ -10,6 +10,17 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%d-%H%M%S)}"
 CODE_ONLY="${CODE_ONLY:-0}"
 REFRESH_CREDENTIAL="${REFRESH_CREDENTIAL:-0}"
 
+STORAGE_BACKEND="${STORAGE_BACKEND:-nvdataset}"
+STORAGE_CREDENTIAL="${STORAGE_CREDENTIAL:-}"
+SWIFT_CREDENTIAL="${SWIFT_CREDENTIAL:-swift_cred}"
+SWIFT_AUTH_URL="${SWIFT_AUTH_URL:-https://pdx.s8k.io}"
+SWIFT_AUTH_VERSION="${SWIFT_AUTH_VERSION:-1}"
+SWIFT_USER="${SWIFT_USER:-team-isaac-lab}"
+SWIFT_AUTH_KEY="${SWIFT_AUTH_KEY:-}"
+SWIFT_CODE_CONTAINER="${SWIFT_CODE_CONTAINER:-isaaclab-nerd-code}"
+SWIFT_CODE_OBJECT="${SWIFT_CODE_OBJECT:-IsaacLab-NeRD.tar.gz}"
+SWIFT_DATA_CONTAINER="${SWIFT_DATA_CONTAINER:-isaaclab-nerd-datasets}"
+SWIFT_OUTPUT_CONTAINER="${SWIFT_OUTPUT_CONTAINER:-isaaclab-nerd-output}"
 NVDATASET_CREDENTIAL="${NVDATASET_CREDENTIAL:-nvdataset_cred}"
 NVDATASET_CODE_DATASET="${NVDATASET_CODE_DATASET:-IsaacLab-NeRD-Code}"
 NVDATASET_DATA_DATASET="${NVDATASET_DATA_DATASET:-IsaacLab-NeRD-Datasets}"
@@ -47,7 +58,11 @@ Common options:
   --preset-file PATH         Use a custom preset YAML file
   --workflow-name NAME       Override preset workflow base name; run id is appended
   --dataset-subdir NAME      Override generated dataset cache subdirectory
-  --code-only                Upload/replace code dataset without submitting OSMO
+  --storage-backend NAME     nvdataset (default) or swift
+  --code-only                Upload/replace code object without submitting OSMO
+  --code-container NAME      Swift code container (default: isaaclab-nerd-code)
+  --data-container NAME      Swift generated data container
+  --output-container NAME    Swift output container
   --code-dataset NAME        NV-Datasets code dataset (default: IsaacLab-NeRD-Code)
   --data-dataset NAME        NV-Datasets generated data dataset
   --output-dataset NAME      NV-Datasets output dataset
@@ -67,8 +82,9 @@ Common options:
   -- <osmo-options>          Forward extra OSMO options such as --pool to validate and submit
 
 Credentials:
-  NGC_API_KEY
-  NVDATASET_TENANTID
+  SWIFT_AUTH_KEY             Required for --storage-backend swift
+  NGC_API_KEY                Required for the default NV-Datasets backend
+  NVDATASET_TENANTID         Required for the default NV-Datasets backend
   WANDB_API_KEY              Required when using --enable-wandb
 EOF
 }
@@ -91,6 +107,22 @@ while (($#)); do
         --code-only|--upload-code-only)
             CODE_ONLY=1
             shift
+            ;;
+        --storage-backend)
+            STORAGE_BACKEND="${2:?Missing value for --storage-backend}"
+            shift 2
+            ;;
+        --code-container)
+            SWIFT_CODE_CONTAINER="${2:?Missing value for --code-container}"
+            shift 2
+            ;;
+        --data-container)
+            SWIFT_DATA_CONTAINER="${2:?Missing value for --data-container}"
+            shift 2
+            ;;
+        --output-container)
+            SWIFT_OUTPUT_CONTAINER="${2:?Missing value for --output-container}"
+            shift 2
             ;;
         --code-dataset)
             NVDATASET_CODE_DATASET="${2:?Missing value for --code-dataset}"
@@ -165,7 +197,7 @@ while (($#)); do
             shift 2
             ;;
         --credential)
-            NVDATASET_CREDENTIAL="${2:?Missing value for --credential}"
+            STORAGE_CREDENTIAL="${2:?Missing value for --credential}"
             shift 2
             ;;
         --refresh-credential)
@@ -192,14 +224,50 @@ while (($#)); do
     esac
 done
 
-if [[ -z "$NGC_API_KEY" ]]; then
-    echo "[FATAL] Set NGC_API_KEY before running this script." >&2
-    exit 2
-fi
-if [[ -z "$NVDATASET_TENANTID" ]]; then
-    echo "[FATAL] Set NVDATASET_TENANTID before running this script." >&2
-    exit 2
-fi
+case "$STORAGE_BACKEND" in
+    swift)
+        STORAGE_CREDENTIAL="${STORAGE_CREDENTIAL:-$SWIFT_CREDENTIAL}"
+        STORAGE_AUTH_URL_ENV="SWIFT_AUTH_URL"
+        STORAGE_AUTH_URL_KEY="auth_url"
+        STORAGE_AUTH_VERSION_ENV="SWIFT_AUTH_VERSION"
+        STORAGE_AUTH_VERSION_KEY="auth_version"
+        STORAGE_USER_ENV="SWIFT_USER"
+        STORAGE_USER_KEY="user"
+        STORAGE_KEY_ENV="SWIFT_AUTH_KEY"
+        STORAGE_KEY_KEY="auth_key"
+        STORAGE_TENANT_ENV="STORAGE_UNUSED_TENANT"
+        STORAGE_TENANT_KEY="user"
+        if [[ -z "$SWIFT_AUTH_KEY" ]]; then
+            echo "[FATAL] Set SWIFT_AUTH_KEY before using the Swift storage backend." >&2
+            exit 2
+        fi
+        ;;
+    nvdataset)
+        STORAGE_CREDENTIAL="${STORAGE_CREDENTIAL:-$NVDATASET_CREDENTIAL}"
+        STORAGE_AUTH_URL_ENV="STORAGE_UNUSED_AUTH_URL"
+        STORAGE_AUTH_URL_KEY="tenant_id"
+        STORAGE_AUTH_VERSION_ENV="STORAGE_UNUSED_AUTH_VERSION"
+        STORAGE_AUTH_VERSION_KEY="tenant_id"
+        STORAGE_USER_ENV="STORAGE_UNUSED_USER"
+        STORAGE_USER_KEY="tenant_id"
+        STORAGE_KEY_ENV="NGC_API_KEY"
+        STORAGE_KEY_KEY="nvapi_key"
+        STORAGE_TENANT_ENV="NVDATASET_TENANTID"
+        STORAGE_TENANT_KEY="tenant_id"
+        if [[ -z "$NGC_API_KEY" ]]; then
+            echo "[FATAL] Set NGC_API_KEY before using the NV-Datasets storage backend." >&2
+            exit 2
+        fi
+        if [[ -z "$NVDATASET_TENANTID" ]]; then
+            echo "[FATAL] Set NVDATASET_TENANTID before using the NV-Datasets storage backend." >&2
+            exit 2
+        fi
+        ;;
+    *)
+        echo "[FATAL] Unsupported storage backend: $STORAGE_BACKEND (expected nvdataset or swift)." >&2
+        exit 2
+        ;;
+esac
 if [[ "$ENABLE_WANDB" == "1" && -z "$WANDB_API_KEY" ]]; then
     echo "[FATAL] Set WANDB_API_KEY before using --enable-wandb." >&2
     exit 2
@@ -248,19 +316,41 @@ python3 "$SCRIPT_DIR/lib/package_code.py" \
     --project-root "$PROJECT_ROOT" \
     --archive-path "$ARCHIVE_PATH"
 
-echo "=== Ensuring local nvdataset package ==="
-export NVDATASET_TENANTID
-export NGC_API_KEY
-if ! python3 "$SCRIPT_DIR/lib/nvdataset_io.py" check >/dev/null 2>&1; then
-    python3 -m pip install --quiet -U --extra-index-url "$NVDATASET_INDEX_URL" nvdataset
-    python3 "$SCRIPT_DIR/lib/nvdataset_io.py" check
+if [[ "$STORAGE_BACKEND" == "swift" ]]; then
+    echo "=== Ensuring local Swift client ==="
+    export SWIFT_AUTH_URL SWIFT_AUTH_VERSION SWIFT_USER SWIFT_AUTH_KEY
+    if ! python3 "$SCRIPT_DIR/lib/swift_io.py" check >/dev/null 2>&1; then
+        python3 -m pip install --quiet -U python-swiftclient
+        python3 "$SCRIPT_DIR/lib/swift_io.py" check
+    fi
+    echo "=== Uploading code archive to Swift: $SWIFT_CODE_CONTAINER/$SWIFT_CODE_OBJECT ==="
+    python3 "$SCRIPT_DIR/lib/swift_io.py" upload-file \
+        --container "$SWIFT_CODE_CONTAINER" \
+        --source "$ARCHIVE_PATH" \
+        --object-name "$SWIFT_CODE_OBJECT"
+    SWIFT_VERIFY_PATH="$TMP_DIR/Swift-verify-${SWIFT_CODE_OBJECT##*/}"
+    python3 "$SCRIPT_DIR/lib/swift_io.py" download-object \
+        --container "$SWIFT_CODE_CONTAINER" \
+        --object-name "$SWIFT_CODE_OBJECT" \
+        --output "$SWIFT_VERIFY_PATH"
+    if ! cmp --silent "$ARCHIVE_PATH" "$SWIFT_VERIFY_PATH"; then
+        echo "[FATAL] Swift code upload verification failed: downloaded object differs from the archive." >&2
+        exit 1
+    fi
+    echo "=== Swift code upload round-trip verification succeeded. ==="
+else
+    echo "=== Ensuring local nvdataset package ==="
+    export NVDATASET_TENANTID NGC_API_KEY
+    if ! python3 "$SCRIPT_DIR/lib/nvdataset_io.py" check >/dev/null 2>&1; then
+        python3 -m pip install --quiet -U --extra-index-url "$NVDATASET_INDEX_URL" nvdataset
+        python3 "$SCRIPT_DIR/lib/nvdataset_io.py" check
+    fi
+    echo "=== Uploading code archive to NV-Datasets: $NVDATASET_CODE_DATASET ==="
+    python3 "$SCRIPT_DIR/lib/nvdataset_io.py" replace-files \
+        --dataset "$NVDATASET_CODE_DATASET" \
+        --description "IsaacLab-NeRD code snapshot archive for OSMO." \
+        "$ARCHIVE_PATH"
 fi
-
-echo "=== Uploading code archive to NV-Datasets: $NVDATASET_CODE_DATASET ==="
-python3 "$SCRIPT_DIR/lib/nvdataset_io.py" replace-files \
-    --dataset "$NVDATASET_CODE_DATASET" \
-    --description "IsaacLab-NeRD code snapshot archive for OSMO." \
-    "$ARCHIVE_PATH"
 
 if [[ "$CODE_ONLY" == "1" ]]; then
     echo "=== Code-only mode complete. Skipping OSMO credential setup and workflow submit. ==="
@@ -271,20 +361,49 @@ credential_exists() {
     local credential_list
 
     credential_list="$(osmo credential list 2>/dev/null || true)"
-    [[ "$credential_list" == *"$NVDATASET_CREDENTIAL"* ]]
+    [[ "$credential_list" == *"$STORAGE_CREDENTIAL"* ]]
 }
 
 if [[ "$REFRESH_CREDENTIAL" != "1" ]] && credential_exists; then
-    echo "=== Reusing existing OSMO NV-Datasets credential: $NVDATASET_CREDENTIAL ==="
+    echo "=== Reusing existing OSMO storage credential: $STORAGE_CREDENTIAL ==="
 else
-    echo "=== Setting OSMO NV-Datasets credential: $NVDATASET_CREDENTIAL ==="
-    if ! credential_output="$(osmo credential set "$NVDATASET_CREDENTIAL" --type GENERIC \
-        --payload nvapi_key="$NGC_API_KEY" tenant_id="$NVDATASET_TENANTID" 2>&1)"; then
+    echo "=== Setting OSMO storage credential: $STORAGE_CREDENTIAL ==="
+    credential_args=(osmo credential set "$STORAGE_CREDENTIAL" --type GENERIC)
+    if [[ "$STORAGE_BACKEND" == "swift" ]]; then
+        swift_auth_url_file="$TMP_DIR/swift-auth-url"
+        swift_auth_version_file="$TMP_DIR/swift-auth-version"
+        swift_user_file="$TMP_DIR/swift-user"
+        swift_key_file="$TMP_DIR/swift-auth-key"
+        printf '%s' "$SWIFT_AUTH_URL" > "$swift_auth_url_file"
+        printf '%s' "$SWIFT_AUTH_VERSION" > "$swift_auth_version_file"
+        printf '%s' "$SWIFT_USER" > "$swift_user_file"
+        printf '%s' "$SWIFT_AUTH_KEY" > "$swift_key_file"
+        chmod 600 "$swift_auth_url_file" "$swift_auth_version_file" "$swift_user_file" "$swift_key_file"
+        credential_args+=(
+            --payload-file
+            auth_url="$swift_auth_url_file"
+            auth_version="$swift_auth_version_file"
+            user="$swift_user_file"
+            auth_key="$swift_key_file"
+        )
+    else
+        nvapi_key_file="$TMP_DIR/nvapi-key"
+        nvdataset_tenant_file="$TMP_DIR/nvdataset-tenant"
+        printf '%s' "$NGC_API_KEY" > "$nvapi_key_file"
+        printf '%s' "$NVDATASET_TENANTID" > "$nvdataset_tenant_file"
+        chmod 600 "$nvapi_key_file" "$nvdataset_tenant_file"
+        credential_args+=(
+            --payload-file
+            nvapi_key="$nvapi_key_file"
+            tenant_id="$nvdataset_tenant_file"
+        )
+    fi
+    if ! credential_output="$("${credential_args[@]}" 2>&1)"; then
         if [[ "$credential_output" == *"duplicate key value"* || "$credential_output" == *"already exists"* ]]; then
-            echo "Credential $NVDATASET_CREDENTIAL already exists; reusing it."
+            echo "Credential $STORAGE_CREDENTIAL already exists; reusing it."
         elif credential_exists; then
             echo "$credential_output" >&2
-            echo "Credential $NVDATASET_CREDENTIAL is present after set failed; reusing it."
+            echo "Credential $STORAGE_CREDENTIAL is present after set failed; reusing it."
         else
             echo "$credential_output" >&2
             exit 1
@@ -303,10 +422,26 @@ SUBMIT_ARGS=(
     "workflow_base_name=$WORKFLOW_BASE_NAME"
     "dataset_subdir=$DATASET_SUBDIR"
     "dataset_cache_mode=$DATASET_CACHE_MODE"
+    "storage_backend=$STORAGE_BACKEND"
+    "storage_credential=$STORAGE_CREDENTIAL"
+    "storage_auth_url_env=$STORAGE_AUTH_URL_ENV"
+    "storage_auth_url_key=$STORAGE_AUTH_URL_KEY"
+    "storage_auth_version_env=$STORAGE_AUTH_VERSION_ENV"
+    "storage_auth_version_key=$STORAGE_AUTH_VERSION_KEY"
+    "storage_user_env=$STORAGE_USER_ENV"
+    "storage_user_key=$STORAGE_USER_KEY"
+    "storage_key_env=$STORAGE_KEY_ENV"
+    "storage_key_key=$STORAGE_KEY_KEY"
+    "storage_tenant_env=$STORAGE_TENANT_ENV"
+    "storage_tenant_key=$STORAGE_TENANT_KEY"
     "osmo_experiment_preset=$OSMO_EXPERIMENT_PRESET"
     "memory=$OSMO_MEMORY"
     "storage=$OSMO_STORAGE"
     "resource_platform=$OSMO_PLATFORM"
+    "swift_code_container=$SWIFT_CODE_CONTAINER"
+    "swift_code_object=$SWIFT_CODE_OBJECT"
+    "swift_data_container=$SWIFT_DATA_CONTAINER"
+    "swift_output_container=$SWIFT_OUTPUT_CONTAINER"
     "nvdataset_credential=$NVDATASET_CREDENTIAL"
     "nvdataset_code_dataset=$NVDATASET_CODE_DATASET"
     "nvdataset_code_snapshot="

@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import TextIO, cast
 
 import h5py
-
 from lib.simple_yaml import load_yaml
 
 
@@ -249,10 +248,10 @@ def load_dataset_cache_from_input(
         for file in files:
             shutil.copy2(file, local_env_dir / file.name)
         if dataset_cache_complete(local_env_dir, required_files, experiment):
-            print(f"Loaded datasets for {env_name} from NV-Datasets input: {candidate}")
+            print(f"Loaded datasets for {env_name} from storage input: {candidate}")
             return True
 
-    print(f"NV-Datasets input did not contain the required datasets for {env_name} under {dataset_subdir}.")
+    print(f"Storage input did not contain the required datasets for {env_name} under {dataset_subdir}.")
     return False
 
 
@@ -261,6 +260,8 @@ def stage_generated_datasets(
     local_env_dir: Path,
     dataset_subdir: str,
     env_name: str,
+    storage_backend: str,
+    swift_data_container: str,
     nvdataset_data_dataset: str,
     nvdataset_data_description: str,
 ):
@@ -269,7 +270,18 @@ def stage_generated_datasets(
         print(f"No generated HDF5 datasets found under {local_env_dir} to stage.")
         return
 
-    if nvdataset_data_dataset:
+    if storage_backend == "swift" and swift_data_container:
+        from lib import swift_io
+
+        prefix = f"{dataset_subdir}/{env_name}"
+        print(f"Uploading generated datasets to Swift {swift_data_container}/{prefix}.")
+        swift_io.upload_directory(
+            container=swift_data_container,
+            source_dir=local_env_dir,
+            prefix=prefix,
+            resume=True,
+        )
+    elif storage_backend == "nvdataset" and nvdataset_data_dataset:
         from lib import nvdataset_io
 
         upload_root = Path("/tmp/nvdatasets/generated_dataset_upload")
@@ -286,7 +298,7 @@ def stage_generated_datasets(
             description=nvdataset_data_description,
         )
     else:
-        print("No NV-Datasets data dataset configured; generated HDF5 files remain only in the pod-local dataset dir.")
+        print("No data storage target configured; generated HDF5 files remain only in the pod-local dataset dir.")
 
 
 def contact_args(experiment: dict) -> list[str]:
@@ -478,8 +490,7 @@ def run_context_diagnostic(experiment: dict, specs: list[DatasetSpec], dataset_d
             raise RuntimeError("Negative terrain-seed diagnostic unexpectedly passed.")
         if "Terrain context mismatch" not in result.stdout:
             raise RuntimeError(
-                "Negative terrain-seed diagnostic failed for an unexpected reason "
-                f"(exit code {result.returncode})."
+                f"Negative terrain-seed diagnostic failed for an unexpected reason (exit code {result.returncode})."
             )
         print(f"Negative terrain-seed diagnostic failed as expected with exit code {result.returncode}.")
 
@@ -532,11 +543,9 @@ def run(args: argparse.Namespace):
             experiment=experiment,
         )
         if not datasets_available:
-            print(f"NV-Datasets input cache unavailable for {experiment['env_name']}; generating datasets locally.")
+            print(f"Storage input cache unavailable for {experiment['env_name']}; generating datasets locally.")
             if args.dataset_cache_mode == "require":
-                raise RuntimeError(
-                    "DATASET_CACHE_MODE=require but required datasets were not found in NV-Datasets input."
-                )
+                raise RuntimeError("DATASET_CACHE_MODE=require but required datasets were not found in storage input.")
     elif args.dataset_cache_mode == "require":
         raise RuntimeError("DATASET_CACHE_MODE=require but DATASET_INPUT_PATH is empty.")
 
@@ -546,6 +555,8 @@ def run(args: argparse.Namespace):
             local_env_dir=local_env_dir,
             dataset_subdir=args.dataset_subdir,
             env_name=str(experiment["env_name"]),
+            storage_backend=args.storage_backend,
+            swift_data_container=args.swift_data_container,
             nvdataset_data_dataset=args.nvdataset_data_dataset,
             nvdataset_data_description=args.nvdataset_data_description,
         )
@@ -566,6 +577,8 @@ def main():
     parser.add_argument("--dataset-subdir", required=True)
     parser.add_argument("--dataset-cache-mode", default="auto", choices=("auto", "require", "off"))
     parser.add_argument("--dataset-input-path", default="")
+    parser.add_argument("--storage-backend", default="nvdataset", choices=("nvdataset", "swift"))
+    parser.add_argument("--swift-data-container", default="")
     parser.add_argument("--nvdataset-data-dataset", default="")
     parser.add_argument("--nvdataset-data-description", default="IsaacLab-NeRD generated HDF5 datasets.")
     parser.add_argument("--output-root", default="/tmp/runs/output")

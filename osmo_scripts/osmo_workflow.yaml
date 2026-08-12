@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 workflow:
   name: {{ workflow_name }}
   resources:
@@ -23,6 +28,14 @@ workflow:
       WORKFLOW_BASE_NAME: "{{ workflow_base_name }}"
       DATASET_SUBDIR: "{{ dataset_subdir }}"
       DATASET_CACHE_MODE: "{{ dataset_cache_mode }}"
+      STORAGE_BACKEND: "{{ storage_backend }}"
+      SWIFT_CODE_DIR: /tmp/swift/code
+      SWIFT_CODE_CONTAINER: "{{ swift_code_container }}"
+      SWIFT_CODE_OBJECT: "{{ swift_code_object }}"
+      SWIFT_DATA_DIR: /tmp/swift/data
+      SWIFT_DATA_CONTAINER: "{{ swift_data_container }}"
+      SWIFT_OUTPUT_CONTAINER: "{{ swift_output_container }}"
+      SWIFT_OUTPUT_PREFIX: "{{ workflow_name }}"
       NVDATASET_CODE_DIR: /tmp/nvdatasets/code
       NVDATASET_CODE_DATASET: "{{ nvdataset_code_dataset }}"
       NVDATASET_CODE_SNAPSHOT: "{{ nvdataset_code_snapshot }}"
@@ -44,9 +57,12 @@ workflow:
     args:
     - /tmp/entrypoint.sh
     credentials:
-      {{ nvdataset_credential }}:
-        NGC_API_KEY: nvapi_key
-        NVDATASET_TENANTID: tenant_id
+      {{ storage_credential }}:
+        {{ storage_auth_url_env }}: {{ storage_auth_url_key }}
+        {{ storage_auth_version_env }}: {{ storage_auth_version_key }}
+        {{ storage_user_env }}: {{ storage_user_key }}
+        {{ storage_key_env }}: {{ storage_key_key }}
+        {{ storage_tenant_env }}: {{ storage_tenant_key }}
     files:
     - path: /tmp/init.sh
       localpath: {{ init_sh_localpath }}
@@ -54,6 +70,8 @@ workflow:
       localpath: {{ entrypoint_localpath }}
     - path: /tmp/nvdataset_io.py
       localpath: {{ nvdataset_io_localpath }}
+    - path: /tmp/swift_io.py
+      localpath: {{ swift_io_localpath }}
 
 default-values:
   workflow_name: anymal-c-fixed-ground
@@ -67,7 +85,23 @@ default-values:
   resource_platform: ovx-l40s
   dataset_subdir: anymal-c-fixed-ground
   dataset_cache_mode: auto
+  storage_backend: nvdataset
+  storage_credential: nvdataset_cred
+  storage_auth_url_env: STORAGE_UNUSED_AUTH_URL
+  storage_auth_url_key: tenant_id
+  storage_auth_version_env: STORAGE_UNUSED_AUTH_VERSION
+  storage_auth_version_key: tenant_id
+  storage_user_env: STORAGE_UNUSED_USER
+  storage_user_key: tenant_id
+  storage_key_env: NGC_API_KEY
+  storage_key_key: nvapi_key
+  storage_tenant_env: NVDATASET_TENANTID
+  storage_tenant_key: tenant_id
   disable_rust_client: "1"
+  swift_code_container: isaaclab-nerd-code
+  swift_code_object: IsaacLab-NeRD.tar.gz
+  swift_data_container: isaaclab-nerd-datasets
+  swift_output_container: isaaclab-nerd-output
   nvdataset_credential: nvdataset_cred
   nvdataset_code_dataset: IsaacLab-NeRD-Code
   nvdataset_code_snapshot: ""
@@ -85,3 +119,4 @@ default-values:
   init_sh_localpath: ./init.sh
   entrypoint_localpath: ./entrypoint.sh
   nvdataset_io_localpath: ./lib/nvdataset_io.py
+  swift_io_localpath: ./lib/swift_io.py
