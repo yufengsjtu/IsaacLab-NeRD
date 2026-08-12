@@ -14,12 +14,9 @@ import torch
 import warp as wp
 
 from isaaclab_neural.contacts.contact_set_schema import (
-    CONTACT_TOKEN_BODY_SLOT_INDEX,
     CONTACT_TOKEN_DIM,
     CONTACT_TOKEN_GAP_INDEX,
     CONTACT_TOKEN_GEOMETRY_SLICE,
-    CONTACT_TOKEN_OTHER_BODY_SLOT_INDEX,
-    CONTACT_TOKEN_OTHER_DYNAMIC_INDEX,
     CONTACT_TOKEN_VALID_INDEX,
 )
 from isaaclab_neural.utils import torch_utils

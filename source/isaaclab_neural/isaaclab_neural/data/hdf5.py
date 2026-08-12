@@ -181,9 +181,7 @@ def _validate_contact_token_identity(
     state_world_ids = trajectory_context["state_world_id"]
     root_world_ids = trajectory_context["root_world_id"]
     contact_world_ids = trajectory_context["contact_world_id"]
-    if not np.array_equal(state_world_ids, root_world_ids) or not np.array_equal(
-        state_world_ids, contact_world_ids
-    ):
+    if not np.array_equal(state_world_ids, root_world_ids) or not np.array_equal(state_world_ids, contact_world_ids):
         raise ValueError("State, root, and contact trajectory rows must map to the same Newton worlds.")
     expected_world_ids = np.broadcast_to(contact_world_ids[:, None, None], world_ids.shape)
     if np.any(valid & (world_ids != expected_world_ids)):
@@ -232,9 +230,7 @@ def _validate_rollout_arrays(arrays: Mapping[str, Any]) -> None:
     trajectory_shape = states.shape[:2]
     for name, data in arrays.items():
         # Per-step scalars (e.g. contact_token_overflow) are [N, T]; all other fields are [N, T, ...].
-        matches_trajectory = data.shape[:2] == trajectory_shape and (
-            data.ndim >= 3 or data.shape == trajectory_shape
-        )
+        matches_trajectory = data.shape[:2] == trajectory_shape and (data.ndim >= 3 or data.shape == trajectory_shape)
         if not matches_trajectory:
             raise ValueError(
                 f"Rollout field {name!r} must start with trajectory shape {trajectory_shape} "

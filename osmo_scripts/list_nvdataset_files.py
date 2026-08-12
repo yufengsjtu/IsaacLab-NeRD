@@ -14,10 +14,10 @@ cache the dataset locally and list the downloaded files.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
 import os
-from pathlib import Path
 import sys
+from collections.abc import Iterable
+from pathlib import Path
 
 
 def _iter_file_like_items(value) -> Iterable[object]:
@@ -136,7 +136,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset", help="NV-Datasets dataset name.")
     parser.add_argument("--prefix", default="", help="Only show files under this dataset-relative prefix.")
-    parser.add_argument("--include-deleted", action="store_true", help="Also show soft-deleted files returned by the SDK.")
+    parser.add_argument(
+        "--include-deleted", action="store_true", help="Also show soft-deleted files returned by the SDK."
+    )
     parser.add_argument(
         "--download-to",
         type=Path,

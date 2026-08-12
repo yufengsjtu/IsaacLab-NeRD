@@ -271,6 +271,7 @@ def main(env_cfg, agent_cfg) -> None:
     """Run a single-mode timed stepping benchmark (NeRD or ground truth)."""
     del agent_cfg
     import torch
+
     from isaaclab_tasks.utils import launch_simulation
 
     env_cfg.scene.num_envs = args_cli.num_envs

@@ -1,8 +1,12 @@
-import numpy as np
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 import warp as wp
-import newton
 from newton import GeoType, ShapeFlags
 from newton._src.geometry.kernels import get_box_vertex
+
 
 @wp.kernel(enable_backward=False)
 def generate_contact_points(
@@ -28,7 +32,7 @@ def generate_contact_points(
     contact_depth: wp.array(dtype=float),
 ):
     """Generate contact points for a given environment, assuming each shape is a regular geometric shape."""
-    
+
     env_id = wp.tid()
 
     shape_offset = num_shapes_per_env * env_id + shapes_start_offset
@@ -64,9 +68,7 @@ def generate_contact_points(
             # add points at the two ends of the capsule
             contact_shape0[contact_idx] = shape_offset + i
             contact_shape1[contact_idx] = ground_shape_index
-            contact_point0[contact_idx] = wp.transform_point(
-                shape_tf, wp.vec3(0.0, 0.0,geo_scale[1])
-            )
+            contact_point0[contact_idx] = wp.transform_point(shape_tf, wp.vec3(0.0, 0.0, geo_scale[1]))
             contact_point1[contact_idx] = wp.vec3(0.0)
             contact_normal[contact_idx] = up_vector
             contact_depth[contact_idx] = 1000.0
@@ -76,9 +78,7 @@ def generate_contact_points(
 
             contact_shape0[contact_idx] = shape_offset + i
             contact_shape1[contact_idx] = ground_shape_index
-            contact_point0[contact_idx] = wp.transform_point(
-                shape_tf, wp.vec3(0.0, 0.0, -geo_scale[1])
-            )
+            contact_point0[contact_idx] = wp.transform_point(shape_tf, wp.vec3(0.0, 0.0, -geo_scale[1]))
             contact_point1[contact_idx] = wp.vec3(0.0)
             contact_normal[contact_idx] = up_vector
             contact_depth[contact_idx] = 1000.0
@@ -107,9 +107,7 @@ def generate_contact_points(
             # disks are treated as hemispheres).
             contact_shape0[contact_idx] = shape_offset + i
             contact_shape1[contact_idx] = ground_shape_index
-            contact_point0[contact_idx] = wp.transform_point(
-                shape_tf, wp.vec3(0.0, 0.0, geo_scale[1])
-            )
+            contact_point0[contact_idx] = wp.transform_point(shape_tf, wp.vec3(0.0, 0.0, geo_scale[1]))
             contact_point1[contact_idx] = wp.vec3(0.0)
             contact_normal[contact_idx] = up_vector
             contact_depth[contact_idx] = 1000.0
@@ -119,9 +117,7 @@ def generate_contact_points(
 
             contact_shape0[contact_idx] = shape_offset + i
             contact_shape1[contact_idx] = ground_shape_index
-            contact_point0[contact_idx] = wp.transform_point(
-                shape_tf, wp.vec3(0.0, 0.0, -geo_scale[1])
-            )
+            contact_point0[contact_idx] = wp.transform_point(shape_tf, wp.vec3(0.0, 0.0, -geo_scale[1]))
             contact_point1[contact_idx] = wp.vec3(0.0)
             contact_normal[contact_idx] = up_vector
             contact_depth[contact_idx] = 1000.0
@@ -138,9 +134,7 @@ def generate_contact_points(
         ):
             contact_shape0[contact_idx] = shape_offset + i
             contact_shape1[contact_idx] = ground_shape_index
-            contact_point0[contact_idx] = wp.transform_point(
-                shape_tf, wp.vec3(0.0, 0.0, 0.0)
-            )
+            contact_point0[contact_idx] = wp.transform_point(shape_tf, wp.vec3(0.0, 0.0, 0.0))
             contact_point1[contact_idx] = wp.vec3(0.0)
             contact_normal[contact_idx] = up_vector
             contact_depth[contact_idx] = 1000.0
@@ -209,9 +203,7 @@ def generate_contact_points_by_body_world(
             if contact_idx < contact_end:
                 contact_shape0[contact_idx] = shape_idx
                 contact_shape1[contact_idx] = ground_shape_index
-                contact_point0[contact_idx] = wp.transform_point(
-                    shape_tf, wp.vec3(0.0, 0.0, geo_scale[1])
-                )
+                contact_point0[contact_idx] = wp.transform_point(shape_tf, wp.vec3(0.0, 0.0, geo_scale[1]))
                 contact_point1[contact_idx] = wp.vec3(0.0)
                 contact_normal[contact_idx] = up_vector
                 contact_depth[contact_idx] = 1000.0
@@ -222,9 +214,7 @@ def generate_contact_points_by_body_world(
             if contact_idx < contact_end:
                 contact_shape0[contact_idx] = shape_idx
                 contact_shape1[contact_idx] = ground_shape_index
-                contact_point0[contact_idx] = wp.transform_point(
-                    shape_tf, wp.vec3(0.0, 0.0, -geo_scale[1])
-                )
+                contact_point0[contact_idx] = wp.transform_point(shape_tf, wp.vec3(0.0, 0.0, -geo_scale[1]))
                 contact_point1[contact_idx] = wp.vec3(0.0)
                 contact_normal[contact_idx] = up_vector
                 contact_depth[contact_idx] = 1000.0
@@ -252,9 +242,7 @@ def generate_contact_points_by_body_world(
             if contact_idx < contact_end:
                 contact_shape0[contact_idx] = shape_idx
                 contact_shape1[contact_idx] = ground_shape_index
-                contact_point0[contact_idx] = wp.transform_point(
-                    shape_tf, wp.vec3(0.0, 0.0, geo_scale[1])
-                )
+                contact_point0[contact_idx] = wp.transform_point(shape_tf, wp.vec3(0.0, 0.0, geo_scale[1]))
                 contact_point1[contact_idx] = wp.vec3(0.0)
                 contact_normal[contact_idx] = up_vector
                 contact_depth[contact_idx] = 1000.0
@@ -265,9 +253,7 @@ def generate_contact_points_by_body_world(
             if contact_idx < contact_end:
                 contact_shape0[contact_idx] = shape_idx
                 contact_shape1[contact_idx] = ground_shape_index
-                contact_point0[contact_idx] = wp.transform_point(
-                    shape_tf, wp.vec3(0.0, 0.0, -geo_scale[1])
-                )
+                contact_point0[contact_idx] = wp.transform_point(shape_tf, wp.vec3(0.0, 0.0, -geo_scale[1]))
                 contact_point1[contact_idx] = wp.vec3(0.0)
                 contact_normal[contact_idx] = up_vector
                 contact_depth[contact_idx] = 1000.0
@@ -285,9 +271,7 @@ def generate_contact_points_by_body_world(
             if contact_idx < contact_end:
                 contact_shape0[contact_idx] = shape_idx
                 contact_shape1[contact_idx] = ground_shape_index
-                contact_point0[contact_idx] = wp.transform_point(
-                    shape_tf, wp.vec3(0.0, 0.0, 0.0)
-                )
+                contact_point0[contact_idx] = wp.transform_point(shape_tf, wp.vec3(0.0, 0.0, 0.0))
                 contact_point1[contact_idx] = wp.vec3(0.0)
                 contact_normal[contact_idx] = up_vector
                 contact_depth[contact_idx] = 1000.0

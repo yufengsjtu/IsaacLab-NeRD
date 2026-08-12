@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """Preset loading helpers for OSMO submit and runtime scripts."""
 
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import shlex
+from pathlib import Path
 
 try:
     from .simple_yaml import load_yaml

@@ -17,6 +17,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import isaaclab_neural.envs  # noqa: F401 - registers NeRD gym tasks
 from common import (
     add_common_train_args,
     add_isaaclab_launcher_args,
@@ -33,7 +34,6 @@ from common import (
 from packaging import version
 
 import isaaclab_tasks  # noqa: F401
-import isaaclab_neural.envs  # noqa: F401 - registers NeRD gym tasks
 
 logger = logging.getLogger(__name__)
 

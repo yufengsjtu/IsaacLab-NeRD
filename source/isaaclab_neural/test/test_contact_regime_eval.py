@@ -4,7 +4,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import numpy as np
-
 from isaaclab_neural.eval.contact_regime_eval import classify_regimes, evaluate_dataset_regimes
 
 
@@ -48,7 +47,6 @@ def test_evaluate_dataset_regimes_ignores_invalid_token_padding(tmp_path):
     """Padding tokens have gap=0; they must not be treated as touchdown."""
     path = tmp_path / "regime_tokens.hdf5"
     import h5py
-
     from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM, CONTACT_TOKEN_GAP_INDEX
     from isaaclab_neural.eval.contact_regime_eval import classify_regimes
 

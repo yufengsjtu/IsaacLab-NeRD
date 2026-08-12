@@ -63,7 +63,7 @@ def test_contact_set_encoder_respects_capacity_and_validity():
     assert tokens.shape == (1, 4, CONTACT_TOKEN_DIM)
     assert tokens[0, 0, 0] == 1.0
     assert (tokens[0, :, 0] >= 0.0).all()
-    assert (tokens[0, :, 0].sum() <= 4)
+    assert tokens[0, :, 0].sum() <= 4
 
 
 def test_contact_token_moments_pin_identity_channels():

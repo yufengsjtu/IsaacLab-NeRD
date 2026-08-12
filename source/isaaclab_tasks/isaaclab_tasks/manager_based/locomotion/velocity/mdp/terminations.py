@@ -18,8 +18,7 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 
 if TYPE_CHECKING:
-    from isaaclab.assets import Articulation
-    from isaaclab.assets import RigidObject
+    from isaaclab.assets import Articulation, RigidObject
     from isaaclab.envs import ManagerBasedRLEnv
 
 

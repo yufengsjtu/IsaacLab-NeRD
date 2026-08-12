@@ -12,10 +12,10 @@ The script defaults to dry-run mode. Pass ``--yes`` to perform deletion.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
 import os
 import re
 import sys
+from collections.abc import Iterable
 
 
 def _check_credentials() -> int:
@@ -136,8 +136,7 @@ def _list_remote_items(dataset) -> list[object]:
         if items:
             return items
     raise RuntimeError(
-        "This nvdataset package did not expose a remote file listing API. "
-        "Cannot safely delete by --prefix or --file."
+        "This nvdataset package did not expose a remote file listing API. Cannot safely delete by --prefix or --file."
     )
 
 
@@ -149,10 +148,7 @@ def _matches(key: str, prefixes: list[str], files: list[str], regexes: list[re.P
         normalized = prefix.strip("/")
         if key == normalized or key.startswith(normalized + "/"):
             return True
-    for regex in regexes:
-        if regex.search(key):
-            return True
-    return False
+    return any(regex.search(key) for regex in regexes)
 
 
 def _try_call(obj, method_name: str, *args, **kwargs) -> bool:
@@ -294,10 +290,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset", help="NV-Datasets dataset name.")
     parser.add_argument("--delete-dataset", action="store_true", help="Delete the entire dataset.")
-    parser.add_argument("--prefix", action="append", default=[], help="Delete files under this dataset-relative prefix.")
+    parser.add_argument(
+        "--prefix", action="append", default=[], help="Delete files under this dataset-relative prefix."
+    )
     parser.add_argument("--file", action="append", default=[], help="Delete one exact dataset-relative file key.")
-    parser.add_argument("--regex", action="append", default=[], help="Delete files whose dataset-relative key matches this regex.")
-    parser.add_argument("--yes", action="store_true", help="Actually delete. Without this flag, the script is dry-run only.")
+    parser.add_argument(
+        "--regex", action="append", default=[], help="Delete files whose dataset-relative key matches this regex."
+    )
+    parser.add_argument(
+        "--yes", action="store_true", help="Actually delete. Without this flag, the script is dry-run only."
+    )
     args = parser.parse_args()
 
     if args.delete_dataset and (args.prefix or args.file or args.regex):

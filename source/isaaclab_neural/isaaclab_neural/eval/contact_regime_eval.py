@@ -12,8 +12,6 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-import torch
-
 from isaaclab_neural.eval.contact_distribution_stats import analyze_contact_distribution
 
 
@@ -30,7 +28,9 @@ def _touchdown_mask(contact_depths: np.ndarray) -> np.ndarray:
     return np.where(has_touch, first_touch, contact_depths.shape[1])
 
 
-def classify_regimes(contact_depths: np.ndarray, *, impact_frames: int = 15, settled_frames: int = 15) -> dict[str, np.ndarray]:
+def classify_regimes(
+    contact_depths: np.ndarray, *, impact_frames: int = 15, settled_frames: int = 15
+) -> dict[str, np.ndarray]:
     """Classify trajectory steps into swing, touchdown, impact, and settled regimes."""
     num_traj, steps = contact_depths.shape[:2]
     touchdown = _touchdown_mask(contact_depths)
@@ -81,7 +81,9 @@ def evaluate_dataset_regimes(dataset_path: str | Path) -> dict[str, float]:
     for name, mask in regimes.items():
         metrics[f"{name}_rmse"] = _state_rmse(states, next_states, mask)
     metrics["finite_fraction"] = float(np.isfinite(states).all(axis=-1).mean())
-    metrics.update({k: v for k, v in analyze_contact_distribution(dataset_path).items() if "overflow" in k or "capacity" in k})
+    metrics.update(
+        {k: v for k, v in analyze_contact_distribution(dataset_path).items() if "overflow" in k or "capacity" in k}
+    )
     return metrics
 
 

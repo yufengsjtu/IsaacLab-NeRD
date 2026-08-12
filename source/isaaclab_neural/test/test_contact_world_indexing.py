@@ -29,9 +29,7 @@ def test_contact_token_world_ids_are_derived_from_owner_bodies():
     adapter = DataGenerationAdapter.__new__(DataGenerationAdapter)
     adapter.device = torch.device("cpu")
     adapter.model = SimpleNamespace(body_world=torch.tensor([1, 0, 1, 0]))
-    adapter.contact_adapter = SimpleNamespace(
-        contact_token_body_ids=torch.tensor([[1, -1], [0, 2]], dtype=torch.long)
-    )
+    adapter.contact_adapter = SimpleNamespace(contact_token_body_ids=torch.tensor([[1, -1], [0, 2]], dtype=torch.long))
 
     world_ids = adapter.contact_token_world_ids
 

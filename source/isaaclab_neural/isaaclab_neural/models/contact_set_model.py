@@ -105,7 +105,7 @@ class ContactSetEncoderBlock(nn.Module):
         flat_tokens = contact_tokens.reshape(math.prod(leading), num_tokens, self.contact_dim)
         valid = contact_token_validity_mask(flat_tokens)
         token_embed = self._embed_tokens(flat_tokens, valid)
-        pooled = self._encode_set(token_embed, valid)   # [B*T, H]
+        pooled = self._encode_set(token_embed, valid)  # [B*T, H]
         cardinality = self._cardinality_branch(flat_tokens, valid)
         fused = torch.cat((pooled, cardinality), dim=-1)  # [B*T, 2*H]
         return self.output_proj(fused).reshape(*leading, self.out_features)  # [B, T, H]

@@ -156,9 +156,7 @@ def configure_env(env_cfg, args: argparse.Namespace) -> dict[str, Any] | None:
         env_cfg.seed = 0
     else:
         terrain_seed = (
-            int(args.terrain_seed_override)
-            if args.terrain_seed_override is not None
-            else int(terrain_context["seed"])
+            int(args.terrain_seed_override) if args.terrain_seed_override is not None else int(terrain_context["seed"])
         )
         set_terrain_seed(env_cfg, terrain_seed)
     if args.device is not None:
@@ -227,9 +225,7 @@ def load_dataset_batch(
         if step < 0 or step >= states.shape[1]:
             raise ValueError(f"Step {step} is outside dataset trajectory length {states.shape[1]}.")
         if "traj_lengths" in data_group:
-            traj_lengths = np.asarray(
-                cast(h5py.Dataset, data_group["traj_lengths"])[trajectory_start:trajectory_end]
-            )
+            traj_lengths = np.asarray(cast(h5py.Dataset, data_group["traj_lengths"])[trajectory_start:trajectory_end])
             if np.any(step >= traj_lengths):
                 raise ValueError(
                     f"Step {step} exceeds one or more selected trajectory lengths: {traj_lengths.tolist()}."
@@ -294,8 +290,7 @@ def load_random_dataset_batch(
             if excluded_trajectory_indices:
                 raise ValueError("No unsampled evaluator-compatible trajectories remain.")
             raise ValueError(
-                f"No trajectories are long enough for history_length={history_length} "
-                f"and eval_horizon={eval_horizon}."
+                f"No trajectories are long enough for history_length={history_length} and eval_horizon={eval_horizon}."
             )
         if excluded_trajectory_indices is not None and eligible.size < num_envs:
             raise ValueError(
@@ -646,12 +641,8 @@ def analyze_dataset_token_row_ownership(dataset_path: str, body_world: torch.Ten
         for chunk_start in range(0, tokens_dataset.shape[0], chunk_size):
             chunk_end = min(chunk_start + chunk_size, tokens_dataset.shape[0])
             valid = torch.as_tensor(np.asarray(tokens_dataset[chunk_start:chunk_end, :, :, 0])) > 0.5
-            token_world_ids = torch.as_tensor(
-                np.asarray(token_world_dataset[chunk_start:chunk_end]), dtype=torch.long
-            )
-            token_body_ids = torch.as_tensor(
-                np.asarray(token_body_dataset[chunk_start:chunk_end]), dtype=torch.long
-            )
+            token_world_ids = torch.as_tensor(np.asarray(token_world_dataset[chunk_start:chunk_end]), dtype=torch.long)
+            token_body_ids = torch.as_tensor(np.asarray(token_body_dataset[chunk_start:chunk_end]), dtype=torch.long)
             expected = expected_world_ids[chunk_start:chunk_end, None, None].expand_as(token_world_ids)
             world_mismatch = (token_world_ids != expected) & valid
             missing_valid_owner = valid & (token_body_ids < 0)
@@ -789,8 +780,7 @@ def restore_terrain_patch(env, batch: dict[str, torch.Tensor], *, required: bool
         return
     num_envs = batch["states"].shape[0]
     has_curriculum_terrain = (
-        getattr(terrain, "terrain_levels", None) is not None
-        and getattr(terrain, "terrain_types", None) is not None
+        getattr(terrain, "terrain_levels", None) is not None and getattr(terrain, "terrain_types", None) is not None
     )
     if required and not has_curriculum_terrain:
         raise ValueError(
@@ -1024,11 +1014,7 @@ def aggregate_contact_metrics(metrics_by_batch: list[dict[str, float]], batch_si
         "unique_count_abs_diff_max",
     )
     slot_max_values = np.asarray(
-        [
-            metrics["slot_point_distance_max"]
-            for metrics in metrics_by_batch
-            if metrics["shared_active_slot_count"] > 0
-        ],
+        [metrics["slot_point_distance_max"] for metrics in metrics_by_batch if metrics["shared_active_slot_count"] > 0],
         dtype=np.float64,
     )
     summary = {
@@ -1069,13 +1055,9 @@ def aggregate_contact_token_metrics(metrics_by_batch: list[dict[str, float]], ba
         "mismatched_env_count": sum(metrics["mismatched_env_count"] for metrics in metrics_by_batch),
         "dataset_active_mean": float(np.mean([metrics["dataset_active_mean"] for metrics in metrics_by_batch])),
         "runtime_active_mean": float(np.mean([metrics["runtime_active_mean"] for metrics in metrics_by_batch])),
-        "categorical_mismatch_count": sum(
-            metrics["categorical_mismatch_count"] for metrics in metrics_by_batch
-        ),
+        "categorical_mismatch_count": sum(metrics["categorical_mismatch_count"] for metrics in metrics_by_batch),
         "shared_valid_count": shared_valid_count,
-        "overflow_mismatch_count": sum(
-            metrics["overflow_mismatch_count"] for metrics in metrics_by_batch
-        ),
+        "overflow_mismatch_count": sum(metrics["overflow_mismatch_count"] for metrics in metrics_by_batch),
         "num_samples": float(len(metrics_by_batch) * batch_size),
     }
     for name in ("point_l2", "normal_l2", "lever_l2", "gap_abs", "relative_velocity_l2"):

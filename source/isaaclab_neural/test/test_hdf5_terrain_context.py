@@ -8,9 +8,8 @@
 import h5py
 import pytest
 import torch
-
-from isaaclab_neural.data import TrajectoryDataset, append_rollouts_to_hdf5, write_rollouts_to_hdf5
 from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
+from isaaclab_neural.data import TrajectoryDataset, append_rollouts_to_hdf5, write_rollouts_to_hdf5
 
 
 def _rollouts(num_trajectories: int = 2, num_steps: int = 3):

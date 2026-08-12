@@ -13,6 +13,7 @@ import sys
 import time
 
 import gymnasium as gym
+import isaaclab_neural.envs  # noqa: F401 - registers NeRD gym tasks
 import torch
 from packaging import version
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
@@ -32,7 +33,6 @@ from isaaclab_rl.rsl_rl import (
 from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 
 import isaaclab_tasks  # noqa: F401
-import isaaclab_neural.envs  # noqa: F401 - registers NeRD gym tasks
 from isaaclab_tasks.utils import (
     add_launcher_args,
     get_checkpoint_path,

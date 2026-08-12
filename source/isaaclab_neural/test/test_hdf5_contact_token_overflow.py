@@ -23,12 +23,8 @@ def _token_rollouts(*, num_envs: int = 4, trajectory_length: int = 3, max_tokens
         "root_body_q": torch.zeros((num_envs, trajectory_length, 7)),
         "root_body_qd": torch.zeros((num_envs, trajectory_length, 6)),
         "gravity_dir": torch.zeros((num_envs, trajectory_length, 3)),
-        "contact_token_body_ids": torch.full(
-            (num_envs, trajectory_length, max_tokens), -1, dtype=torch.long
-        ),
-        "contact_token_world_ids": torch.full(
-            (num_envs, trajectory_length, max_tokens), -1, dtype=torch.long
-        ),
+        "contact_token_body_ids": torch.full((num_envs, trajectory_length, max_tokens), -1, dtype=torch.long),
+        "contact_token_world_ids": torch.full((num_envs, trajectory_length, max_tokens), -1, dtype=torch.long),
         "trajectory_context": {
             "state_world_id": world_ids,
             "root_world_id": world_ids,

@@ -62,15 +62,13 @@ def _evaluator(
 
 
 def _trajectories(recorded_contacts: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    trajectories = {
-        key: value.unsqueeze(1) for key, value in recorded_contacts.items()
-    }
+    trajectories = {key: value.unsqueeze(1) for key, value in recorded_contacts.items()}
     trajectories.update(
         {
-        "_dataset_trajectory_index": torch.tensor([11, 22]),
-        "_dataset_window_start": torch.tensor([30, 40]),
-        "terrain_level": torch.tensor([1, 2]),
-        "terrain_type": torch.tensor([3, 4]),
+            "_dataset_trajectory_index": torch.tensor([11, 22]),
+            "_dataset_window_start": torch.tensor([30, 40]),
+            "terrain_level": torch.tensor([1, 2]),
+            "terrain_type": torch.tensor([3, 4]),
         }
     )
     return trajectories

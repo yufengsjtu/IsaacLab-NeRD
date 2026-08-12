@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import time
+from contextlib import contextmanager
 
 import torch
 

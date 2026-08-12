@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -8,16 +13,14 @@
 # its affiliates is strictly prohibited.
 
 
-from typing import List
-
 import torch
-from torch import nn, Tensor
+from torch import Tensor, nn
 
 
 class KAN(nn.Module):
     def __init__(
         self,
-        layers_hidden: List[int],
+        layers_hidden: list[int],
         grid_num: int = 5,
         order: int = 3,
         scale_noise: float = 0.1,
@@ -25,16 +28,14 @@ class KAN(nn.Module):
         scale_spline: float = 1.0,
         enable_standalone_scale_spline: bool = True,
         base_activation=torch.nn.SiLU,
-        grid_range: List[float] = [-1, 1],
+        grid_range: list[float] = [-1, 1],
     ):
         try:
             from warpkan.torch.kan import KANLinear
         except ImportError:
-            raise ImportError(
-                "Please install warpkan to use KAN, see https://gitlab-master.nvidia.com/eheiden/warpkan"
-            )
+            raise ImportError("Please install warpkan to use KAN, see https://gitlab-master.nvidia.com/eheiden/warpkan")
 
-        super(KAN, self).__init__()
+        super().__init__()
         self.grid_num = grid_num
         self.order = order
 

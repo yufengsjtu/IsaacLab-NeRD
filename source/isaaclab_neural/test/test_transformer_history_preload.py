@@ -8,7 +8,6 @@
 from collections import deque
 
 import torch
-
 from isaaclab_neural.solvers.transformer_neural_solver import TransformerNeuralSolver
 
 

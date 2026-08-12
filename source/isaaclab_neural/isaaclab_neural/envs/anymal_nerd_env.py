@@ -11,7 +11,6 @@ from copy import deepcopy
 
 from isaaclab_newton.physics import NewtonCollisionPipelineCfg, NewtonShapeCfg
 
-import isaaclab.envs.mdp as base_mdp
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
@@ -19,15 +18,15 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils.configclass import configclass
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
+
+import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c.flat_env_cfg import AnymalCFlatEnvCfg
 from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c.rough_env_cfg import AnymalCRoughEnvCfg
-import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 
 from ..contacts.geometry_mdp import GeometryFeetAirTime, geometry_illegal_contact, geometry_undesired_contacts
 from .neural_env_wrapper import NerdManagerBasedRLEnv
-
 
 DEFAULT_ANYMAL_C_FLAT_NERD_MODEL_PATH = "./pre-trained_models/Anymal-C/nn/final_model.pt"
 DEFAULT_ANYMAL_C_ROUGH_NERD_MODEL_PATH = "./pre-trained_models/Anymal-C-Rough-Native/nn/final_model.pt"

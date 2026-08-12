@@ -1,6 +1,12 @@
-'''
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""
 reference: https://gist.github.com/kevinzakka/dd9fa5177cda13593524f4d71eb38ad5#file-spatial_softmax-py
-'''
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

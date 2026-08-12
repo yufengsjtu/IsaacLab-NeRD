@@ -1,9 +1,14 @@
-import numpy as np
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
 
-import warp as wp
 import newton
+import numpy as np
+import warp as wp
 
 from isaaclab_neural.contacts.kernels import collision_detection_ground_kernel
+
 
 def find_ground_shape_index(model: newton.Model) -> int:
     """Find the ground shape index (shape with body == -1).

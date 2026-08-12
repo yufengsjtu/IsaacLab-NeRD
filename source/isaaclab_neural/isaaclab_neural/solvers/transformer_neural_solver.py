@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2024 NVIDIA CORPORATION.  All rights reserved.
 # NVIDIA CORPORATION and its licensors retain all intellectual property
 # and proprietary rights in and to this software, related documentation
@@ -43,9 +48,7 @@ class TransformerNeuralSolver(NeuralSolver):
             )
         history_length = states.shape[1]
         if history_length == 0 or history_length > self.num_states_history:
-            raise ValueError(
-                f"History length must be between 1 and {self.num_states_history}, got {history_length}."
-            )
+            raise ValueError(f"History length must be between 1 and {self.num_states_history}, got {history_length}.")
 
         live_inputs = {
             "root_body_q": self.root_body_q,
@@ -68,8 +71,7 @@ class TransformerNeuralSolver(NeuralSolver):
         self.reset_states_history()
         for step in range(history_length):
             entry = {
-                key: value[:, step].to(device=self.torch_device).clone()
-                for key, value in normalized_history.items()
+                key: value[:, step].to(device=self.torch_device).clone() for key, value in normalized_history.items()
             }
             entry["states_embedding"] = self.embed_states(entry["states"])
             self.states_history.append(entry)
@@ -99,7 +101,9 @@ class TransformerNeuralSolver(NeuralSolver):
             normalized = torch.as_tensor(env_ids, device=self.torch_device, dtype=torch.long)
         return normalized.reshape(-1)
 
-    def sync_from_newton(self, newton_states: State, contacts: Contacts, joint_f, *, update_history: bool = True) -> None:
+    def sync_from_newton(
+        self, newton_states: State, contacts: Contacts, joint_f, *, update_history: bool = True
+    ) -> None:
         """Synchronize cached inputs, optionally without appending to history."""
         if update_history:
             self._update_states(newton_states, contacts, joint_f)

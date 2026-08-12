@@ -12,10 +12,6 @@ import logging
 import numpy as np
 import torch
 import warp as wp
-from newton import JointType
-from torch.utils.data import default_collate
-from tqdm import tqdm
-
 from isaaclab_neural.data import TrajectoryDataset
 from isaaclab_neural.eval.contact_set_matching import (
     contact_set_matching_metrics,
@@ -23,6 +19,9 @@ from isaaclab_neural.eval.contact_set_matching import (
     match_contact_tokens_by_identity,
 )
 from isaaclab_neural.utils.commons import JOINT_F_LIM, JOINT_Q_MAX, JOINT_Q_MIN, JOINT_QD_LIM
+from newton import JointType
+from torch.utils.data import default_collate
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +53,7 @@ class TrainingRolloutEvaluator:
             )
         if contact_context_validation not in ("strict", "warn"):
             raise ValueError(
-                "contact_context_validation must be 'strict' or 'warn', "
-                f"got {contact_context_validation!r}."
+                f"contact_context_validation must be 'strict' or 'warn', got {contact_context_validation!r}."
             )
         self.contact_context_validation = contact_context_validation
         self.state_context_tolerance = state_context_tolerance
@@ -182,7 +180,9 @@ class TrainingRolloutEvaluator:
         env = self.neural_env
         num_envs = env.num_envs
         total_traj = max(num_envs, ((num_traj + num_envs - 1) // num_envs) * num_envs)
-        controls_dim = env.unwrapped.action_space.shape[-1] if control_key == "actions" else env.solver_neural.joint_f_dim
+        controls_dim = (
+            env.unwrapped.action_space.shape[-1] if control_key == "actions" else env.solver_neural.joint_f_dim
+        )
         states = torch.empty((total_traj, self.eval_horizon, env.solver_neural.state_dim), device=self.device)
         next_states = torch.empty_like(states)
         controls = torch.empty((total_traj, self.eval_horizon, controls_dim), device=self.device)
@@ -230,8 +230,12 @@ class TrainingRolloutEvaluator:
             action_dim = action_shape[-1]
             if passive:
                 return torch.zeros((num_envs, action_dim), device=self.device)
-            low = torch.as_tensor(self.neural_env.unwrapped.action_space.low, device=self.device, dtype=torch.float32).flatten()
-            high = torch.as_tensor(self.neural_env.unwrapped.action_space.high, device=self.device, dtype=torch.float32).flatten()
+            low = torch.as_tensor(
+                self.neural_env.unwrapped.action_space.low, device=self.device, dtype=torch.float32
+            ).flatten()
+            high = torch.as_tensor(
+                self.neural_env.unwrapped.action_space.high, device=self.device, dtype=torch.float32
+            ).flatten()
             low = low[-action_dim:]
             high = high[-action_dim:]
             action = torch.rand((num_envs, action_dim), device=self.device)
@@ -263,9 +267,9 @@ class TrainingRolloutEvaluator:
 
         history_offset = self._history_offset(trajectories)
         initial_states = trajectories["states"][:total_traj, history_offset, :].to(self.device)
-        controls = trajectories[control_key][
-            :total_traj, history_offset : history_offset + self.eval_horizon
-        ].to(self.device)
+        controls = trajectories[control_key][:total_traj, history_offset : history_offset + self.eval_horizon].to(
+            self.device
+        )
         target_next_states = trajectories["next_states"][
             :total_traj, history_offset : history_offset + self.eval_horizon
         ].to(self.device)
@@ -320,9 +324,7 @@ class TrainingRolloutEvaluator:
         root_body_qd = trajectories.get("root_body_qd")
         if self.require_terrain_context and (root_body_q is None or root_body_qd is None):
             missing = [
-                key
-                for key, value in (("root_body_q", root_body_q), ("root_body_qd", root_body_qd))
-                if value is None
+                key for key, value in (("root_body_q", root_body_q), ("root_body_qd", root_body_qd)) if value is None
             ]
             raise ValueError(f"Strict rollout evaluation is missing root context fields: {missing}.")
         self.neural_env.neural_adapter.reset(
@@ -367,12 +369,7 @@ class TrainingRolloutEvaluator:
             raise ValueError(
                 f"Rollout history offset {history_offset} cannot preload {self.history_length - 1} prior frames."
             )
-        preload(
-            {
-                key: trajectories[key][start:end, history_start:history_offset].to(self.device)
-                for key in keys
-            }
-        )
+        preload({key: trajectories[key][start:end, history_start:history_offset].to(self.device) for key in keys})
 
     def _restore_terrain_context(
         self,
@@ -399,8 +396,7 @@ class TrainingRolloutEvaluator:
             return
 
         has_curriculum_terrain = (
-            getattr(terrain, "terrain_levels", None) is not None
-            and getattr(terrain, "terrain_types", None) is not None
+            getattr(terrain, "terrain_levels", None) is not None and getattr(terrain, "terrain_types", None) is not None
         )
         if self.require_terrain_context and not has_curriculum_terrain:
             raise ValueError(
@@ -409,16 +405,10 @@ class TrainingRolloutEvaluator:
                 "only provides a flat/grid layout."
             )
         if has_curriculum_terrain:
-            terrain.terrain_levels[: end - start].copy_(
-                trajectories["terrain_level"][start:end].to(terrain.device)
-            )
-            terrain.terrain_types[: end - start].copy_(
-                trajectories["terrain_type"][start:end].to(terrain.device)
-            )
+            terrain.terrain_levels[: end - start].copy_(trajectories["terrain_level"][start:end].to(terrain.device))
+            terrain.terrain_types[: end - start].copy_(trajectories["terrain_type"][start:end].to(terrain.device))
         if getattr(terrain, "env_origins", None) is not None:
-            terrain.env_origins[: end - start].copy_(
-                trajectories["env_origin"][start:end].to(terrain.device)
-            )
+            terrain.env_origins[: end - start].copy_(trajectories["env_origin"][start:end].to(terrain.device))
 
     def _validate_runtime_state_context(
         self,
@@ -517,17 +507,12 @@ class TrainingRolloutEvaluator:
         runtime_mask = runtime_contacts["contact_masks"]
         mask_mismatch = dataset_mask != runtime_mask
         normal_slot_error = slot_max_errors["contact_normals"]
-        other_slot_errors = [
-            error for key, error in slot_max_errors.items() if key != "contact_normals"
-        ]
+        other_slot_errors = [error for key, error in slot_max_errors.items() if key != "contact_normals"]
         slots_match = (
             not mask_mismatch.any()
             and np.isfinite(normal_slot_error)
             and normal_slot_error <= self.contact_context_normal_tolerance
-            and all(
-                np.isfinite(error) and error <= self.contact_context_tolerance
-                for error in other_slot_errors
-            )
+            and all(np.isfinite(error) and error <= self.contact_context_tolerance for error in other_slot_errors)
         )
         if slots_match:
             return
@@ -556,9 +541,7 @@ class TrainingRolloutEvaluator:
         for local_env in torch.nonzero(suspect_envs, as_tuple=False).flatten()[:8].tolist():
             slot_indices = torch.nonzero(mask_mismatch[local_env], as_tuple=False).flatten().tolist()
             batch_index = start + local_env
-            trajectory_index = int(
-                trajectories.get("_dataset_trajectory_index", torch.full((end,), -1))[batch_index]
-            )
+            trajectory_index = int(trajectories.get("_dataset_trajectory_index", torch.full((end,), -1))[batch_index])
             window_start = int(trajectories.get("_dataset_window_start", torch.full((end,), -1))[batch_index])
             terrain_level = int(trajectories.get("terrain_level", torch.full((end,), -1))[batch_index])
             terrain_type = int(trajectories.get("terrain_type", torch.full((end,), -1))[batch_index])
@@ -576,8 +559,7 @@ class TrainingRolloutEvaluator:
             f"hausdorff_max={set_metrics['set_hausdorff_distance_max']:.6g}, "
             f"matched_normal_max={set_metrics['matched_normal_l2_max']:.6g}, "
             f"matched_depth_max={set_metrics['matched_depth_abs_max']:.6g}, "
-            f"unique_count_diff_max={set_metrics['unique_count_abs_diff_max']:.6g}; "
-            + " | ".join(detail_rows)
+            f"unique_count_diff_max={set_metrics['unique_count_abs_diff_max']:.6g}; " + " | ".join(detail_rows)
         )
         if failures:
             message = "Runtime contact-set geometry mismatch: " + "; ".join(failures) + f". Diagnostics: {summary}"
@@ -635,9 +617,7 @@ class TrainingRolloutEvaluator:
             return float(error.max()) if error.numel() else 0.0
 
         runtime_overflow = solver.contacts["contact_token_overflow"]
-        dataset_overflow = trajectories["contact_token_overflow"][start:end, history_offset].to(
-            runtime_overflow.device
-        )
+        dataset_overflow = trajectories["contact_token_overflow"][start:end, history_offset].to(runtime_overflow.device)
         overflow_mismatch = dataset_overflow != runtime_overflow
         geometry_mismatch_per_env = torch.zeros(end - start, dtype=torch.bool, device=runtime_tokens.device)
         if geometry_mismatch.any():
@@ -660,9 +640,7 @@ class TrainingRolloutEvaluator:
         detail_rows = []
         for local_env in torch.nonzero(suspect_envs, as_tuple=False).flatten()[:8].tolist():
             batch_index = start + local_env
-            trajectory_index = int(
-                trajectories.get("_dataset_trajectory_index", torch.full((end,), -1))[batch_index]
-            )
+            trajectory_index = int(trajectories.get("_dataset_trajectory_index", torch.full((end,), -1))[batch_index])
             window_start = int(trajectories.get("_dataset_window_start", torch.full((end,), -1))[batch_index])
             terrain_level = int(trajectories.get("terrain_level", torch.full((end,), -1))[batch_index])
             terrain_type = int(trajectories.get("terrain_type", torch.full((end,), -1))[batch_index])
@@ -684,8 +662,7 @@ class TrainingRolloutEvaluator:
             f"lever_l2_max={active_max(lever_error):.6g}, "
             f"gap_abs_max={active_max(gap_error):.6g}, "
             f"relative_velocity_l2_max={active_max(velocity_error):.6g}, "
-            f"overflow_mismatches={int(overflow_mismatch.sum())}; "
-            + " | ".join(detail_rows)
+            f"overflow_mismatches={int(overflow_mismatch.sum())}; " + " | ".join(detail_rows)
         )
         if self.contact_context_validation == "strict":
             raise ValueError(message)

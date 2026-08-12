@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 """Package the current IsaacLab-NeRD source tree for OSMO."""
 
 from __future__ import annotations
 
 import argparse
 import fnmatch
-from pathlib import Path
 import subprocess
 import tarfile
-
+from pathlib import Path
 
 EXCLUDED_DIRS_ANYWHERE = {
     ".cache",
