@@ -399,6 +399,11 @@ class VanillaTrainer:
         env_cfg = self.cfg.get("env", {})
         algo_cfg = self.cfg.get("algorithm", {})
         solver_cfg = env_cfg.get("neural_solver_cfg", {})
+        inputs_cfg = self.cfg.get("inputs", {})
+        contact_cfg = inputs_cfg.get("contact_set", {})
+        network_cfg = self.cfg.get("network", {})
+        transformer_cfg = network_cfg.get("transformer", {})
+        model_cfg = network_cfg.get("model", {})
         return {
             "env_name": env_cfg.get("env_name"),
             "robot_name": env_cfg.get("robot_name"),
@@ -406,11 +411,22 @@ class VanillaTrainer:
             "contact_mode": solver_cfg.get("contact_mode"),
             "num_contacts_per_env": solver_cfg.get("num_contacts_per_env"),
             "algorithm": algo_cfg.get("name"),
+            "seed": self.seed,
             "batch_size": algo_cfg.get("batch_size"),
             "num_epochs": algo_cfg.get("num_epochs"),
+            "num_iters_per_epoch": getattr(self, "num_iters_per_epoch", algo_cfg.get("num_iters_per_epoch")),
+            "dataset_max_capacity": self.dataset_max_capacity,
             "lr_start": algo_cfg.get("optimizer", {}).get("lr_start"),
             "lr_end": algo_cfg.get("optimizer", {}).get("lr_end"),
             "lr_schedule": algo_cfg.get("optimizer", {}).get("lr_schedule"),
+            "model_num_parameters": num_params_torch_model(self.neural_model),
+            "contact_encoder_type": contact_cfg.get("encoder_type"),
+            "contact_body_latent_dim": contact_cfg.get("body_latent_dim"),
+            "contact_hidden_dim": contact_cfg.get("hidden_dim"),
+            "transformer_n_layer": transformer_cfg.get("n_layer"),
+            "transformer_n_head": transformer_cfg.get("n_head"),
+            "transformer_n_embd": transformer_cfg.get("n_embd"),
+            "model_mlp_layer_sizes": model_cfg.get("mlp", {}).get("layer_sizes"),
         }
 
     def _init_evaluator(self, algo_cfg: dict[str, Any], cli_cfg: dict[str, Any]) -> None:

@@ -290,6 +290,66 @@ Training hyperparameters remain in the training YAML files under
 `source/isaaclab_neural/isaaclab_neural/train/cfg/`; presets select which config
 to run and how much data/runtime resource to use.
 
+### Rough Shared-Per-Body Ablation
+
+The rough shared-per-body ablation compares large, medium, and small models
+using either 20 million or 10 million training transitions. All six conditions
+reuse one complete 20-million-transition contact-token dataset. The 10-million
+conditions load a deterministic trajectory prefix and use half as many
+iterations per epoch to preserve the number of passes over the training data.
+
+Set the existing Swift dataset prefix and common submission options:
+
+```bash
+export ABLATION_DATASET_SUBDIR=contact-ablation-20260812-020518-rough-token
+export ABLATION_TAG=rough-shared-ablation
+export POOL=<osmo-pool>
+
+COMMON_ARGS=(
+  --storage-backend swift
+  --dataset-subdir "$ABLATION_DATASET_SUBDIR"
+  --dataset-cache-mode require
+  --num-cpu 80
+  --memory 512Gi
+  --storage 512Gi
+  --enable-wandb
+  --wandb-project nerd-contact-ablation
+  --pool "$POOL"
+)
+```
+
+Submit the six conditions sequentially; their workflows may run concurrently:
+
+```bash
+./osmo_scripts/start.sh "${COMMON_ARGS[@]}" \
+  --preset anymal_rough_newton_native_shared_per_body \
+  --wandb-exp-name "$ABLATION_TAG-large-20m"
+
+./osmo_scripts/start.sh "${COMMON_ARGS[@]}" \
+  --preset anymal_rough_newton_native_shared_per_body_10m \
+  --wandb-exp-name "$ABLATION_TAG-large-10m"
+
+./osmo_scripts/start.sh "${COMMON_ARGS[@]}" \
+  --preset anymal_rough_newton_native_shared_per_body_medium \
+  --wandb-exp-name "$ABLATION_TAG-medium-20m"
+
+./osmo_scripts/start.sh "${COMMON_ARGS[@]}" \
+  --preset anymal_rough_newton_native_shared_per_body_medium_10m \
+  --wandb-exp-name "$ABLATION_TAG-medium-10m"
+
+./osmo_scripts/start.sh "${COMMON_ARGS[@]}" \
+  --preset anymal_rough_newton_native_shared_per_body_small \
+  --wandb-exp-name "$ABLATION_TAG-small-20m"
+
+./osmo_scripts/start.sh "${COMMON_ARGS[@]}" \
+  --preset anymal_rough_newton_native_shared_per_body_small_10m \
+  --wandb-exp-name "$ABLATION_TAG-small-10m"
+```
+
+The large, medium, and small models use approximately 10.94M, 3.31M, and
+1.42M parameters, respectively. Keep the training seed fixed when comparing
+the six conditions.
+
 ## Add a New Environment
 
 1. Create a preset file in `osmo_scripts/presets/`, for example

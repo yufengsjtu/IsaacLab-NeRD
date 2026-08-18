@@ -85,9 +85,14 @@ def test_eager_sharding_applies_global_max_capacity_before_rank_split(tmp_path) 
     path = tmp_path / "tokens.hdf5"
     _write_token_dataset(path)
 
+    full = TrajectoryDataset(path, sample_sequence_length=2, max_capacity=20)
+    limited = TrajectoryDataset(path, sample_sequence_length=2, max_capacity=12)
     shard0 = TrajectoryDataset(path, sample_sequence_length=2, max_capacity=12, rank=0, world_size=2)
     shard1 = TrajectoryDataset(path, sample_sequence_length=2, max_capacity=12, rank=1, world_size=2)
 
+    assert full.global_trajectory_indices.tolist() == [0, 1, 2, 3, 4]
+    assert limited.global_trajectory_indices.tolist() == [0, 1, 2]
+    np.testing.assert_array_equal(limited.dataset["states"][:, 0, 0], np.array([0.0, 1.0, 2.0]))
     assert shard0.global_trajectory_indices.tolist() == [0, 2]
     assert shard1.global_trajectory_indices.tolist() == [1]
 
