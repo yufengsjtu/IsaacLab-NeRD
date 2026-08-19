@@ -360,6 +360,7 @@ def test_active15_lr_variant_and_osmo_presets_share_one_dataset() -> None:
     )
     assert dataset_preset["experiment"]["dataset_only"] is True
     assert dataset_preset["resources"]["num_gpu"] == 1
+    assert dataset_preset["resources"]["num_cpu"] == 15
 
 
 def test_active15_production_config_forward_backward_and_checkpoint(tmp_path: Path) -> None:

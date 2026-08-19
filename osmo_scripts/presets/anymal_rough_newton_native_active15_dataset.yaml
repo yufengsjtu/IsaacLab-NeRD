@@ -9,7 +9,7 @@ workflow:
 
 resources:
   num_gpu: 1
-  num_cpu: 32
+  num_cpu: 15
   memory: 180Gi
   storage: 256Gi
   platform: ovx-l40
