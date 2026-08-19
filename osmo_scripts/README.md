@@ -143,7 +143,7 @@ Generate once to standalone Swift while retaining the same files on Lustre:
   --preset anymal_rough_newton_native_active15_dataset \
   --storage-backend osmo_data \
   --dataset-cache-mode off \
-  --amlfs-data-root /mnt/amlfs-04/home/jiex/isaaclab-nerd-rowan/datasets \
+  --amlfs-data-root /mnt/amlfs-04/home/jiex/data/datasets \
   --pool isaac-srl-l40-04 \
   --priority NORMAL
 ```
