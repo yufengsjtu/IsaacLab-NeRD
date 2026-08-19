@@ -17,14 +17,19 @@ from .contact_set_schema import (
     ACTIVE15_TOKEN_DIM,
     CONTACT_REPRESENTATION_ACTIVE15,
     CONTACT_REPRESENTATION_FLAT,
+    CONTACT_REPRESENTATION_RAW15,
     CONTACT_REPRESENTATION_TOKENS,
     CONTACT_TOKEN_DIM,
     CONTACT_TOKEN_FEATURE_NAMES,
     DEFAULT_MAX_CONTACT_TOKENS,
+    RAW15_FEATURE_DIM,
+    RAW15_FEATURE_NAMES,
+    RAW15_TOKEN_DIM,
 )
 from .contact_utils import collision_detection_fixed_ground, find_ground_shape_index
 from .newton_contact_adapter import NewtonContactAdapter
 from .packing import ContactPackingPolicy, get_contact_order, resolve_contact_packing_policy
+from .raw15_contact_encoder import Raw15ContactEncoder
 
 __all__ = [
     "AbstractContact",
@@ -34,6 +39,7 @@ __all__ = [
     "Active15ContactEncoder",
     "CONTACT_REPRESENTATION_ACTIVE15",
     "CONTACT_REPRESENTATION_FLAT",
+    "CONTACT_REPRESENTATION_RAW15",
     "CONTACT_REPRESENTATION_TOKENS",
     "CONTACT_TOKEN_DIM",
     "CONTACT_TOKEN_FEATURE_NAMES",
@@ -41,6 +47,10 @@ __all__ = [
     "ContactSetEncoder",
     "DEFAULT_MAX_CONTACT_TOKENS",
     "NewtonContactAdapter",
+    "RAW15_FEATURE_DIM",
+    "RAW15_FEATURE_NAMES",
+    "RAW15_TOKEN_DIM",
+    "Raw15ContactEncoder",
     "collision_detection_fixed_ground",
     "contact_token_validity_mask",
     "find_ground_shape_index",

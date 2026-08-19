@@ -20,6 +20,7 @@ from isaaclab_neural.contacts.tensor_utils import (
 from isaaclab_neural.models.base_models import CNNBase, GRUBase, LSTMBase, MLPBase
 from isaaclab_neural.models.body_routed_active15_model import BodyRoutedActive15Encoder
 from isaaclab_neural.models.body_routed_contact_model import BodyRoutedContactEncoder
+from isaaclab_neural.models.body_routed_raw15_model import BodyRoutedRaw15Encoder
 from isaaclab_neural.models.contact_set_model import ContactSetEncoderBlock
 from isaaclab_neural.models.model_kan import KAN
 from isaaclab_neural.models.model_transformer import GPT, GPTConfig
@@ -73,13 +74,18 @@ class ModelMixedInput(nn.Module):
         self.normalize_output = network_cfg.get("normalize_output", False)
 
         encoder_type = input_cfg.get("contact_set", {}).get("encoder_type")
-        active15_encoder = encoder_type == "body_routed_active15"
-        active15_representation = contact_representation == "active15_tokens"
-        if contact_representation is not None and active15_encoder != active15_representation:
-            raise ValueError(
-                "contact_representation='active15_tokens' and "
-                "contact_set encoder_type='body_routed_active15' must be configured together."
-            )
+        native15_encoder_pairs = {
+            "active15_tokens": "body_routed_active15",
+            "raw15_tokens": "body_routed_raw15",
+        }
+        if contact_representation is not None:
+            expected_encoder = native15_encoder_pairs.get(contact_representation)
+            configured_native15_encoder = encoder_type in native15_encoder_pairs.values()
+            if (expected_encoder is not None or configured_native15_encoder) and encoder_type != expected_encoder:
+                raise ValueError(
+                    "Raw15/Active15 contact representations and their body-routed "
+                    "encoder types must be configured together."
+                )
 
         self.encoders, self.feature_dim = self.construct_input_encoders(
             input_cfg,
@@ -234,7 +240,7 @@ class ModelMixedInput(nn.Module):
                     max_other_bodies=int(contact_cfg.get("max_other_bodies", 32)),
                     device=device,
                 )
-            elif encoder_type == "body_routed_active15":
+            elif encoder_type in {"body_routed_raw15", "body_routed_active15"}:
                 configured_num_bodies = contact_cfg.get("num_bodies")
                 if num_bodies is not None and configured_num_bodies is not None:
                     if int(configured_num_bodies) != int(num_bodies):
@@ -244,12 +250,15 @@ class ModelMixedInput(nn.Module):
                 resolved_num_bodies = num_bodies if num_bodies is not None else configured_num_bodies
                 if resolved_num_bodies is None:
                     raise ValueError(
-                        "contact_set encoder_type='body_routed_active15' requires num_bodies "
+                        f"contact_set encoder_type='{encoder_type}' requires num_bodies "
                         "from runtime metadata or config."
                     )
                 if contact_dim != ACTIVE15_TOKEN_DIM:
-                    raise ValueError("body_routed_active15 requires the canonical padded Active15 schema.")
-                self.contact_set_encoder = BodyRoutedActive15Encoder(
+                    raise ValueError(f"{encoder_type} requires the canonical padded native15 schema.")
+                encoder_class = (
+                    BodyRoutedRaw15Encoder if encoder_type == "body_routed_raw15" else BodyRoutedActive15Encoder
+                )
+                self.contact_set_encoder = encoder_class(
                     num_bodies=int(resolved_num_bodies),
                     body_latent_dim=int(contact_cfg.get("body_latent_dim", 64)),
                     hidden_dim=int(contact_cfg.get("hidden_dim", 32)),
@@ -259,7 +268,7 @@ class ModelMixedInput(nn.Module):
                 raise ValueError(
                     f"Unsupported contact_set encoder_type '{encoder_type}'. "
                     "Expected 'global_attention', 'shared_per_body', 'body_routed', "
-                    "or 'body_routed_active15'."
+                    "'body_routed_raw15', or 'body_routed_active15'."
                 )
             encoders["contact_set"] = self.contact_set_encoder
 
@@ -326,7 +335,10 @@ class ModelMixedInput(nn.Module):
                 contact_features = self.encoders[input_name](input_dict["contact_tokens"])
                 if isinstance(
                     self.encoders[input_name],
-                    SharedPerBodyContactEncoder | BodyRoutedContactEncoder | BodyRoutedActive15Encoder,
+                    SharedPerBodyContactEncoder
+                    | BodyRoutedContactEncoder
+                    | BodyRoutedActive15Encoder
+                    | BodyRoutedRaw15Encoder,
                 ):
                     contact_features = contact_features.flatten(start_dim=-2)
                 features.append(contact_features)
@@ -379,7 +391,7 @@ class ModelMixedInput(nn.Module):
                 if not torch.is_floating_point(input_dict[obs_key]):
                     continue
                 if obs_key == "contact_tokens":
-                    # Active15 has two categorical channels; token17 has four.
+                    # Native15 has two categorical channels; token17 has four.
                     noise = torch.randn_like(input_dict[obs_key]) * 0.01
                     categorical_channels = 2 if isinstance(self.contact_set_encoder, BodyRoutedActive15Encoder) else 4
                     noise[..., :categorical_channels] = 0.0

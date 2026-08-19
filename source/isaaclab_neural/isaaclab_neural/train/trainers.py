@@ -27,6 +27,7 @@ from tqdm import tqdm
 from isaaclab_neural.contacts.contact_set_schema import (
     ACTIVE15_CATEGORICAL_CHANNELS,
     CONTACT_REPRESENTATION_ACTIVE15,
+    CONTACT_REPRESENTATION_RAW15,
 )
 from isaaclab_neural.contacts.tensor_utils import (
     MIN_CONTACT_RMS_SAMPLES,
@@ -586,7 +587,8 @@ class VanillaTrainer:
                     if contact_token_moments is None:
                         categorical_channels = (
                             ACTIVE15_CATEGORICAL_CHANNELS
-                            if self.neural_solver.contact_representation == CONTACT_REPRESENTATION_ACTIVE15
+                            if self.neural_solver.contact_representation
+                            in {CONTACT_REPRESENTATION_RAW15, CONTACT_REPRESENTATION_ACTIVE15}
                             else None
                         )
                         contact_token_moments = ContactTokenMoments(

@@ -18,6 +18,10 @@ import isaaclab_neural.envs  # noqa: F401 - registers built-in NeRD tasks
 import numpy as np
 import torch
 import warp as wp
+from isaaclab_neural.contacts.contact_set_schema import (
+    is_contact_token_representation,
+    is_native15_contact_representation,
+)
 from isaaclab_neural.data import (
     build_terrain_context,
     read_terrain_context,
@@ -109,7 +113,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--contact-representation",
-        choices=("flat", "contact_tokens", "active15_tokens"),
+        choices=("flat", "contact_tokens", "raw15_tokens", "active15_tokens"),
         default="flat",
     )
     parser.add_argument("--max-contact-tokens", type=int, default=64)
@@ -491,8 +495,8 @@ def contact_token_metrics(
 
     dataset_valid = dataset_tokens[..., 0] > 0.5
     runtime_valid = runtime_tokens[..., 0] > 0.5
-    is_active15 = contact_representation == "active15_tokens"
-    if is_active15:
+    is_native15 = is_native15_contact_representation(contact_representation)
+    if is_native15:
         matches = match_contact_tokens_by_identity(
             dataset_tokens,
             runtime_tokens,
@@ -1111,7 +1115,7 @@ def run_diagnostic(env, args: argparse.Namespace) -> None:
     """Run dataset-contact and runtime-contact one-step A/B predictions."""
     solver = env.neural_adapter.solver
     history_length = int(getattr(solver, "num_states_history", 1))
-    is_contact_tokens = getattr(solver, "contact_representation", "flat") in {"contact_tokens", "active15_tokens"}
+    is_contact_tokens = is_contact_token_representation(getattr(solver, "contact_representation", "flat"))
     print(
         "[setup] "
         f"dataset={args.dataset}, checkpoint={args.checkpoint or 'none'}, num_envs={args.num_envs}, "

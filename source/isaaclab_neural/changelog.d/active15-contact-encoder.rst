@@ -1,10 +1,10 @@
-Active15 body-routed contact encoding
--------------------------------------
+Added
+^^^^^
 
-Added an owner-body-frame Active15 contact representation and the original
-shared-phi, per-body sum-pooling, shared-rho encoder. The representation keeps
-Newton's solver-active contact gate, raw-point midpoint relative velocity, full
-contact margins, independent HDF5 metadata, and an A-only categorical
-normalization path. OSMO presets support generation to standalone Swift while
-retaining the same dataset in pool-wide Lustre, followed by Lustre-first
-multi-seed training.
+* Added owner-body-frame Raw15 and Active15 contact representations with the
+  original shared-phi, per-body sum-pooling, shared-rho encoder. Raw15 keeps all
+  canonical raw Newton candidates, while Active15 retains Newton's solver-active
+  contact gate. Both use raw-point midpoint relative velocity, full contact
+  margins, independent HDF5 metadata, and representation-specific categorical
+  normalization. OSMO presets support generation to standalone Swift followed
+  by Lustre-first multi-seed training.

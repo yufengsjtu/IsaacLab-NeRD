@@ -101,7 +101,11 @@ def dataset_cache_complete(
         if not h5py.is_hdf5(dataset_path):
             print(f"Rejected malformed cached dataset: {dataset_path}")
             return False
-        require_tokens = experiment.get("contact_representation", "flat") in {"contact_tokens", "active15_tokens"}
+        require_tokens = experiment.get("contact_representation", "flat") in {
+            "contact_tokens",
+            "raw15_tokens",
+            "active15_tokens",
+        }
         require_terrain_context = bool(experiment.get("require_terrain_context", False))
         with h5py.File(dataset_path, "r") as handle:
             if "data" not in handle:
@@ -158,17 +162,26 @@ def dataset_cache_complete(
                 }
                 missing_token_fields = sorted(required_token_fields - set(data_group.keys()))
                 expected_representation = str(experiment.get("contact_representation", "contact_tokens"))
-                expected_frame = "owner_body_v1" if expected_representation == "active15_tokens" else "world_v1"
-                active15_metadata_ok = True
-                if expected_representation == "active15_tokens":
-                    active15_metadata_ok = all(
-                        str(data_group.attrs.get(key, "")) == value
-                        for key, value in {
-                            "contact_schema": "active15_owner_body_v1",
-                            "contact_frame": "owner_body_v1",
-                            "contact_velocity_point": "raw_point_midpoint_v1",
-                            "contact_selection": "mujoco_solver_included_v1",
-                        }.items()
+                native15_metadata = {
+                    "active15_tokens": {
+                        "contact_schema": "active15_owner_body_v1",
+                        "contact_selection": "mujoco_solver_included_v1",
+                    },
+                    "raw15_tokens": {
+                        "contact_schema": "raw15_owner_body_v1",
+                        "contact_selection": "newton_raw_candidates_v1",
+                    },
+                }
+                expected_frame = "owner_body_v1" if expected_representation in native15_metadata else "world_v1"
+                native15_metadata_ok = True
+                if expected_representation in native15_metadata:
+                    expected_metadata = {
+                        **native15_metadata[expected_representation],
+                        "contact_frame": "owner_body_v1",
+                        "contact_velocity_point": "raw_point_midpoint_v1",
+                    }
+                    native15_metadata_ok = all(
+                        str(data_group.attrs.get(key, "")) == value for key, value in expected_metadata.items()
                     )
                 if (
                     representation != expected_representation
@@ -176,7 +189,7 @@ def dataset_cache_complete(
                     or capacity != expected_capacity
                     or identity_schema != "world_owner_v1"
                     or token_frame != expected_frame
-                    or not active15_metadata_ok
+                    or not native15_metadata_ok
                     or missing_token_fields
                 ):
                     print(
@@ -357,7 +370,7 @@ def contact_args(experiment: dict) -> list[str]:
             "--contact-representation",
             representation,
         ]
-        if representation in {"contact_tokens", "active15_tokens"}:
+        if representation in {"contact_tokens", "raw15_tokens", "active15_tokens"}:
             args += [
                 "--max-contact-tokens",
                 str(experiment.get("max_contact_tokens", 64)),

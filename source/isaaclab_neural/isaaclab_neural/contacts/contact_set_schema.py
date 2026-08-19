@@ -44,6 +44,7 @@ DEFAULT_MAX_CONTACT_TOKENS = 64
 CONTACT_REPRESENTATION_FLAT = "flat"
 CONTACT_REPRESENTATION_TOKENS = "contact_tokens"
 CONTACT_REPRESENTATION_ACTIVE15 = "active15_tokens"
+CONTACT_REPRESENTATION_RAW15 = "raw15_tokens"
 
 ACTIVE15_TOKEN_DIM = 17
 ACTIVE15_FEATURE_DIM = 15
@@ -72,6 +73,23 @@ ACTIVE15_FEATURE_NAMES: tuple[str, ...] = (
 )
 
 
+# Raw15 and Active15 have the same owner-frame fields. Their only semantic
+# difference is whether the upstream extractor applies the solver-active gate.
+RAW15_TOKEN_DIM = ACTIVE15_TOKEN_DIM
+RAW15_FEATURE_DIM = ACTIVE15_FEATURE_DIM
+RAW15_CATEGORICAL_CHANNELS = ACTIVE15_CATEGORICAL_CHANNELS
+RAW15_FEATURE_SLICE = ACTIVE15_FEATURE_SLICE
+RAW15_VALID_INDEX = ACTIVE15_VALID_INDEX
+RAW15_BODY_SLOT_INDEX = ACTIVE15_BODY_SLOT_INDEX
+RAW15_GAP_INDEX = ACTIVE15_GAP_INDEX
+RAW15_FEATURE_NAMES = ACTIVE15_FEATURE_NAMES
+
+
+def is_native15_contact_representation(representation: str) -> bool:
+    """Return whether the representation uses the owner-frame native15 schema."""
+    return representation in {CONTACT_REPRESENTATION_RAW15, CONTACT_REPRESENTATION_ACTIVE15}
+
+
 def is_contact_token_representation(representation: str) -> bool:
     """Return whether the representation uses padded contact-token transport."""
-    return representation in {CONTACT_REPRESENTATION_TOKENS, CONTACT_REPRESENTATION_ACTIVE15}
+    return representation == CONTACT_REPRESENTATION_TOKENS or is_native15_contact_representation(representation)

@@ -17,7 +17,9 @@ import torch
 
 from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_REPRESENTATION_ACTIVE15,
+    CONTACT_REPRESENTATION_RAW15,
     CONTACT_REPRESENTATION_TOKENS,
+    is_native15_contact_representation,
 )
 
 
@@ -273,19 +275,31 @@ def _validate_append_target(
         expected_metadata = {
             "contact_representation": representation,
             "contact_token_frame": (
-                "owner_body_v1" if representation == CONTACT_REPRESENTATION_ACTIVE15 else "world_v1"
+                "owner_body_v1" if is_native15_contact_representation(representation) else "world_v1"
             ),
             "contact_identity_schema": "world_owner_v1",
         }
-        if representation == CONTACT_REPRESENTATION_ACTIVE15:
+        if is_native15_contact_representation(representation):
             expected_metadata.update(
                 {
-                    "contact_schema": "active15_owner_body_v1",
                     "contact_frame": "owner_body_v1",
                     "contact_velocity_point": "raw_point_midpoint_v1",
-                    "contact_selection": "mujoco_solver_included_v1",
                 }
             )
+            if representation == CONTACT_REPRESENTATION_ACTIVE15:
+                expected_metadata.update(
+                    {
+                        "contact_schema": "active15_owner_body_v1",
+                        "contact_selection": "mujoco_solver_included_v1",
+                    }
+                )
+            elif representation == CONTACT_REPRESENTATION_RAW15:
+                expected_metadata.update(
+                    {
+                        "contact_schema": "raw15_owner_body_v1",
+                        "contact_selection": "newton_raw_candidates_v1",
+                    }
+                )
         mismatched = {
             key: data_group.attrs.get(key)
             for key, expected in expected_metadata.items()
@@ -441,12 +455,16 @@ def _update_metadata(data_group: h5py.Group, contact_representation: str | None 
         )
         data_group.attrs["contact_representation"] = representation
         data_group.attrs["contact_identity_schema"] = "world_owner_v1"
-        if representation == CONTACT_REPRESENTATION_ACTIVE15:
-            data_group.attrs["contact_schema"] = "active15_owner_body_v1"
+        if is_native15_contact_representation(representation):
             data_group.attrs["contact_frame"] = "owner_body_v1"
             data_group.attrs["contact_token_frame"] = "owner_body_v1"
             data_group.attrs["contact_velocity_point"] = "raw_point_midpoint_v1"
-            data_group.attrs["contact_selection"] = "mujoco_solver_included_v1"
+            if representation == CONTACT_REPRESENTATION_ACTIVE15:
+                data_group.attrs["contact_schema"] = "active15_owner_body_v1"
+                data_group.attrs["contact_selection"] = "mujoco_solver_included_v1"
+            elif representation == CONTACT_REPRESENTATION_RAW15:
+                data_group.attrs["contact_schema"] = "raw15_owner_body_v1"
+                data_group.attrs["contact_selection"] = "newton_raw_candidates_v1"
         else:
             data_group.attrs["contact_token_frame"] = "world_v1"
         if "num_contacts_per_env" not in data_group.attrs:

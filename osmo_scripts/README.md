@@ -58,6 +58,11 @@ The launcher supports declarative presets in `osmo_scripts/presets/`:
   token HDF5 datasets and the contact-token transformer config.
 - `anymal_rough_newton_native_body_routed`: rough-terrain body-routed Deep Sets
   model that reuses the same canonical contact-token HDF5 datasets.
+- `anymal_rough_newton_native_raw15_dataset`: generate and upload the
+  owner-frame Raw15 dataset without starting training.
+- `anymal_rough_newton_native_raw15` and
+  `anymal_rough_newton_native_raw15_lr_1e-3`: train Raw15 with the two
+  requested learning-rate schedules on the dedicated Raw15 HDF5 dataset.
 - `anymal_rough_newton_native_active15_dataset`: generate and upload the
   owner-frame Active15 dataset without starting training.
 - `anymal_rough_newton_native_active15` and
@@ -125,9 +130,10 @@ workflow.
 Contact-related generation options come from each preset:
 
 - `contact_mode`: `fixed_ground` or `newton_native`.
-- `contact_representation`: `flat`, `contact_tokens`, or `active15_tokens`.
+- `contact_representation`: `flat`, `contact_tokens`, `raw15_tokens`, or
+  `active15_tokens`.
 - `num_contacts_per_env`: required for native contacts.
-- `max_contact_tokens`: padded capacity for either token representation.
+- `max_contact_tokens`: padded capacity for each token representation.
 - `contact_packing_policy`: native packing policy such as
   `penetration_priority`; token presets use
   `body_round_robin_pair_atomic`.

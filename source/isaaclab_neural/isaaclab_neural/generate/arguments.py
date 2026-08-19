@@ -73,7 +73,7 @@ def get_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--contact-representation",
-        choices=["flat", "contact_tokens", "active15_tokens"],
+        choices=["flat", "contact_tokens", "raw15_tokens", "active15_tokens"],
         default="flat",
         help="Contact encoding stored in generated HDF5 datasets.",
     )

@@ -21,11 +21,13 @@ from isaaclab_neural.utils import torch_utils
 class Active15ContactEncoder(ContactSetEncoder):
     """Encode one owner-routed token for each solver-active robot contact."""
 
+    _solver_active_only = True
+
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         shape_margin = getattr(self.model, "shape_margin", None)
         if shape_margin is None:
-            raise ValueError("Active15 contact encoding requires model.shape_margin.")
+            raise ValueError("Native15 contact encoding requires model.shape_margin.")
         self._shape_margin = _as_torch_array(shape_margin, self.device).reshape(-1).to(dtype=torch.float32)
 
     def encode(
@@ -33,7 +35,7 @@ class Active15ContactEncoder(ContactSetEncoder):
         raw_contacts: dict[str, torch.Tensor],
         state: newton.State,
     ) -> torch.Tensor:
-        """Return padded [num_envs, max_contact_tokens, 17] Active15 tokens."""
+        """Return padded [num_envs, max_contact_tokens, 17] owner-frame native15 tokens."""
         count = raw_contacts["shape0"].shape[0]
         if count == 0:
             return self._empty_packed()
@@ -80,11 +82,12 @@ class Active15ContactEncoder(ContactSetEncoder):
             owner_velocity - other_velocity,
         )
 
-        # The adapter canonicalizes a unique primary side to side 0. Exclude
-        # robot self-collisions and retain exactly Newton's strict active gate.
-        valid = (
-            primary0 & ~primary1 & (owner_slot >= 0) & (world_id >= 0) & (world_id < self.num_envs) & (clearance < 0.0)
-        )
+        # The adapter canonicalizes a unique primary side to side 0. Both
+        # native15 views exclude robot self-collisions; Active15 additionally
+        # applies Newton's strict solver-active gate.
+        valid = primary0 & ~primary1 & (owner_slot >= 0) & (world_id >= 0) & (world_id < self.num_envs)
+        if self._solver_active_only:
+            valid &= clearance < 0.0
         candidates = torch.cat(
             (
                 valid.to(torch.float32).unsqueeze(-1),

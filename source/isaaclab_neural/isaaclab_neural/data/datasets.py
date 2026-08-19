@@ -18,6 +18,7 @@ from torch.utils.data import Dataset
 from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_REPRESENTATION_ACTIVE15,
     CONTACT_REPRESENTATION_FLAT,
+    CONTACT_REPRESENTATION_RAW15,
 )
 from isaaclab_neural.utils.commons import DATASET_MODES
 
@@ -84,17 +85,24 @@ def validate_contact_token_metadata(
         return
     token_frame = _decode_attr(data_group.attrs.get("contact_token_frame", ""))
     identity_schema = _decode_attr(data_group.attrs.get("contact_identity_schema", ""))
-    if representation == CONTACT_REPRESENTATION_ACTIVE15:
+    if representation in {CONTACT_REPRESENTATION_RAW15, CONTACT_REPRESENTATION_ACTIVE15}:
+        representation_name = "Raw15" if representation == CONTACT_REPRESENTATION_RAW15 else "Active15"
         if token_frame != "owner_body_v1" or identity_schema != "world_owner_v1":
             raise ValueError(
-                "Active15 dataset requires contact_token_frame='owner_body_v1' and "
+                f"{representation_name} dataset requires contact_token_frame='owner_body_v1' and "
                 "contact_identity_schema='world_owner_v1'; regenerate this dataset."
             )
         required_metadata = {
-            "contact_schema": "active15_owner_body_v1",
+            "contact_schema": (
+                "raw15_owner_body_v1" if representation == CONTACT_REPRESENTATION_RAW15 else "active15_owner_body_v1"
+            ),
             "contact_frame": "owner_body_v1",
             "contact_velocity_point": "raw_point_midpoint_v1",
-            "contact_selection": "mujoco_solver_included_v1",
+            "contact_selection": (
+                "newton_raw_candidates_v1"
+                if representation == CONTACT_REPRESENTATION_RAW15
+                else "mujoco_solver_included_v1"
+            ),
         }
         mismatched = {
             key: _decode_attr(data_group.attrs.get(key, ""))
@@ -102,7 +110,7 @@ def validate_contact_token_metadata(
             if _decode_attr(data_group.attrs.get(key, "")) != expected
         }
         if mismatched:
-            raise ValueError(f"Active15 dataset has incompatible metadata: {mismatched}.")
+            raise ValueError(f"{representation_name} dataset has incompatible metadata: {mismatched}.")
     elif token_frame != "world_v1" or identity_schema != "world_owner_v1":
         raise ValueError(
             "Contact-token dataset requires contact_token_frame='world_v1' and "

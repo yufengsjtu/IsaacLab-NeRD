@@ -16,11 +16,13 @@ from isaaclab_neural.contacts.contact_set_encoder import ContactSetEncoder
 from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_REPRESENTATION_ACTIVE15,
     CONTACT_REPRESENTATION_FLAT,
+    CONTACT_REPRESENTATION_RAW15,
     CONTACT_TOKEN_DIM,
     DEFAULT_MAX_CONTACT_TOKENS,
     is_contact_token_representation,
 )
 from isaaclab_neural.contacts.packing import ContactPackingPolicy, get_contact_order
+from isaaclab_neural.contacts.raw15_contact_encoder import Raw15ContactEncoder
 from isaaclab_neural.utils import torch_utils
 
 logger = logging.getLogger(__name__)
@@ -167,11 +169,11 @@ class NewtonContactAdapter:
         )
         self._token_encoder: ContactSetEncoder | None = None
         if is_contact_token_representation(self.contact_representation):
-            encoder_type = (
-                Active15ContactEncoder
-                if self.contact_representation == CONTACT_REPRESENTATION_ACTIVE15
-                else ContactSetEncoder
-            )
+            encoder_types = {
+                CONTACT_REPRESENTATION_ACTIVE15: Active15ContactEncoder,
+                CONTACT_REPRESENTATION_RAW15: Raw15ContactEncoder,
+            }
+            encoder_type = encoder_types.get(self.contact_representation, ContactSetEncoder)
             self._token_encoder = encoder_type(
                 model=model,
                 primary_body_mask=self.primary_body_mask,

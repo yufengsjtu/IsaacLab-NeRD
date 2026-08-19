@@ -152,12 +152,15 @@ def validate_cfg(cfg) -> None:
     neural_solver_name = cfg["env"]["neural_solver_cfg"]["name"]
     contact_representation = cfg["env"]["neural_solver_cfg"].get("contact_representation", "flat")
     encoder_type = cfg.get("inputs", {}).get("contact_set", {}).get("encoder_type")
-    active15_encoder = encoder_type == "body_routed_active15"
-    active15_representation = contact_representation == "active15_tokens"
-    if active15_encoder != active15_representation:
+    native15_encoder_pairs = {
+        "active15_tokens": "body_routed_active15",
+        "raw15_tokens": "body_routed_raw15",
+    }
+    expected_encoder = native15_encoder_pairs.get(contact_representation)
+    configured_native15_encoder = encoder_type in native15_encoder_pairs.values()
+    if (expected_encoder is not None or configured_native15_encoder) and encoder_type != expected_encoder:
         raise ValueError(
-            "contact_representation='active15_tokens' and "
-            "contact_set encoder_type='body_routed_active15' must be configured together."
+            "Raw15/Active15 contact representations and their body-routed encoder types must be configured together."
         )
     if "transformer" in cfg["network"]:
         if neural_solver_name != "TransformerNeuralSolver":

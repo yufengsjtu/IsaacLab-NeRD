@@ -12,6 +12,10 @@ import logging
 import numpy as np
 import torch
 import warp as wp
+from isaaclab_neural.contacts.contact_set_schema import (
+    is_contact_token_representation,
+    is_native15_contact_representation,
+)
 from isaaclab_neural.data import TrajectoryDataset
 from isaaclab_neural.eval.contact_set_matching import (
     contact_set_matching_metrics,
@@ -472,7 +476,7 @@ class TrainingRolloutEvaluator:
         if not self.require_terrain_context:
             return
         solver = self.neural_env.solver_neural
-        if getattr(solver, "contact_representation", "flat") in {"contact_tokens", "active15_tokens"}:
+        if is_contact_token_representation(getattr(solver, "contact_representation", "flat")):
             self._validate_runtime_contact_tokens(trajectories, start, end, history_offset)
             return
         required_keys = {
@@ -599,8 +603,8 @@ class TrainingRolloutEvaluator:
 
         dataset_valid = recorded_tokens[..., 0] > 0.5
         runtime_valid = runtime_tokens[..., 0] > 0.5
-        is_active15 = getattr(solver, "contact_representation", "flat") == "active15_tokens"
-        if is_active15:
+        is_native15 = is_native15_contact_representation(getattr(solver, "contact_representation", "flat"))
+        if is_native15:
             matches = match_contact_tokens_by_identity(
                 recorded_tokens,
                 runtime_tokens,
@@ -611,7 +615,7 @@ class TrainingRolloutEvaluator:
         else:
             matches = match_contact_tokens_by_identity(recorded_tokens, runtime_tokens)
         difference = matches.dataset - matches.runtime
-        if is_active15:
+        if is_native15:
             point_error = torch.linalg.vector_norm(difference[:, 2:5], dim=-1)
             secondary_point_error = torch.linalg.vector_norm(difference[:, 5:8], dim=-1)
             normal_error = torch.linalg.vector_norm(difference[:, 8:11], dim=-1)

@@ -191,3 +191,11 @@ def normalize_active15_contact_tokens(
     normalized[..., :2] = contact_tokens[..., :2]
     valid = contact_tokens[..., 0:1] > 0.5
     return normalized * valid.to(normalized.dtype)
+
+
+def normalize_raw15_contact_tokens(
+    contact_tokens: torch.Tensor,
+    normalizer: RunningMeanStd,
+) -> torch.Tensor:
+    """Normalize Raw15 features while preserving valid and owner-slot values exactly."""
+    return normalize_active15_contact_tokens(contact_tokens, normalizer)

@@ -67,9 +67,9 @@ def evaluate_dataset_regimes(dataset_path: str | Path) -> dict[str, float]:
         else:
             from isaaclab_neural.contacts.contact_set_schema import (
                 ACTIVE15_GAP_INDEX,
-                CONTACT_REPRESENTATION_ACTIVE15,
                 CONTACT_TOKEN_GAP_INDEX,
                 CONTACT_TOKEN_VALID_INDEX,
+                is_native15_contact_representation,
             )
 
             tokens = np.asarray(data["contact_tokens"])
@@ -77,7 +77,7 @@ def evaluate_dataset_regimes(dataset_path: str | Path) -> dict[str, float]:
             valid = tokens[..., CONTACT_TOKEN_VALID_INDEX] > 0.5
             representation = str(data.attrs.get("contact_representation", ""))
             gap_index = (
-                ACTIVE15_GAP_INDEX if representation == CONTACT_REPRESENTATION_ACTIVE15 else CONTACT_TOKEN_GAP_INDEX
+                ACTIVE15_GAP_INDEX if is_native15_contact_representation(representation) else CONTACT_TOKEN_GAP_INDEX
             )
             gaps = tokens[..., gap_index]
             contact_depths = np.where(valid, gaps, np.inf)
