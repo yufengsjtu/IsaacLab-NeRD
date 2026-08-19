@@ -97,6 +97,7 @@ def test_analyze_dataset_token_row_ownership_reports_swapped_rows(tmp_path, caps
         data_group.create_dataset("contact_tokens", data=tokens)
         data_group.create_dataset("contact_token_body_ids", data=np.asarray([[[4]], [[70]]], dtype=np.int64))
         data_group.create_dataset("contact_token_world_ids", data=np.asarray([[[1]], [[0]]], dtype=np.int64))
+        data_group.create_dataset("contact_token_overflow", data=np.zeros((2, 1), dtype=np.int64))
         trajectory_group = dataset_file.create_group("context").create_group("trajectories")
         trajectory_group.create_dataset("state_world_id", data=np.asarray([0, 1], dtype=np.int64))
         trajectory_group.create_dataset("root_world_id", data=np.asarray([0, 1], dtype=np.int64))
@@ -190,6 +191,31 @@ def test_contact_token_metrics_separate_relative_velocity():
     assert metrics["point_l2_max"] == 0.0
     assert metrics["relative_velocity_l2_max"] == 4.0
     assert metrics["mismatched_env_count"] == 1.0
+
+
+def test_active15_contact_token_metrics_use_owner_frame_schema():
+    dataset_tokens = torch.zeros(1, 1, 17)
+    runtime_tokens = dataset_tokens.clone()
+    dataset_tokens[..., 0] = 1.0
+    runtime_tokens[..., 0] = 1.0
+    dataset_tokens[..., 1] = 3.0
+    runtime_tokens[..., 1] = 3.0
+    runtime_tokens[..., 5] = 0.25
+    runtime_tokens[..., 16] = 0.5
+
+    metrics = contact_token_metrics(
+        _token_inputs(dataset_tokens),
+        _token_inputs(runtime_tokens),
+        contact_representation="active15_tokens",
+    )
+
+    assert metrics["categorical_mismatch_count"] == 0.0
+    assert metrics["point_l2_max"] == 0.0
+    assert metrics["secondary_point_l2_max"] == 0.25
+    assert metrics["margin_abs_max"] == 0.5
+    assert metrics["mismatched_env_count"] == 1.0
+    with pytest.raises(ValueError, match="Contact-token reconstruction mismatch"):
+        validate_contact_token_metrics(metrics, point_tolerance=1.0e-4)
 
 
 def test_input_difference_metrics_handles_no_shared_contacts():

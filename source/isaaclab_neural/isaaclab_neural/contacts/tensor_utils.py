@@ -121,11 +121,18 @@ def normalize_contact_field(
 class ContactTokenMoments:
     """Accumulate per-channel statistics over valid contact tokens only."""
 
-    def __init__(self, channels: int, device: torch.device | str):
+    def __init__(
+        self,
+        channels: int,
+        device: torch.device | str,
+        categorical_channels: tuple[int, ...] | None = None,
+    ):
         from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_CATEGORICAL_CHANNELS
 
         self.channels = channels
-        self.categorical = set(CONTACT_TOKEN_CATEGORICAL_CHANNELS)
+        self.categorical = set(
+            CONTACT_TOKEN_CATEGORICAL_CHANNELS if categorical_channels is None else categorical_channels
+        )
         self.count = torch.zeros((), dtype=torch.float64, device=device)
         self.sum = torch.zeros(channels, dtype=torch.float64, device=device)
         self.square_sum = torch.zeros(channels, dtype=torch.float64, device=device)
@@ -171,5 +178,16 @@ def normalize_contact_tokens(
 ) -> torch.Tensor:
     """Normalize valid contact tokens and re-zero padding."""
     normalized = normalizer.normalize(contact_tokens)
+    valid = contact_tokens[..., 0:1] > 0.5
+    return normalized * valid.to(normalized.dtype)
+
+
+def normalize_active15_contact_tokens(
+    contact_tokens: torch.Tensor,
+    normalizer: RunningMeanStd,
+) -> torch.Tensor:
+    """Normalize Active15 features while preserving valid and owner-slot values exactly."""
+    normalized = normalizer.normalize(contact_tokens)
+    normalized[..., :2] = contact_tokens[..., :2]
     valid = contact_tokens[..., 0:1] > 0.5
     return normalized * valid.to(normalized.dtype)

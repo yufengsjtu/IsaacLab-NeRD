@@ -24,6 +24,10 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
+from isaaclab_neural.contacts.contact_set_schema import (
+    ACTIVE15_CATEGORICAL_CHANNELS,
+    CONTACT_REPRESENTATION_ACTIVE15,
+)
 from isaaclab_neural.contacts.tensor_utils import (
     MIN_CONTACT_RMS_SAMPLES,
     ContactTokenMoments,
@@ -177,6 +181,7 @@ class VanillaTrainer:
                 input_cfg=cfg["inputs"],
                 network_cfg=cfg["network"],
                 contact_mode=self.neural_solver.contact_mode,
+                contact_representation=self.neural_solver.contact_representation,
                 num_bodies=self.neural_solver.num_contact_bodies_per_env,
                 device=self.device,
             )
@@ -434,7 +439,7 @@ class VanillaTrainer:
         cli_eval_interval = cli_cfg.get("eval_interval")
         self.eval_interval = eval_cfg.get("interval", 0) if cli_eval_interval is None else cli_eval_interval
         self.evaluator = None
-        if self.eval_interval <= 0:
+        if self.eval_interval <= 0 or not self.is_main_process:
             return
 
         self.eval_mode = eval_cfg.get("mode", "dataset")
@@ -579,7 +584,16 @@ class VanillaTrainer:
                     continue
                 if key == "contact_tokens":
                     if contact_token_moments is None:
-                        contact_token_moments = ContactTokenMoments(value.shape[-1], self.device)
+                        categorical_channels = (
+                            ACTIVE15_CATEGORICAL_CHANNELS
+                            if self.neural_solver.contact_representation == CONTACT_REPRESENTATION_ACTIVE15
+                            else None
+                        )
+                        contact_token_moments = ContactTokenMoments(
+                            value.shape[-1],
+                            self.device,
+                            categorical_channels=categorical_channels,
+                        )
                     contact_token_moments.update(value)
                     continue
                 use_masked_contact_rms = self.neural_solver.contact_mode == "newton_native" and key.startswith(
@@ -1043,6 +1057,7 @@ class SequenceModelTrainer(VanillaTrainer):
             max_capacity=self.dataset_max_capacity,
             rank=self.rank if self.train_dataset_rank_sharded else 0,
             world_size=self.world_size if self.train_dataset_rank_sharded else 1,
+            expected_contact_representation=self.neural_solver.contact_representation,
         )
         if valid_datasets_cfg is not None and (not self.is_distributed or self.is_main_process):
             for valid_dataset_name, valid_dataset_path in valid_datasets_cfg.items():
@@ -1050,5 +1065,6 @@ class SequenceModelTrainer(VanillaTrainer):
                     load_mode=self.dataset_load_mode,
                     sample_sequence_length=self.sample_sequence_length,
                     hdf5_dataset_path=valid_dataset_path,
+                    expected_contact_representation=self.neural_solver.contact_representation,
                 )
         self.collate_fn = None

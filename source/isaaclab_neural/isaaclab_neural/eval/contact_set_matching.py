@@ -27,6 +27,10 @@ class ContactTokenMatches:
 def match_contact_tokens_by_identity(
     dataset_tokens: torch.Tensor,
     runtime_tokens: torch.Tensor,
+    *,
+    identity_slice: slice = slice(1, 4),
+    point_slice: slice = slice(4, 7),
+    continuous_slice: slice = slice(7, None),
 ) -> ContactTokenMatches:
     """Match active tokens by identity, then nearest geometry within each identity."""
     if dataset_tokens.shape != runtime_tokens.shape or dataset_tokens.ndim != 3:
@@ -51,13 +55,13 @@ def match_contact_tokens_by_identity(
             continue
 
         identities = torch.unique(
-            torch.cat((dataset_active[:, 1:4], runtime_active[:, 1:4]), dim=0),
+            torch.cat((dataset_active[:, identity_slice], runtime_active[:, identity_slice]), dim=0),
             dim=0,
         )
         identity_unmatched_count = 0
         for identity in identities:
-            dataset_group = dataset_active[(dataset_active[:, 1:4] == identity).all(dim=-1)]
-            runtime_group = runtime_active[(runtime_active[:, 1:4] == identity).all(dim=-1)]
+            dataset_group = dataset_active[(dataset_active[:, identity_slice] == identity).all(dim=-1)]
+            runtime_group = runtime_active[(runtime_active[:, identity_slice] == identity).all(dim=-1)]
             identity_unmatched_count += abs(dataset_group.shape[0] - runtime_group.shape[0])
             pair_count = min(dataset_group.shape[0], runtime_group.shape[0])
             if pair_count == 0:
@@ -65,8 +69,8 @@ def match_contact_tokens_by_identity(
 
             # Position is the primary correspondence key. The remaining
             # continuous channels deterministically break near-position ties.
-            cost = torch.cdist(dataset_group[:, 4:7], runtime_group[:, 4:7])
-            cost += 1.0e-3 * torch.cdist(dataset_group[:, 7:], runtime_group[:, 7:])
+            cost = torch.cdist(dataset_group[:, point_slice], runtime_group[:, point_slice])
+            cost += 1.0e-3 * torch.cdist(dataset_group[:, continuous_slice], runtime_group[:, continuous_slice])
             for _ in range(pair_count):
                 flat_index = int(torch.argmin(cost).item())
                 dataset_index = flat_index // cost.shape[1]

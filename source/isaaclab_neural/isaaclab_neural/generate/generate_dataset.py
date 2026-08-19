@@ -151,11 +151,14 @@ def main(env_cfg, agent_cfg=None) -> None:
     # moves tensors to CPU anyway.
     if args_cli.data_device is not None:
         data_device = args_cli.data_device
-    elif getattr(args_cli, "contact_representation", "flat") == "contact_tokens":
+    elif getattr(args_cli, "contact_representation", "flat") in {"contact_tokens", "active15_tokens"}:
         data_device = "cpu"
     else:
         data_device = args_cli.device
-    if str(data_device).startswith("cpu") and getattr(args_cli, "contact_representation", "flat") == "contact_tokens":
+    if str(data_device).startswith("cpu") and getattr(args_cli, "contact_representation", "flat") in {
+        "contact_tokens",
+        "active15_tokens",
+    }:
         print("[dataset] staging contact_tokens rollouts on CPU to avoid GPU OOM during chunk merge.")
 
     with launch_simulation(env_cfg, args_cli):
@@ -247,6 +250,7 @@ def main(env_cfg, agent_cfg=None) -> None:
                     rollouts,
                     env_name,
                     terrain_context=terrain_context,
+                    contact_representation=args_cli.contact_representation,
                 )
                 written_transitions = rollouts["states"].shape[0] * rollouts["states"].shape[1]
                 total_transitions += written_transitions
@@ -264,6 +268,7 @@ def main(env_cfg, agent_cfg=None) -> None:
                 rollouts,
                 env_name,
                 terrain_context=terrain_context,
+                contact_representation=args_cli.contact_representation,
             )
         truncation_summary = adapter.contact_truncation_summary()
         if truncation_summary is not None:

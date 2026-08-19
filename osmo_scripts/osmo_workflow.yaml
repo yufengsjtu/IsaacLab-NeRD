@@ -28,6 +28,7 @@ workflow:
       WORKFLOW_BASE_NAME: "{{ workflow_base_name }}"
       DATASET_SUBDIR: "{{ dataset_subdir }}"
       DATASET_CACHE_MODE: "{{ dataset_cache_mode }}"
+      AMLFS_DATA_ROOT: "{{ amlfs_data_root }}"
       TRAIN_SEED: "{{ train_seed }}"
       STORAGE_BACKEND: "{{ storage_backend }}"
       OSMO_CODE_DIR: /osmo/data/input/0
@@ -104,6 +105,7 @@ default-values:
   resource_platform: ovx-l40s
   dataset_subdir: anymal-c-fixed-ground
   dataset_cache_mode: auto
+  amlfs_data_root: ""
   train_seed: "0"
   storage_backend: nvdataset
   osmo_code_url: ""

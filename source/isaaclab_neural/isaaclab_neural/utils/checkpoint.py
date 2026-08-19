@@ -118,6 +118,7 @@ def reconstruct_model_from_checkpoint(checkpoint, neural_solver, device="cpu"):
         input_cfg=cfg["inputs"],
         network_cfg=cfg["network"],
         contact_mode=neural_solver.contact_mode,
+        contact_representation=getattr(neural_solver, "contact_representation", None),
         num_bodies=getattr(
             neural_solver,
             "num_contact_bodies_per_env",

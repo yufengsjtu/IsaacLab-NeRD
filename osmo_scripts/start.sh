@@ -44,6 +44,7 @@ NVDATASET_OUTPUT_DATASET="${NVDATASET_OUTPUT_DATASET:-IsaacLab-NeRD-Output}"
 NVDATASET_OUTPUT_DESCRIPTION="${NVDATASET_OUTPUT_DESCRIPTION:-IsaacLab-NeRD OSMO training outputs for $RUN_ID.}"
 NVDATASET_INDEX_URL="${NVDATASET_INDEX_URL:-https://artifactory.pdx.nvidia.com/artifactory/api/pypi/sw-ngc-data-platform-pypi-local/simple}"
 DATASET_CACHE_MODE="${DATASET_CACHE_MODE:-auto}"
+AMLFS_DATA_ROOT="${AMLFS_DATA_ROOT:-}"
 TRAIN_SEED="${TRAIN_SEED:-0}"
 OSMO_EXPERIMENT_PRESET="${OSMO_EXPERIMENT_PRESET:-anymal_newton_native}"
 PRESET_FILE="${PRESET_FILE:-}"
@@ -75,6 +76,7 @@ Common options:
   --preset-file PATH         Use a custom preset YAML file
   --workflow-name NAME       Override preset workflow base name; run id is appended
   --dataset-subdir NAME      Override generated dataset cache subdirectory
+  --amlfs-data-root PATH      Pool-wide Lustre directory used for datasets
   --train-seed N             Training random seed (default: 0)
   --storage-backend NAME     nvdataset (default), swift, or osmo_data
   --osmo-swift-base URL      Standalone Swift prefix used by osmo_data
@@ -180,6 +182,10 @@ while (($#)); do
             ;;
         --dataset-cache-mode)
             DATASET_CACHE_MODE="${2:?Missing value for --dataset-cache-mode}"
+            shift 2
+            ;;
+        --amlfs-data-root)
+            AMLFS_DATA_ROOT="${2:?Missing value for --amlfs-data-root}"
             shift 2
             ;;
         --train-seed)
@@ -360,7 +366,7 @@ if [[ "$STORAGE_BACKEND" == "osmo_data" ]]; then
     OSMO_CODE_URL="$osmo_base/code/${RUN_ID}-${git_revision}/"
     OSMO_DATASET_UPLOAD_URL="$osmo_base/data/datasets/${DATASET_SUBDIR}/"
     OSMO_OUTPUT_URL="$osmo_base/data/trained_models/"
-    if [[ "$DATASET_CACHE_MODE" == "off" ]]; then
+    if [[ "$DATASET_CACHE_MODE" == "off" || "$DATASET_CACHE_MODE" == "local_require" ]]; then
         OSMO_DATASET_INPUT_URL=""
     elif osmo data check "$OSMO_DATASET_UPLOAD_URL" >/dev/null 2>&1; then
         OSMO_DATASET_INPUT_URL="$OSMO_DATASET_UPLOAD_URL"
@@ -502,6 +508,7 @@ SUBMIT_ARGS=(
     "workflow_base_name=$WORKFLOW_BASE_NAME"
     "dataset_subdir=$DATASET_SUBDIR"
     "dataset_cache_mode=$DATASET_CACHE_MODE"
+    "amlfs_data_root=$AMLFS_DATA_ROOT"
     "train_seed=$TRAIN_SEED"
     "storage_backend=$STORAGE_BACKEND"
     "osmo_code_url=$OSMO_CODE_URL"

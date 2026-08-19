@@ -293,6 +293,7 @@ def test_eager_trajectory_dataset_preserves_contact_token_rank(tmp_path):
         group.create_dataset("contact_token_body_ids", data=np.zeros((2, 4, 3), dtype=np.int64))
         token_world_ids = np.broadcast_to(np.arange(2, dtype=np.int64)[:, None, None], (2, 4, 3))
         group.create_dataset("contact_token_world_ids", data=token_world_ids)
+        group.create_dataset("contact_token_overflow", data=np.zeros((2, 4), dtype=np.int64))
         group.create_dataset("root_body_q", data=np.zeros((2, 4, 7), dtype=np.float32))
         group.create_dataset("root_body_qd", data=np.zeros((2, 4, 6), dtype=np.float32))
         group.create_dataset("gravity_dir", data=np.zeros((2, 4, 3), dtype=np.float32))

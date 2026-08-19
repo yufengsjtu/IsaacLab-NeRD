@@ -101,7 +101,7 @@ def dataset_cache_complete(
         if not h5py.is_hdf5(dataset_path):
             print(f"Rejected malformed cached dataset: {dataset_path}")
             return False
-        require_tokens = experiment.get("contact_representation", "flat") == "contact_tokens"
+        require_tokens = experiment.get("contact_representation", "flat") in {"contact_tokens", "active15_tokens"}
         require_terrain_context = bool(experiment.get("require_terrain_context", False))
         with h5py.File(dataset_path, "r") as handle:
             if "data" not in handle:
@@ -121,6 +121,7 @@ def dataset_cache_complete(
                 or states.ndim != 3
                 or states.shape[1] != expected_trajectory_length
                 or int(data_group.attrs.get("total_transitions", -1)) < expected_transitions
+                or int(data_group.attrs.get("total_transitions", -1)) != states.shape[0] * states.shape[1]
             ):
                 print(f"Rejected cached dataset with incompatible trajectory metadata: {dataset_path}")
                 return False
@@ -139,6 +140,7 @@ def dataset_cache_complete(
             if require_tokens:
                 expected_capacity = int(experiment.get("max_contact_tokens", 64))
                 representation = str(data_group.attrs.get("contact_representation", ""))
+                token_dim = int(data_group.attrs.get("contact_token_dim", -1))
                 capacity = int(data_group.attrs.get("max_contact_tokens", -1))
                 identity_schema = str(data_group.attrs.get("contact_identity_schema", ""))
                 token_frame = str(data_group.attrs.get("contact_token_frame", ""))
@@ -146,6 +148,7 @@ def dataset_cache_complete(
                     "contact_tokens",
                     "contact_token_body_ids",
                     "contact_token_world_ids",
+                    "contact_token_overflow",
                     "root_body_q",
                     "root_body_qd",
                     "gravity_dir",
@@ -154,11 +157,26 @@ def dataset_cache_complete(
                     "joint_f",
                 }
                 missing_token_fields = sorted(required_token_fields - set(data_group.keys()))
+                expected_representation = str(experiment.get("contact_representation", "contact_tokens"))
+                expected_frame = "owner_body_v1" if expected_representation == "active15_tokens" else "world_v1"
+                active15_metadata_ok = True
+                if expected_representation == "active15_tokens":
+                    active15_metadata_ok = all(
+                        str(data_group.attrs.get(key, "")) == value
+                        for key, value in {
+                            "contact_schema": "active15_owner_body_v1",
+                            "contact_frame": "owner_body_v1",
+                            "contact_velocity_point": "raw_point_midpoint_v1",
+                            "contact_selection": "mujoco_solver_included_v1",
+                        }.items()
+                    )
                 if (
-                    representation != "contact_tokens"
+                    representation != expected_representation
+                    or token_dim != 17
                     or capacity != expected_capacity
                     or identity_schema != "world_owner_v1"
-                    or token_frame != "world_v1"
+                    or token_frame != expected_frame
+                    or not active15_metadata_ok
                     or missing_token_fields
                 ):
                     print(
@@ -167,6 +185,25 @@ def dataset_cache_complete(
                         f"capacity={capacity}, identity_schema={identity_schema!r}, token_frame={token_frame!r}, "
                         f"missing_fields={missing_token_fields}."
                     )
+                    return False
+                tokens = cast(h5py.Dataset, data_group["contact_tokens"])
+                body_ids = cast(h5py.Dataset, data_group["contact_token_body_ids"])
+                world_ids = cast(h5py.Dataset, data_group["contact_token_world_ids"])
+                overflow = cast(h5py.Dataset, data_group["contact_token_overflow"])
+                token_shapes_ok = (
+                    tokens.shape == (*step_shape, expected_capacity, 17)
+                    and body_ids.shape == (*step_shape, expected_capacity)
+                    and world_ids.shape == (*step_shape, expected_capacity)
+                    and overflow.shape == step_shape
+                )
+                token_dtypes_ok = (
+                    tokens.dtype.kind == "f"
+                    and body_ids.dtype.kind in "iu"
+                    and world_ids.dtype.kind in "iu"
+                    and overflow.dtype.kind in "iu"
+                )
+                if not token_shapes_ok or not token_dtypes_ok:
+                    print(f"Rejected cached dataset with incompatible token shapes or dtypes: {dataset_path}")
                     return False
             if require_terrain_context:
                 data_group = cast(h5py.Group, handle["data"])
@@ -320,7 +357,7 @@ def contact_args(experiment: dict) -> list[str]:
             "--contact-representation",
             representation,
         ]
-        if representation == "contact_tokens":
+        if representation in {"contact_tokens", "active15_tokens"}:
             args += [
                 "--max-contact-tokens",
                 str(experiment.get("max_contact_tokens", 64)),
@@ -540,7 +577,16 @@ def run(args: argparse.Namespace):
     print(f"Training config: {experiment['train_cfg']}")
 
     datasets_available = False
-    if args.dataset_cache_mode != "off" and args.dataset_input_path:
+    if args.dataset_cache_mode != "off" and dataset_cache_complete(
+        local_env_dir,
+        required_files,
+        experiment,
+    ):
+        datasets_available = True
+        print(f"Using complete local/Lustre dataset cache: {local_env_dir}")
+    elif args.dataset_cache_mode == "local_require":
+        raise RuntimeError(f"DATASET_CACHE_MODE=local_require but required datasets were not found at {local_env_dir}.")
+    elif args.dataset_cache_mode != "off" and args.dataset_input_path:
         datasets_available = load_dataset_cache_from_input(
             input_root=Path(args.dataset_input_path),
             dataset_subdir=args.dataset_subdir,
@@ -558,6 +604,8 @@ def run(args: argparse.Namespace):
 
     if not datasets_available:
         generate_all_datasets(experiment, specs, dataset_dir)
+        if not dataset_cache_complete(local_env_dir, required_files, experiment):
+            raise RuntimeError(f"Generated dataset cache failed validation: {local_env_dir}")
         stage_generated_datasets(
             local_env_dir=local_env_dir,
             dataset_subdir=args.dataset_subdir,
@@ -568,6 +616,10 @@ def run(args: argparse.Namespace):
             nvdataset_data_description=args.nvdataset_data_description,
             osmo_data_dataset_url=args.osmo_data_dataset_url,
         )
+
+    if experiment.get("dataset_only", False):
+        print(f"Dataset-only workflow completed with a validated cache at {local_env_dir}.")
+        return
 
     if experiment.get("diagnostic_only", False):
         run_context_diagnostic(experiment, specs, dataset_dir)
@@ -583,7 +635,7 @@ def main():
     parser.add_argument("--preset-file")
     parser.add_argument("--workflow-base-name", required=True)
     parser.add_argument("--dataset-subdir", required=True)
-    parser.add_argument("--dataset-cache-mode", default="auto", choices=("auto", "require", "off"))
+    parser.add_argument("--dataset-cache-mode", default="auto", choices=("auto", "require", "local_require", "off"))
     parser.add_argument("--dataset-input-path", default="")
     parser.add_argument("--storage-backend", default="nvdataset", choices=("nvdataset", "swift", "osmo_data"))
     parser.add_argument("--osmo-data-dataset-url", default="")

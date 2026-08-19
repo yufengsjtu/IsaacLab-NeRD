@@ -250,6 +250,7 @@ def test_shared_per_body_model_forwards_contact_token_trajectory_dataset(tmp_pat
         group.create_dataset("contact_tokens", data=tokens)
         group.create_dataset("contact_token_body_ids", data=token_body_ids)
         group.create_dataset("contact_token_world_ids", data=token_world_ids)
+        group.create_dataset("contact_token_overflow", data=np.zeros((2, 4), dtype=np.int64))
 
     dataset = TrajectoryDataset(dataset_path, sample_sequence_length=3)
     sample = {key: value.unsqueeze(0) for key, value in dataset[0].items()}

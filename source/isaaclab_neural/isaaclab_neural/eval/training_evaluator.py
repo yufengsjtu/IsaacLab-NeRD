@@ -65,6 +65,7 @@ class TrainingRolloutEvaluator:
             self.trajectory_dataset = TrajectoryDataset(
                 hdf5_dataset_path=hdf5_dataset_path,
                 sample_sequence_length=eval_horizon + self.history_length - 1,
+                expected_contact_representation=getattr(neural_env.solver_neural, "contact_representation", None),
             )
 
     @torch.no_grad()
@@ -471,7 +472,7 @@ class TrainingRolloutEvaluator:
         if not self.require_terrain_context:
             return
         solver = self.neural_env.solver_neural
-        if getattr(solver, "contact_representation", "flat") == "contact_tokens":
+        if getattr(solver, "contact_representation", "flat") in {"contact_tokens", "active15_tokens"}:
             self._validate_runtime_contact_tokens(trajectories, start, end, history_offset)
             return
         required_keys = {
@@ -598,19 +599,39 @@ class TrainingRolloutEvaluator:
 
         dataset_valid = recorded_tokens[..., 0] > 0.5
         runtime_valid = runtime_tokens[..., 0] > 0.5
-        matches = match_contact_tokens_by_identity(recorded_tokens, runtime_tokens)
+        is_active15 = getattr(solver, "contact_representation", "flat") == "active15_tokens"
+        if is_active15:
+            matches = match_contact_tokens_by_identity(
+                recorded_tokens,
+                runtime_tokens,
+                identity_slice=slice(1, 2),
+                point_slice=slice(2, 5),
+                continuous_slice=slice(5, None),
+            )
+        else:
+            matches = match_contact_tokens_by_identity(recorded_tokens, runtime_tokens)
         difference = matches.dataset - matches.runtime
-        point_error = torch.linalg.vector_norm(difference[:, 4:7], dim=-1)
-        normal_error = torch.linalg.vector_norm(difference[:, 7:10], dim=-1)
-        lever_error = torch.linalg.vector_norm(difference[:, 10:13], dim=-1)
-        gap_error = difference[:, 13].abs()
-        velocity_error = torch.linalg.vector_norm(difference[:, 14:17], dim=-1)
+        if is_active15:
+            point_error = torch.linalg.vector_norm(difference[:, 2:5], dim=-1)
+            secondary_point_error = torch.linalg.vector_norm(difference[:, 5:8], dim=-1)
+            normal_error = torch.linalg.vector_norm(difference[:, 8:11], dim=-1)
+            gap_error = difference[:, 11].abs()
+            velocity_error = torch.linalg.vector_norm(difference[:, 12:15], dim=-1)
+            margin_error = difference[:, 15:17].abs().amax(dim=-1)
+        else:
+            point_error = torch.linalg.vector_norm(difference[:, 4:7], dim=-1)
+            secondary_point_error = torch.linalg.vector_norm(difference[:, 10:13], dim=-1)
+            normal_error = torch.linalg.vector_norm(difference[:, 7:10], dim=-1)
+            gap_error = difference[:, 13].abs()
+            velocity_error = torch.linalg.vector_norm(difference[:, 14:17], dim=-1)
+            margin_error = gap_error.new_zeros(gap_error.shape)
         geometry_mismatch = (
             (point_error > self.contact_context_tolerance)
+            | (secondary_point_error > self.contact_context_tolerance)
             | (normal_error > self.contact_context_normal_tolerance)
-            | (lever_error > self.contact_context_tolerance)
             | (gap_error > self.contact_context_tolerance)
             | (velocity_error > self.contact_context_velocity_tolerance)
+            | (margin_error > self.contact_context_tolerance)
         )
 
         def active_max(error: torch.Tensor) -> float:
@@ -659,9 +680,10 @@ class TrainingRolloutEvaluator:
             f"categorical_mismatches={int(matches.categorical_mismatches_per_env.sum())}, "
             f"point_l2_max={active_max(point_error):.6g}, "
             f"normal_l2_max={active_max(normal_error):.6g}, "
-            f"lever_l2_max={active_max(lever_error):.6g}, "
+            f"secondary_point_l2_max={active_max(secondary_point_error):.6g}, "
             f"gap_abs_max={active_max(gap_error):.6g}, "
             f"relative_velocity_l2_max={active_max(velocity_error):.6g}, "
+            f"margin_abs_max={active_max(margin_error):.6g}, "
             f"overflow_mismatches={int(overflow_mismatch.sum())}; " + " | ".join(detail_rows)
         )
         if self.contact_context_validation == "strict":

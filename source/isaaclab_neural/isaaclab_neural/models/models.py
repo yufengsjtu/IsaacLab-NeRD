@@ -10,13 +10,15 @@
 import torch
 import torch.nn as nn
 
-from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
+from isaaclab_neural.contacts.contact_set_schema import ACTIVE15_TOKEN_DIM, CONTACT_TOKEN_DIM
 from isaaclab_neural.contacts.tensor_utils import (
     mask_inactive_contact_fields,
+    normalize_active15_contact_tokens,
     normalize_contact_field,
     normalize_contact_tokens,
 )
 from isaaclab_neural.models.base_models import CNNBase, GRUBase, LSTMBase, MLPBase
+from isaaclab_neural.models.body_routed_active15_model import BodyRoutedActive15Encoder
 from isaaclab_neural.models.body_routed_contact_model import BodyRoutedContactEncoder
 from isaaclab_neural.models.contact_set_model import ContactSetEncoderBlock
 from isaaclab_neural.models.model_kan import KAN
@@ -55,6 +57,7 @@ class ModelMixedInput(nn.Module):
         device="cuda:0",
         *,
         contact_mode="fixed_ground",
+        contact_representation: str | None = None,
         num_bodies=None,
     ):
         super().__init__()
@@ -68,6 +71,15 @@ class ModelMixedInput(nn.Module):
         self.use_contact_token_set = "contact_set" in input_cfg
         self.output_rms = None
         self.normalize_output = network_cfg.get("normalize_output", False)
+
+        encoder_type = input_cfg.get("contact_set", {}).get("encoder_type")
+        active15_encoder = encoder_type == "body_routed_active15"
+        active15_representation = contact_representation == "active15_tokens"
+        if contact_representation is not None and active15_encoder != active15_representation:
+            raise ValueError(
+                "contact_representation='active15_tokens' and "
+                "contact_set encoder_type='body_routed_active15' must be configured together."
+            )
 
         self.encoders, self.feature_dim = self.construct_input_encoders(
             input_cfg,
@@ -222,10 +234,32 @@ class ModelMixedInput(nn.Module):
                     max_other_bodies=int(contact_cfg.get("max_other_bodies", 32)),
                     device=device,
                 )
+            elif encoder_type == "body_routed_active15":
+                configured_num_bodies = contact_cfg.get("num_bodies")
+                if num_bodies is not None and configured_num_bodies is not None:
+                    if int(configured_num_bodies) != int(num_bodies):
+                        raise ValueError(
+                            "Configured contact_set num_bodies does not match runtime primary-body metadata."
+                        )
+                resolved_num_bodies = num_bodies if num_bodies is not None else configured_num_bodies
+                if resolved_num_bodies is None:
+                    raise ValueError(
+                        "contact_set encoder_type='body_routed_active15' requires num_bodies "
+                        "from runtime metadata or config."
+                    )
+                if contact_dim != ACTIVE15_TOKEN_DIM:
+                    raise ValueError("body_routed_active15 requires the canonical padded Active15 schema.")
+                self.contact_set_encoder = BodyRoutedActive15Encoder(
+                    num_bodies=int(resolved_num_bodies),
+                    body_latent_dim=int(contact_cfg.get("body_latent_dim", 64)),
+                    hidden_dim=int(contact_cfg.get("hidden_dim", 32)),
+                    device=device,
+                )
             else:
                 raise ValueError(
                     f"Unsupported contact_set encoder_type '{encoder_type}'. "
-                    "Expected 'global_attention', 'shared_per_body', or 'body_routed'."
+                    "Expected 'global_attention', 'shared_per_body', 'body_routed', "
+                    "or 'body_routed_active15'."
                 )
             encoders["contact_set"] = self.contact_set_encoder
 
@@ -292,7 +326,7 @@ class ModelMixedInput(nn.Module):
                 contact_features = self.encoders[input_name](input_dict["contact_tokens"])
                 if isinstance(
                     self.encoders[input_name],
-                    SharedPerBodyContactEncoder | BodyRoutedContactEncoder,
+                    SharedPerBodyContactEncoder | BodyRoutedContactEncoder | BodyRoutedActive15Encoder,
                 ):
                     contact_features = contact_features.flatten(start_dim=-2)
                 features.append(contact_features)
@@ -320,10 +354,16 @@ class ModelMixedInput(nn.Module):
         if self.normalize_input:
             for obs_key in self.input_rms.keys():
                 if obs_key == "contact_tokens":
-                    input_dict[obs_key] = normalize_contact_tokens(
-                        input_dict[obs_key],
-                        self.input_rms[obs_key],
-                    )
+                    if isinstance(self.contact_set_encoder, BodyRoutedActive15Encoder):
+                        input_dict[obs_key] = normalize_active15_contact_tokens(
+                            input_dict[obs_key],
+                            self.input_rms[obs_key],
+                        )
+                    else:
+                        input_dict[obs_key] = normalize_contact_tokens(
+                            input_dict[obs_key],
+                            self.input_rms[obs_key],
+                        )
                 elif getattr(self, "use_native_contact_processing", False) and obs_key.startswith("contact_"):
                     contact_masks = input_dict.get("contact_masks")
                     if contact_masks is None:
@@ -339,9 +379,10 @@ class ModelMixedInput(nn.Module):
                 if not torch.is_floating_point(input_dict[obs_key]):
                     continue
                 if obs_key == "contact_tokens":
-                    # Keep categorical identity channels (valid/slots/dynamic) clean.
+                    # Active15 has two categorical channels; token17 has four.
                     noise = torch.randn_like(input_dict[obs_key]) * 0.01
-                    noise[..., :4] = 0.0
+                    categorical_channels = 2 if isinstance(self.contact_set_encoder, BodyRoutedActive15Encoder) else 4
+                    noise[..., :categorical_channels] = 0.0
                     input_dict[obs_key] = input_dict[obs_key] + noise
                 else:
                     input_dict[obs_key] = input_dict[obs_key] + torch.randn_like(input_dict[obs_key]) * 0.01

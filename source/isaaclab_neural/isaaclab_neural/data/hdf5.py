@@ -15,6 +15,11 @@ import h5py
 import numpy as np
 import torch
 
+from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_REPRESENTATION_ACTIVE15,
+    CONTACT_REPRESENTATION_TOKENS,
+)
+
 
 def _to_numpy(value: torch.Tensor):
     """Convert a tensor-like rollout value to a CPU numpy array."""
@@ -28,6 +33,7 @@ def write_rollouts_to_hdf5(
     rollouts: Mapping,
     env_name: str,
     terrain_context: Mapping[str, Any] | None = None,
+    contact_representation: str | None = None,
 ) -> None:
     """Serialize rollout tensors to a NeRD HDF5 trajectory dataset.
 
@@ -59,7 +65,7 @@ def write_rollouts_to_hdf5(
         _create_context_groups(dataset_file, trajectory_context, terrain_context)
         data_group.attrs["env"] = env_name
         data_group.attrs["mode"] = "trajectory"
-        _update_metadata(data_group)
+        _update_metadata(data_group, contact_representation)
 
 
 def append_rollouts_to_hdf5(
@@ -67,6 +73,7 @@ def append_rollouts_to_hdf5(
     rollouts: Mapping,
     env_name: str,
     terrain_context: Mapping[str, Any] | None = None,
+    contact_representation: str | None = None,
 ) -> None:
     """Append rollout tensors to a NeRD HDF5 trajectory dataset.
 
@@ -91,6 +98,7 @@ def append_rollouts_to_hdf5(
             arrays,
             env_name=env_name,
             is_new=is_new,
+            contact_representation=contact_representation,
         )
         _validate_context_target(
             dataset_file,
@@ -108,7 +116,7 @@ def append_rollouts_to_hdf5(
                 cast(h5py.Group, dataset_file["context"]["trajectories"]) if "context" in dataset_file else None
             )
             _append_arrays_atomically(data_group, arrays, trajectory_group, trajectory_context)
-        _update_metadata(data_group)
+        _update_metadata(data_group, contact_representation)
 
 
 def _flatten_rollouts(rollouts: Mapping) -> dict[str, Any]:
@@ -160,6 +168,12 @@ def _validate_contact_token_identity(
     if "contact_tokens" not in arrays:
         return
     tokens = arrays["contact_tokens"]
+    if tokens.ndim != 4 or tokens.shape[-1] != 17:
+        raise ValueError(f"Contact tokens must have shape [N, T, K, 17], got {tokens.shape}.")
+    if not np.issubdtype(tokens.dtype, np.floating):
+        raise ValueError(f"Contact tokens must use a floating dtype, got {tokens.dtype}.")
+    if not np.isfinite(tokens).all():
+        raise ValueError("Contact tokens must contain only finite values.")
     expected_shape = tokens.shape[:-1]
     body_ids = arrays["contact_token_body_ids"]
     world_ids = arrays["contact_token_world_ids"]
@@ -210,6 +224,7 @@ def _validate_rollout_arrays(arrays: Mapping[str, Any]) -> None:
                 "contact_tokens",
                 "contact_token_body_ids",
                 "contact_token_world_ids",
+                "contact_token_overflow",
                 "root_body_q",
                 "root_body_qd",
                 "gravity_dir",
@@ -220,7 +235,7 @@ def _validate_rollout_arrays(arrays: Mapping[str, Any]) -> None:
     missing = sorted(required - set(arrays))
     if missing:
         raise ValueError(f"Rollout data is missing required fields: {missing}.")
-    for name in ("contact_token_body_ids", "contact_token_world_ids"):
+    for name in ("contact_token_body_ids", "contact_token_world_ids", "contact_token_overflow"):
         if name in arrays and not np.issubdtype(arrays[name].dtype, np.integer):
             raise ValueError(f"Rollout field {name!r} must use an integer dtype, got {arrays[name].dtype}.")
 
@@ -244,6 +259,7 @@ def _validate_append_target(
     *,
     env_name: str,
     is_new: bool,
+    contact_representation: str | None,
 ) -> None:
     """Validate append compatibility before mutating any HDF5 dataset."""
     if is_new:
@@ -253,12 +269,31 @@ def _validate_append_target(
     if data_group.attrs.get("mode") != "trajectory":
         raise ValueError(f"Cannot append trajectories to dataset mode {data_group.attrs.get('mode')!r}.")
     if "contact_tokens" in arrays:
-        token_frame = data_group.attrs.get("contact_token_frame")
-        identity_schema = data_group.attrs.get("contact_identity_schema")
-        if token_frame != "world_v1" or identity_schema != "world_owner_v1":
+        representation = contact_representation or str(data_group.attrs.get("contact_representation", ""))
+        expected_metadata = {
+            "contact_representation": representation,
+            "contact_token_frame": (
+                "owner_body_v1" if representation == CONTACT_REPRESENTATION_ACTIVE15 else "world_v1"
+            ),
+            "contact_identity_schema": "world_owner_v1",
+        }
+        if representation == CONTACT_REPRESENTATION_ACTIVE15:
+            expected_metadata.update(
+                {
+                    "contact_schema": "active15_owner_body_v1",
+                    "contact_frame": "owner_body_v1",
+                    "contact_velocity_point": "raw_point_midpoint_v1",
+                    "contact_selection": "mujoco_solver_included_v1",
+                }
+            )
+        mismatched = {
+            key: data_group.attrs.get(key)
+            for key, expected in expected_metadata.items()
+            if data_group.attrs.get(key) != expected
+        }
+        if mismatched:
             raise ValueError(
-                "Cannot append contact tokens unless contact_token_frame='world_v1' and "
-                "contact_identity_schema='world_owner_v1'."
+                f"Cannot append contact tokens with incompatible representation or schema metadata: {mismatched}."
             )
     if set(data_group.keys()) != set(arrays):
         missing = sorted(set(data_group.keys()) - set(arrays))
@@ -386,7 +421,7 @@ def _append_arrays_atomically(
         raise
 
 
-def _update_metadata(data_group: h5py.Group) -> None:
+def _update_metadata(data_group: h5py.Group, contact_representation: str | None = None) -> None:
     """Update aggregate metadata from successfully written datasets."""
     states = cast(h5py.Dataset, data_group["states"])
     data_group.attrs["total_trajectories"] = states.shape[0]
@@ -401,9 +436,19 @@ def _update_metadata(data_group: h5py.Group) -> None:
         # (e.g. from the generator config) so it is not silently overwritten by K.
         data_group.attrs["max_contact_tokens"] = tokens.shape[-2]
         data_group.attrs["contact_token_dim"] = tokens.shape[-1]
-        data_group.attrs["contact_representation"] = "contact_tokens"
+        representation = contact_representation or str(
+            data_group.attrs.get("contact_representation", CONTACT_REPRESENTATION_TOKENS)
+        )
+        data_group.attrs["contact_representation"] = representation
         data_group.attrs["contact_identity_schema"] = "world_owner_v1"
-        data_group.attrs["contact_token_frame"] = "world_v1"
+        if representation == CONTACT_REPRESENTATION_ACTIVE15:
+            data_group.attrs["contact_schema"] = "active15_owner_body_v1"
+            data_group.attrs["contact_frame"] = "owner_body_v1"
+            data_group.attrs["contact_token_frame"] = "owner_body_v1"
+            data_group.attrs["contact_velocity_point"] = "raw_point_midpoint_v1"
+            data_group.attrs["contact_selection"] = "mujoco_solver_included_v1"
+        else:
+            data_group.attrs["contact_token_frame"] = "world_v1"
         if "num_contacts_per_env" not in data_group.attrs:
             data_group.attrs["num_contacts_per_env"] = tokens.shape[-2]
     data_group.attrs["joint_f_dim"] = cast(h5py.Dataset, data_group["joint_f"]).shape[-1]

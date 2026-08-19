@@ -11,12 +11,14 @@ import numpy as np
 import torch
 import warp as wp
 
+from isaaclab_neural.contacts.active15_contact_encoder import Active15ContactEncoder
 from isaaclab_neural.contacts.contact_set_encoder import ContactSetEncoder
 from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_REPRESENTATION_ACTIVE15,
     CONTACT_REPRESENTATION_FLAT,
-    CONTACT_REPRESENTATION_TOKENS,
     CONTACT_TOKEN_DIM,
     DEFAULT_MAX_CONTACT_TOKENS,
+    is_contact_token_representation,
 )
 from isaaclab_neural.contacts.packing import ContactPackingPolicy, get_contact_order
 from isaaclab_neural.utils import torch_utils
@@ -47,7 +49,7 @@ class NewtonContactAdapter:
         self.num_envs = int(model.world_count)
         self.contact_representation = contact_representation
         self.max_contact_tokens = int(max_contact_tokens)
-        if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
+        if is_contact_token_representation(self.contact_representation):
             self.num_contacts_per_env = self.max_contact_tokens
         else:
             self.num_contacts_per_env = int(num_contacts_per_env)
@@ -164,8 +166,13 @@ class NewtonContactAdapter:
             device=self.device,
         )
         self._token_encoder: ContactSetEncoder | None = None
-        if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
-            self._token_encoder = ContactSetEncoder(
+        if is_contact_token_representation(self.contact_representation):
+            encoder_type = (
+                Active15ContactEncoder
+                if self.contact_representation == CONTACT_REPRESENTATION_ACTIVE15
+                else ContactSetEncoder
+            )
+            self._token_encoder = encoder_type(
                 model=model,
                 primary_body_mask=self.primary_body_mask,
                 shape_body_torch=self.shape_body_torch,
@@ -206,7 +213,7 @@ class NewtonContactAdapter:
             return
 
         raw = self._read_raw_contacts(contacts, contact_count, state)
-        if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
+        if is_contact_token_representation(self.contact_representation):
             assert self._token_encoder is not None
             if state is None:
                 raise ValueError("Contact token encoding requires the current Newton State.")
@@ -367,7 +374,7 @@ class NewtonContactAdapter:
         across frames (e.g. transformer history) must clone before the next
         :meth:`update`, which :class:`TransformerNeuralSolver` already does.
         """
-        if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
+        if is_contact_token_representation(self.contact_representation):
             return {
                 "contact_tokens": self.contact_tokens,
                 "contact_token_overflow": self.contact_token_overflow,

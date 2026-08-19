@@ -58,6 +58,11 @@ The launcher supports declarative presets in `osmo_scripts/presets/`:
   token HDF5 datasets and the contact-token transformer config.
 - `anymal_rough_newton_native_body_routed`: rough-terrain body-routed Deep Sets
   model that reuses the same canonical contact-token HDF5 datasets.
+- `anymal_rough_newton_native_active15_dataset`: generate and upload the
+  owner-frame Active15 dataset without starting training.
+- `anymal_rough_newton_native_active15` and
+  `anymal_rough_newton_native_active15_lr_1e-3`: train Active15 with the two
+  requested learning-rate schedules on the dedicated Active15 HDF5 dataset.
 - `anymal_fixed_ground`: Anymal-C with fixed-ground abstract contacts.
 - `cartpole_fixed_ground`: Cartpole with fixed-ground contacts.
 
@@ -73,6 +78,8 @@ NV-Datasets dataset or Swift container.
 - `auto`: try to load cached datasets; generate and upload them if missing.
 - `require`: fail if the required cached datasets are not present.
 - `off`: ignore cache and always regenerate datasets.
+- `local_require`: require a complete local/Lustre cache and never download or
+  regenerate it.
 
 Set this through `start.sh`:
 
@@ -97,7 +104,10 @@ presets use distinct workflow names and dataset cache subdirectories, so they
 cannot accidentally reuse flat HDF5 files.
 
 Cached datasets are searched under several compatible layouts, including
-`<dataset_subdir>/<env_name>/` and `<dataset_subdir>/`.
+`<dataset_subdir>/<env_name>/` and `<dataset_subdir>/`. When
+`AMLFS_DATA_ROOT` is available, the entrypoint links `data/datasets` to that
+pool-wide Lustre directory. `--dataset-cache-mode local_require` validates and
+uses this cache without mounting or copying the Swift dataset.
 
 ### Dataset Generation Features
 
@@ -115,14 +125,32 @@ workflow.
 Contact-related generation options come from each preset:
 
 - `contact_mode`: `fixed_ground` or `newton_native`.
-- `contact_representation`: `flat` or `contact_tokens`.
+- `contact_representation`: `flat`, `contact_tokens`, or `active15_tokens`.
 - `num_contacts_per_env`: required for native contacts.
-- `max_contact_tokens`: directed token capacity for `contact_tokens`.
+- `max_contact_tokens`: padded capacity for either token representation.
 - `contact_packing_policy`: native packing policy such as
   `penetration_priority`; token presets use
   `body_round_robin_pair_atomic`.
 - `states_frame`: optional override for dataset generation, used by Cartpole
   fixed-ground to collect world-frame data.
+
+### Active15 Dataset and Training
+
+Generate once to standalone Swift while retaining the same files on Lustre:
+
+```bash
+./osmo_scripts/start.sh \
+  --preset anymal_rough_newton_native_active15_dataset \
+  --storage-backend osmo_data \
+  --dataset-cache-mode off \
+  --amlfs-data-root /mnt/amlfs-04/home/jiex/isaaclab-nerd-rowan/datasets \
+  --pool isaac-srl-l40-04 \
+  --priority NORMAL
+```
+
+After the generation workflow validates all five files, training jobs should use
+`--dataset-cache-mode local_require`. This avoids the Swift dataset input
+mount and reads directly through the pool-wide Lustre symlink.
 
 ### Training Features
 

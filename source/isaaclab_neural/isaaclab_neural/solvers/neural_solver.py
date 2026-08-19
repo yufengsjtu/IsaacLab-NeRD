@@ -451,9 +451,12 @@ class NeuralSolver(SolverBase):
         }
 
     def _empty_contacts(self):
-        from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
+        from isaaclab_neural.contacts.contact_set_schema import (
+            CONTACT_TOKEN_DIM,
+            is_contact_token_representation,
+        )
 
-        if self.contact_representation == "contact_tokens":
+        if is_contact_token_representation(self.contact_representation):
             max_tokens = self.max_contact_tokens or self.num_contacts_per_env
             return {
                 "contact_tokens": torch.zeros(
@@ -526,7 +529,7 @@ class NeuralSolver(SolverBase):
                 model_inputs.pop(key, None)
 
         if "contact_tokens" in model_inputs:
-            if self.states_frame != "world":
+            if self.states_frame != "world" and self.contact_representation == "contact_tokens":
                 root_body_q = model_inputs["root_body_q"]
                 batch, time = root_body_q.shape[:2]
                 if self.anchor_frame_step == "first":

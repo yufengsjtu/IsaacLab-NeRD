@@ -109,7 +109,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--contact-representation",
-        choices=("flat", "contact_tokens"),
+        choices=("flat", "contact_tokens", "active15_tokens"),
         default="flat",
     )
     parser.add_argument("--max-contact-tokens", type=int, default=64)
@@ -476,6 +476,7 @@ def contact_token_metrics(
     point_tolerance: float = 1.0e-4,
     normal_tolerance: float = 1.0e-3,
     velocity_tolerance: float = 1.0e-3,
+    contact_representation: str = "contact_tokens",
 ) -> dict[str, float]:
     """Compare latest-frame tokens using identity-constrained geometric matches."""
     dataset_tokens = dataset_inputs["contact_tokens"][:, -1]
@@ -490,22 +491,44 @@ def contact_token_metrics(
 
     dataset_valid = dataset_tokens[..., 0] > 0.5
     runtime_valid = runtime_tokens[..., 0] > 0.5
-    matches = match_contact_tokens_by_identity(dataset_tokens, runtime_tokens)
-    difference = matches.dataset - matches.runtime
-    point_error = torch.linalg.vector_norm(difference[:, 4:7], dim=-1)
-    normal_error = torch.linalg.vector_norm(difference[:, 7:10], dim=-1)
-    lever_error = torch.linalg.vector_norm(difference[:, 10:13], dim=-1)
-    gap_error = difference[:, 13].abs()
-    velocity_error = torch.linalg.vector_norm(difference[:, 14:17], dim=-1)
+    is_active15 = contact_representation == "active15_tokens"
+    if is_active15:
+        matches = match_contact_tokens_by_identity(
+            dataset_tokens,
+            runtime_tokens,
+            identity_slice=slice(1, 2),
+            point_slice=slice(2, 5),
+            continuous_slice=slice(5, None),
+        )
+        difference = matches.dataset - matches.runtime
+        point_error = torch.linalg.vector_norm(difference[:, 2:5], dim=-1)
+        secondary_point_error = torch.linalg.vector_norm(difference[:, 5:8], dim=-1)
+        normal_error = torch.linalg.vector_norm(difference[:, 8:11], dim=-1)
+        lever_error = point_error.new_zeros(point_error.shape)
+        gap_error = difference[:, 11].abs()
+        velocity_error = torch.linalg.vector_norm(difference[:, 12:15], dim=-1)
+        margin_error = difference[:, 15:17].abs().amax(dim=-1)
+    else:
+        matches = match_contact_tokens_by_identity(dataset_tokens, runtime_tokens)
+        difference = matches.dataset - matches.runtime
+        point_error = torch.linalg.vector_norm(difference[:, 4:7], dim=-1)
+        secondary_point_error = point_error.new_zeros(point_error.shape)
+        normal_error = torch.linalg.vector_norm(difference[:, 7:10], dim=-1)
+        lever_error = torch.linalg.vector_norm(difference[:, 10:13], dim=-1)
+        gap_error = difference[:, 13].abs()
+        velocity_error = torch.linalg.vector_norm(difference[:, 14:17], dim=-1)
+        margin_error = point_error.new_zeros(point_error.shape)
     dataset_overflow = dataset_inputs["contact_token_overflow"][:, -1]
     runtime_overflow = runtime_inputs["contact_token_overflow"][:, -1]
 
     geometry_mismatch = (
         (point_error > point_tolerance)
+        | (secondary_point_error > point_tolerance)
         | (normal_error > normal_tolerance)
         | (lever_error > point_tolerance)
         | (gap_error > point_tolerance)
         | (velocity_error > velocity_tolerance)
+        | (margin_error > point_tolerance)
     )
     geometry_mismatch_per_env = torch.zeros(dataset_tokens.shape[0], dtype=torch.bool, device=dataset_tokens.device)
     if geometry_mismatch.any():
@@ -524,10 +547,12 @@ def contact_token_metrics(
     }
     for name, error in (
         ("point_l2", point_error),
+        ("secondary_point_l2", secondary_point_error),
         ("normal_l2", normal_error),
         ("lever_l2", lever_error),
         ("gap_abs", gap_error),
         ("relative_velocity_l2", velocity_error),
+        ("margin_abs", margin_error),
     ):
         metrics[f"{name}_sum"] = float(error.sum())
         metrics[f"{name}_mean"] = float(error.mean()) if error.numel() else 0.0
@@ -826,10 +851,12 @@ def validate_contact_token_metrics(
         failures.append(f"overflow_mismatch_count={metrics['overflow_mismatch_count']:.8g}")
     for key, tolerance in (
         ("point_l2_max", point_tolerance),
+        ("secondary_point_l2_max", point_tolerance),
         ("normal_l2_max", normal_tolerance),
         ("lever_l2_max", point_tolerance),
         ("gap_abs_max", point_tolerance),
         ("relative_velocity_l2_max", velocity_tolerance),
+        ("margin_abs_max", point_tolerance),
     ):
         value = metrics[key]
         if not np.isfinite(value) or value > tolerance:
@@ -902,6 +929,7 @@ def compare_diagnostic_batch(
     """Reset one runtime batch and compare it with recorded contacts."""
     adapter = env.neural_adapter
     solver = adapter.solver
+    contact_representation = getattr(solver, "contact_representation", "flat")
     if solver.neural_model is not None:
         solver.eval()
 
@@ -946,9 +974,11 @@ def compare_diagnostic_batch(
                     point_tolerance=args.contact_tolerance,
                     normal_tolerance=args.contact_normal_tolerance,
                     velocity_tolerance=args.contact_velocity_tolerance,
+                    contact_representation=contact_representation,
                 ),
             )
-            print_metrics("raw_token_frame", raw_token_frame_metrics(dataset_raw, runtime_raw))
+            if contact_representation == "contact_tokens":
+                print_metrics("raw_token_frame", raw_token_frame_metrics(dataset_raw, runtime_raw))
 
     comparison_metrics = (
         contact_token_metrics(
@@ -957,6 +987,7 @@ def compare_diagnostic_batch(
             point_tolerance=args.contact_tolerance,
             normal_tolerance=args.contact_normal_tolerance,
             velocity_tolerance=args.contact_velocity_tolerance,
+            contact_representation=contact_representation,
         )
         if is_contact_tokens
         else contact_metrics(
@@ -1060,7 +1091,15 @@ def aggregate_contact_token_metrics(metrics_by_batch: list[dict[str, float]], ba
         "overflow_mismatch_count": sum(metrics["overflow_mismatch_count"] for metrics in metrics_by_batch),
         "num_samples": float(len(metrics_by_batch) * batch_size),
     }
-    for name in ("point_l2", "normal_l2", "lever_l2", "gap_abs", "relative_velocity_l2"):
+    for name in (
+        "point_l2",
+        "secondary_point_l2",
+        "normal_l2",
+        "lever_l2",
+        "gap_abs",
+        "relative_velocity_l2",
+        "margin_abs",
+    ):
         total = sum(metrics[f"{name}_sum"] for metrics in metrics_by_batch)
         summary[f"{name}_sum"] = total
         summary[f"{name}_mean"] = total / shared_valid_count if shared_valid_count > 0 else 0.0
@@ -1072,7 +1111,7 @@ def run_diagnostic(env, args: argparse.Namespace) -> None:
     """Run dataset-contact and runtime-contact one-step A/B predictions."""
     solver = env.neural_adapter.solver
     history_length = int(getattr(solver, "num_states_history", 1))
-    is_contact_tokens = getattr(solver, "contact_representation", "flat") == "contact_tokens"
+    is_contact_tokens = getattr(solver, "contact_representation", "flat") in {"contact_tokens", "active15_tokens"}
     print(
         "[setup] "
         f"dataset={args.dataset}, checkpoint={args.checkpoint or 'none'}, num_envs={args.num_envs}, "

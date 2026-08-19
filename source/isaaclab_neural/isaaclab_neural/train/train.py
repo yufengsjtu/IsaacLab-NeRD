@@ -150,6 +150,15 @@ def load_training_cfg(args):
 def validate_cfg(cfg) -> None:
     """Validate solver/network consistency for common NeRD training configs."""
     neural_solver_name = cfg["env"]["neural_solver_cfg"]["name"]
+    contact_representation = cfg["env"]["neural_solver_cfg"].get("contact_representation", "flat")
+    encoder_type = cfg.get("inputs", {}).get("contact_set", {}).get("encoder_type")
+    active15_encoder = encoder_type == "body_routed_active15"
+    active15_representation = contact_representation == "active15_tokens"
+    if active15_encoder != active15_representation:
+        raise ValueError(
+            "contact_representation='active15_tokens' and "
+            "contact_set encoder_type='body_routed_active15' must be configured together."
+        )
     if "transformer" in cfg["network"]:
         if neural_solver_name != "TransformerNeuralSolver":
             raise ValueError("Transformer network requires TransformerNeuralSolver.")

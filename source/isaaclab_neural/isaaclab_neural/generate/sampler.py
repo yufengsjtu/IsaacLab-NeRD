@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from isaaclab_neural.contacts.contact_set_schema import CONTACT_REPRESENTATION_TOKENS, CONTACT_TOKEN_DIM
+from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM, is_contact_token_representation
 from isaaclab_neural.generate.adapter import DataGenerationAdapter
 
 
@@ -49,8 +49,8 @@ class ActionTrajectorySampler:
         num_envs = self.adapter.num_envs
         trajectory_length = self.trajectory_length
         num_contacts_per_env = self.adapter.num_contacts_per_env
-        use_contact_tokens = (
-            getattr(self.adapter.solver, "contact_representation", "flat") == CONTACT_REPRESENTATION_TOKENS
+        use_contact_tokens = is_contact_token_representation(
+            getattr(self.adapter.solver, "contact_representation", "flat")
         )
         buffers: dict[str, Any] = {
             "states": torch.empty((num_envs, trajectory_length, self.adapter.state_dim), device=self.data_device),

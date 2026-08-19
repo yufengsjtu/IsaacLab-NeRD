@@ -21,6 +21,7 @@ NVDATASET_OUTPUT_DIR="${NVDATASET_OUTPUT_DIR:-$WORKFLOW_ID}"
 DATASET_CACHE_MODE="${DATASET_CACHE_MODE:-auto}"
 TRAIN_SEED="${TRAIN_SEED:-0}"
 NVDATASET_INDEX_URL="${NVDATASET_INDEX_URL:-https://artifactory.pdx.nvidia.com/artifactory/api/pypi/sw-ngc-data-platform-pypi-local/simple}"
+AMLFS_DATA_ROOT="${AMLFS_DATA_ROOT:-}"
 
 export OUTPUT_LOCAL_PATH
 
@@ -168,7 +169,7 @@ download_code() {
 }
 
 download_data() {
-    if [[ "$DATASET_CACHE_MODE" == "off" ]]; then
+    if [[ "$DATASET_CACHE_MODE" == "off" || "$DATASET_CACHE_MODE" == "local_require" ]]; then
         echo "Dataset cache mode is off; skipping storage input download."
         DATASET_INPUT_PATH=""
         return
@@ -212,6 +213,46 @@ download_data() {
         mkdir -p "$DATASET_INPUT_PATH"
     fi
 }
+
+prepare_dataset_storage() {
+    if [[ -z "$AMLFS_DATA_ROOT" ]]; then
+        if [[ "$DATASET_CACHE_MODE" == "local_require" ]]; then
+            echo "[FATAL] DATASET_CACHE_MODE=local_require requires AMLFS_DATA_ROOT."
+            exit 1
+        fi
+        echo "AMLFS_DATA_ROOT is empty; using pod-local dataset storage."
+        return
+    fi
+    if [[ "$AMLFS_DATA_ROOT" != /mnt/*/* ]]; then
+        echo "[FATAL] AMLFS_DATA_ROOT must be a path below /mnt/<mount-name>."
+        exit 1
+    fi
+    local relative_path="${AMLFS_DATA_ROOT#/mnt/}"
+    local amlfs_mount="/mnt/${relative_path%%/*}"
+    if [[ ! -d "$amlfs_mount" ]]; then
+        echo "[FATAL] Requested AMLFS mount is unavailable: $amlfs_mount"
+        exit 1
+    fi
+
+    mkdir -p "$AMLFS_DATA_ROOT" "$PROJECT_ROOT/data"
+    if [[ ! -w "$AMLFS_DATA_ROOT" ]]; then
+        echo "[FATAL] AMLFS dataset directory is not writable: $AMLFS_DATA_ROOT"
+        exit 1
+    fi
+    if [[ -L "$PROJECT_ROOT/data/datasets" ]]; then
+        if [[ "$(readlink -f "$PROJECT_ROOT/data/datasets")" != "$(readlink -f "$AMLFS_DATA_ROOT")" ]]; then
+            echo "[FATAL] Existing dataset symlink does not target AMLFS_DATA_ROOT."
+            exit 1
+        fi
+    elif [[ -e "$PROJECT_ROOT/data/datasets" ]]; then
+        echo "[FATAL] Cannot attach AMLFS because $PROJECT_ROOT/data/datasets already exists."
+        exit 1
+    else
+        ln -s "$AMLFS_DATA_ROOT" "$PROJECT_ROOT/data/datasets"
+    fi
+    echo "Using Lustre dataset storage: $AMLFS_DATA_ROOT"
+}
+
 
 extract_code() {
     local code_archive=""
@@ -308,4 +349,5 @@ mkdir -p /tmp/nvdatasets /tmp/swift
 download_code
 download_data
 extract_code
+prepare_dataset_storage
 run_experiment

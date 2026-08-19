@@ -73,7 +73,7 @@ def get_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--contact-representation",
-        choices=["flat", "contact_tokens"],
+        choices=["flat", "contact_tokens", "active15_tokens"],
         default="flat",
         help="Contact encoding stored in generated HDF5 datasets.",
     )
@@ -81,7 +81,7 @@ def get_parser() -> argparse.ArgumentParser:
         "--max-contact-tokens",
         type=int,
         default=DEFAULT_MAX_CONTACT_TOKENS,
-        help="Directed contact token capacity when --contact-representation=contact_tokens.",
+        help="Padded contact token capacity for either token representation.",
     )
     parser.add_argument("--states-frame", choices=["world", "body", "body_translation_only"], default="body")
     parser.add_argument("--anchor-frame-step", choices=["first", "last", "every"], default="every")

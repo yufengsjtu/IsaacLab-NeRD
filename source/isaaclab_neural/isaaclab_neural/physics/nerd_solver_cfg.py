@@ -29,7 +29,7 @@ ContactPackingPolicy = Literal[
 ]
 """Policy for ordering Newton native contacts before packing into fixed slots."""
 
-ContactRepresentation = Literal["flat", "contact_tokens"]
+ContactRepresentation = Literal["flat", "contact_tokens", "active15_tokens"]
 """Contact encoding used by the trained neural model."""
 
 
@@ -88,7 +88,7 @@ class NerdSolverCfg(NewtonSolverCfg):
     """Contact encoding consumed by the trained model."""
 
     max_contact_tokens: int = 64
-    """Maximum directed contact tokens per environment when ``contact_representation='contact_tokens'``."""
+    """Maximum padded contact tokens per environment for either token representation."""
 
     states_frame: Literal["world", "body", "body_translation_only"] = "body"
     """Frame used to express neural-model states."""

@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from .abstract_contact import AbstractContact
+from .active15_contact_encoder import Active15ContactEncoder
 from .contact_set_encoder import (
     ContactSetEncoder,
     contact_token_validity_mask,
@@ -11,6 +12,10 @@ from .contact_set_encoder import (
     transform_contact_tokens_to_body_frame,
 )
 from .contact_set_schema import (
+    ACTIVE15_FEATURE_DIM,
+    ACTIVE15_FEATURE_NAMES,
+    ACTIVE15_TOKEN_DIM,
+    CONTACT_REPRESENTATION_ACTIVE15,
     CONTACT_REPRESENTATION_FLAT,
     CONTACT_REPRESENTATION_TOKENS,
     CONTACT_TOKEN_DIM,
@@ -23,6 +28,11 @@ from .packing import ContactPackingPolicy, get_contact_order, resolve_contact_pa
 
 __all__ = [
     "AbstractContact",
+    "ACTIVE15_FEATURE_DIM",
+    "ACTIVE15_FEATURE_NAMES",
+    "ACTIVE15_TOKEN_DIM",
+    "Active15ContactEncoder",
+    "CONTACT_REPRESENTATION_ACTIVE15",
     "CONTACT_REPRESENTATION_FLAT",
     "CONTACT_REPRESENTATION_TOKENS",
     "CONTACT_TOKEN_DIM",
