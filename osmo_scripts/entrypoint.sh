@@ -8,6 +8,10 @@ WORKFLOW_ID="${WORKFLOW_ID:?WORKFLOW_ID is required}"
 OUTPUT_LOCAL_PATH="${OUTPUT_LOCAL_PATH:-/tmp/runs/output}"
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/code/IsaacLab-NeRD}"
 STORAGE_BACKEND="${STORAGE_BACKEND:-nvdataset}"
+OSMO_CODE_DIR="${OSMO_CODE_DIR:-/osmo/data/input/0}"
+OSMO_DATA_DIR="${OSMO_DATA_DIR:-/osmo/data/input/1}"
+OSMO_DATASET_UPLOAD_URL="${OSMO_DATASET_UPLOAD_URL:-}"
+OSMO_OUTPUT_URL="${OSMO_OUTPUT_URL:-}"
 SWIFT_CODE_DIR="${SWIFT_CODE_DIR:-/tmp/swift/code}"
 SWIFT_DATA_DIR="${SWIFT_DATA_DIR:-/tmp/swift/data}"
 SWIFT_OUTPUT_PREFIX="${SWIFT_OUTPUT_PREFIX:-$WORKFLOW_ID}"
@@ -15,17 +19,19 @@ NVDATASET_CODE_DIR="${NVDATASET_CODE_DIR:-/tmp/nvdatasets/code}"
 NVDATASET_DATA_DIR="${NVDATASET_DATA_DIR:-/tmp/nvdatasets/data}"
 NVDATASET_OUTPUT_DIR="${NVDATASET_OUTPUT_DIR:-$WORKFLOW_ID}"
 DATASET_CACHE_MODE="${DATASET_CACHE_MODE:-auto}"
+TRAIN_SEED="${TRAIN_SEED:-0}"
 NVDATASET_INDEX_URL="${NVDATASET_INDEX_URL:-https://artifactory.pdx.nvidia.com/artifactory/api/pypi/sw-ngc-data-platform-pypi-local/simple}"
 
 export OUTPUT_LOCAL_PATH
-export NGC_API_KEY="${NGC_API_KEY:-}"
-export WANDB_API_KEY="${WANDB_API_KEY:-}"
 
 write_shell_exports() {
     {
         printf 'export WORKFLOW_ID=%q\n' "$WORKFLOW_ID"
         printf 'export OUTPUT_LOCAL_PATH=%q\n' "$OUTPUT_LOCAL_PATH"
         printf 'export STORAGE_BACKEND=%q\n' "$STORAGE_BACKEND"
+        printf 'export OSMO_CODE_DIR=%q\n' "$OSMO_CODE_DIR"
+        printf 'export OSMO_OUTPUT_URL=%q\n' "$OSMO_OUTPUT_URL"
+        printf 'export OSMO_DATASET_UPLOAD_URL=%q\n' "$OSMO_DATASET_UPLOAD_URL"
         printf 'export SWIFT_CODE_DIR=%q\n' "$SWIFT_CODE_DIR"
         printf 'export SWIFT_OUTPUT_CONTAINER=%q\n' "${SWIFT_OUTPUT_CONTAINER:-}"
         printf 'export SWIFT_OUTPUT_PREFIX=%q\n' "${SWIFT_OUTPUT_PREFIX:-}"
@@ -53,6 +59,9 @@ install_python_shims() {
 
 install_storage_deps() {
     case "$STORAGE_BACKEND" in
+        osmo_data)
+            command -v osmo >/dev/null
+            ;;
         swift)
             python3 -m pip install --quiet -U python-swiftclient
             python3 /tmp/swift_io.py check
@@ -78,7 +87,9 @@ upload_storage_output() {
 
     trap - EXIT
     set +e
-    if [[ "$STORAGE_BACKEND" == "swift" && -n "${SWIFT_OUTPUT_CONTAINER:-}" ]]; then
+    if [[ "$STORAGE_BACKEND" == "osmo_data" && -n "$OSMO_OUTPUT_URL" ]]; then
+        output_dir_name="$WORKFLOW_ID"
+    elif [[ "$STORAGE_BACKEND" == "swift" && -n "${SWIFT_OUTPUT_CONTAINER:-}" ]]; then
         output_dir_name="${SWIFT_OUTPUT_PREFIX:-$WORKFLOW_ID}"
     elif [[ "$STORAGE_BACKEND" == "nvdataset" && -n "${NVDATASET_OUTPUT_DATASET:-}" ]]; then
         output_dir_name="${NVDATASET_OUTPUT_DIR:-$WORKFLOW_ID}"
@@ -92,13 +103,17 @@ upload_storage_output() {
         mkdir -p "$output_upload_root/$output_dir_name"
         sync "$OUTPUT_LOCAL_PATH" || true
         cp -a "$OUTPUT_LOCAL_PATH"/. "$output_upload_root/$output_dir_name"/
-        upload_log="$output_upload_root/$output_dir_name/nvdataset_upload.log"
+        upload_log="$output_upload_root/$output_dir_name/storage_upload.log"
         {
             echo "=== Uploading $output_upload_root through $STORAGE_BACKEND storage ==="
             date -u +"Upload started at %Y-%m-%dT%H:%M:%SZ"
         } | tee -a "$OUTPUT_LOCAL_PATH/entry.log" "$upload_log"
 
-        if [[ "$STORAGE_BACKEND" == "swift" ]]; then
+        if [[ "$STORAGE_BACKEND" == "osmo_data" ]]; then
+            osmo data upload \
+                "$OSMO_OUTPUT_URL" \
+                "$output_upload_root/$output_dir_name" 2>&1 | tee -a "$OUTPUT_LOCAL_PATH/entry.log" "$upload_log"
+        elif [[ "$STORAGE_BACKEND" == "swift" ]]; then
             python3 /tmp/swift_io.py upload-directory \
                 --container "$SWIFT_OUTPUT_CONTAINER" \
                 --source-dir "$output_upload_root/$output_dir_name" \
@@ -123,7 +138,13 @@ upload_storage_output() {
 }
 
 download_code() {
-    if [[ "$STORAGE_BACKEND" == "swift" ]]; then
+    if [[ "$STORAGE_BACKEND" == "osmo_data" ]]; then
+        if [[ ! -d "$OSMO_CODE_DIR" ]]; then
+            echo "[FATAL] OSMO code input is unavailable at $OSMO_CODE_DIR."
+            exit 1
+        fi
+        return
+    elif [[ "$STORAGE_BACKEND" == "swift" ]]; then
         if [[ -z "${SWIFT_CODE_CONTAINER:-}" || -z "${SWIFT_CODE_OBJECT:-}" ]]; then
             echo "[FATAL] Set SWIFT_CODE_CONTAINER and SWIFT_CODE_OBJECT for the Swift backend."
             exit 1
@@ -152,7 +173,14 @@ download_data() {
         DATASET_INPUT_PATH=""
         return
     fi
-    if [[ "$STORAGE_BACKEND" == "swift" ]]; then
+    if [[ "$STORAGE_BACKEND" == "osmo_data" ]]; then
+        if [[ -d "$OSMO_DATA_DIR" ]]; then
+            DATASET_INPUT_PATH="$OSMO_DATA_DIR"
+        else
+            DATASET_INPUT_PATH=""
+        fi
+        return
+    elif [[ "$STORAGE_BACKEND" == "swift" ]]; then
         if [[ -z "${SWIFT_DATA_CONTAINER:-}" ]]; then
             DATASET_INPUT_PATH=""
             return
@@ -194,7 +222,9 @@ extract_code() {
     mkdir -p "$HOME/code"
     shopt -s nullglob globstar
     code_input_dir="$NVDATASET_CODE_DIR"
-    if [[ "$STORAGE_BACKEND" == "swift" ]]; then
+    if [[ "$STORAGE_BACKEND" == "osmo_data" ]]; then
+        code_input_dir="$OSMO_CODE_DIR"
+    elif [[ "$STORAGE_BACKEND" == "swift" ]]; then
         code_input_dir="$SWIFT_CODE_DIR"
     fi
     for candidate in "$code_input_dir"/**/*.tar.gz "$code_input_dir"/**/*.tgz; do
@@ -233,14 +263,17 @@ run_experiment() {
         --dataset-subdir "${DATASET_SUBDIR:?DATASET_SUBDIR is required}"
         --dataset-cache-mode "$DATASET_CACHE_MODE"
         --storage-backend "$STORAGE_BACKEND"
+        --train-seed "$TRAIN_SEED"
     )
 
     if [[ -n "${DATASET_INPUT_PATH:-}" ]]; then
         args+=(--dataset-input-path "$DATASET_INPUT_PATH")
     fi
-    if [[ "$STORAGE_BACKEND" == "swift" && -n "${SWIFT_DATA_CONTAINER:-}" ]]; then
+    if [[ "$STORAGE_BACKEND" == "osmo_data" && -n "$OSMO_DATASET_UPLOAD_URL" ]]; then
+        args+=(--osmo-data-dataset-url "$OSMO_DATASET_UPLOAD_URL")
+    elif [[ "$STORAGE_BACKEND" == "swift" && -n "${SWIFT_DATA_CONTAINER:-}" ]]; then
         args+=(--swift-data-container "$SWIFT_DATA_CONTAINER")
-    elif [[ -n "${NVDATASET_DATA_DATASET:-}" ]]; then
+    elif [[ "$STORAGE_BACKEND" == "nvdataset" && -n "${NVDATASET_DATA_DATASET:-}" ]]; then
         args+=(
           --nvdataset-data-dataset "$NVDATASET_DATA_DATASET"
           --nvdataset-data-description "${NVDATASET_DATA_DESCRIPTION:-}"

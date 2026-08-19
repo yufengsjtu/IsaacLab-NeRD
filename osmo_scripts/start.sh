@@ -12,6 +12,22 @@ REFRESH_CREDENTIAL="${REFRESH_CREDENTIAL:-0}"
 
 STORAGE_BACKEND="${STORAGE_BACKEND:-nvdataset}"
 STORAGE_CREDENTIAL="${STORAGE_CREDENTIAL:-}"
+STORAGE_AUTH_URL_ENV=""
+STORAGE_AUTH_URL_KEY=""
+STORAGE_AUTH_VERSION_ENV=""
+STORAGE_AUTH_VERSION_KEY=""
+STORAGE_USER_ENV=""
+STORAGE_USER_KEY=""
+STORAGE_KEY_ENV=""
+STORAGE_KEY_KEY=""
+STORAGE_TENANT_ENV=""
+STORAGE_TENANT_KEY=""
+OSMO_DATA_CREDENTIAL="${OSMO_DATA_CREDENTIAL:-css_team-nvr-srl}"
+OSMO_SWIFT_BASE="${OSMO_SWIFT_BASE:-swift://pdx.s8k.io/AUTH_team-nvr-srl/users/jiex/isaaclab-nerd-rowan}"
+OSMO_CODE_URL=""
+OSMO_DATASET_INPUT_URL=""
+OSMO_DATASET_UPLOAD_URL=""
+OSMO_OUTPUT_URL=""
 SWIFT_CREDENTIAL="${SWIFT_CREDENTIAL:-swift_cred}"
 SWIFT_AUTH_URL="${SWIFT_AUTH_URL:-https://pdx.s8k.io}"
 SWIFT_AUTH_VERSION="${SWIFT_AUTH_VERSION:-1}"
@@ -28,6 +44,7 @@ NVDATASET_OUTPUT_DATASET="${NVDATASET_OUTPUT_DATASET:-IsaacLab-NeRD-Output}"
 NVDATASET_OUTPUT_DESCRIPTION="${NVDATASET_OUTPUT_DESCRIPTION:-IsaacLab-NeRD OSMO training outputs for $RUN_ID.}"
 NVDATASET_INDEX_URL="${NVDATASET_INDEX_URL:-https://artifactory.pdx.nvidia.com/artifactory/api/pypi/sw-ngc-data-platform-pypi-local/simple}"
 DATASET_CACHE_MODE="${DATASET_CACHE_MODE:-auto}"
+TRAIN_SEED="${TRAIN_SEED:-0}"
 OSMO_EXPERIMENT_PRESET="${OSMO_EXPERIMENT_PRESET:-anymal_newton_native}"
 PRESET_FILE="${PRESET_FILE:-}"
 
@@ -44,7 +61,7 @@ OSMO_PRIORITY_OVERRIDE=""
 NGC_API_KEY="${NGC_API_KEY:-}"
 NVDATASET_TENANTID="${NVDATASET_TENANTID:-}"
 ENABLE_WANDB="${ENABLE_WANDB:-0}"
-WANDB_API_KEY="${WANDB_API_KEY:-}"
+WANDB_CREDENTIAL="${WANDB_CREDENTIAL:-wandb}"
 WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-nerd-newton}"
 WANDB_EXP_NAME="${WANDB_EXP_NAME:-}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
@@ -58,7 +75,10 @@ Common options:
   --preset-file PATH         Use a custom preset YAML file
   --workflow-name NAME       Override preset workflow base name; run id is appended
   --dataset-subdir NAME      Override generated dataset cache subdirectory
-  --storage-backend NAME     nvdataset (default) or swift
+  --train-seed N             Training random seed (default: 0)
+  --storage-backend NAME     nvdataset (default), swift, or osmo_data
+  --osmo-swift-base URL      Standalone Swift prefix used by osmo_data
+  --osmo-data-credential N   Existing OSMO DATA credential for that prefix
   --code-only                Upload/replace code object without submitting OSMO
   --code-container NAME      Swift code container (default: isaaclab-nerd-code)
   --data-container NAME      Swift generated data container
@@ -77,15 +97,17 @@ Common options:
   --wandb-project NAME       W&B project (default: nerd-newton)
   --wandb-exp-name NAME      W&B run name (default: workflow/dataset subdir)
   --wandb-entity NAME        Optional W&B entity or team
+  --wandb-credential NAME    Existing OSMO GENERIC credential (default: wandb)
   --refresh-credential       Reset the OSMO generic credential before submit
   --workflow-file PATH       Override osmo_workflow.yaml path
   -- <osmo-options>          Forward extra OSMO options such as --pool to validate and submit
 
 Credentials:
+  OSMO DATA credential       Required for --storage-backend osmo_data
   SWIFT_AUTH_KEY             Required for --storage-backend swift
   NGC_API_KEY                Required for the default NV-Datasets backend
   NVDATASET_TENANTID         Required for the default NV-Datasets backend
-  WANDB_API_KEY              Required when using --enable-wandb
+  OSMO GENERIC credential    Required when using --enable-wandb
 EOF
 }
 
@@ -110,6 +132,14 @@ while (($#)); do
             ;;
         --storage-backend)
             STORAGE_BACKEND="${2:?Missing value for --storage-backend}"
+            shift 2
+            ;;
+        --osmo-swift-base)
+            OSMO_SWIFT_BASE="${2:?Missing value for --osmo-swift-base}"
+            shift 2
+            ;;
+        --osmo-data-credential)
+            OSMO_DATA_CREDENTIAL="${2:?Missing value for --osmo-data-credential}"
             shift 2
             ;;
         --code-container)
@@ -150,6 +180,10 @@ while (($#)); do
             ;;
         --dataset-cache-mode)
             DATASET_CACHE_MODE="${2:?Missing value for --dataset-cache-mode}"
+            shift 2
+            ;;
+        --train-seed)
+            TRAIN_SEED="${2:?Missing value for --train-seed}"
             shift 2
             ;;
         --num-gpu|--num-gpus)
@@ -196,6 +230,10 @@ while (($#)); do
             WANDB_ENTITY="${2:?Missing value for --wandb-entity}"
             shift 2
             ;;
+        --wandb-credential)
+            WANDB_CREDENTIAL="${2:?Missing value for --wandb-credential}"
+            shift 2
+            ;;
         --credential)
             STORAGE_CREDENTIAL="${2:?Missing value for --credential}"
             shift 2
@@ -224,7 +262,20 @@ while (($#)); do
     esac
 done
 
+OSMO_CREDENTIAL_LIST="$(osmo credential list 2>/dev/null || true)"
 case "$STORAGE_BACKEND" in
+    osmo_data)
+        if [[ -z "$OSMO_SWIFT_BASE" ]]; then
+            echo "[FATAL] Set OSMO_SWIFT_BASE for the OSMO DATA backend." >&2
+            exit 2
+        fi
+        if [[ "$OSMO_CREDENTIAL_LIST" != *"$OSMO_DATA_CREDENTIAL"* ]]; then
+            echo "[FATAL] OSMO DATA credential $OSMO_DATA_CREDENTIAL is unavailable." >&2
+            exit 2
+        fi
+        echo "=== Verifying OSMO DATA access: ${OSMO_SWIFT_BASE%/}/ ==="
+        osmo data check "${OSMO_SWIFT_BASE%/}/"
+        ;;
     swift)
         STORAGE_CREDENTIAL="${STORAGE_CREDENTIAL:-$SWIFT_CREDENTIAL}"
         STORAGE_AUTH_URL_ENV="SWIFT_AUTH_URL"
@@ -264,12 +315,12 @@ case "$STORAGE_BACKEND" in
         fi
         ;;
     *)
-        echo "[FATAL] Unsupported storage backend: $STORAGE_BACKEND (expected nvdataset or swift)." >&2
+        echo "[FATAL] Unsupported storage backend: $STORAGE_BACKEND (expected nvdataset, swift, or osmo_data)." >&2
         exit 2
         ;;
 esac
-if [[ "$ENABLE_WANDB" == "1" && -z "$WANDB_API_KEY" ]]; then
-    echo "[FATAL] Set WANDB_API_KEY before using --enable-wandb." >&2
+if [[ "$ENABLE_WANDB" == "1" && "$OSMO_CREDENTIAL_LIST" != *"$WANDB_CREDENTIAL"* ]]; then
+    echo "[FATAL] OSMO W&B credential $WANDB_CREDENTIAL is unavailable." >&2
     exit 2
 fi
 
@@ -303,6 +354,29 @@ if [[ -n "$OSMO_PLATFORM_OVERRIDE" ]]; then
 fi
 eval "$(python3 "$SCRIPT_DIR/lib/preset.py" resolve-submit "${resolve_args[@]}")"
 
+if [[ "$STORAGE_BACKEND" == "osmo_data" ]]; then
+    git_revision="$(git -C "$PROJECT_ROOT" rev-parse --short=12 HEAD)"
+    osmo_base="${OSMO_SWIFT_BASE%/}"
+    OSMO_CODE_URL="$osmo_base/code/${RUN_ID}-${git_revision}/"
+    OSMO_DATASET_UPLOAD_URL="$osmo_base/data/datasets/${DATASET_SUBDIR}/"
+    OSMO_OUTPUT_URL="$osmo_base/data/trained_models/"
+    if [[ "$DATASET_CACHE_MODE" == "off" ]]; then
+        OSMO_DATASET_INPUT_URL=""
+    elif osmo data check "$OSMO_DATASET_UPLOAD_URL" >/dev/null 2>&1; then
+        OSMO_DATASET_INPUT_URL="$OSMO_DATASET_UPLOAD_URL"
+    elif [[ "$DATASET_CACHE_MODE" == "require" ]]; then
+        echo "[FATAL] Required OSMO DATA cache is unavailable: $OSMO_DATASET_UPLOAD_URL" >&2
+        exit 2
+    else
+        echo "=== OSMO DATA cache is unavailable; this workflow will generate it. ==="
+    fi
+    echo "=== Immutable code URL: $OSMO_CODE_URL ==="
+    echo "=== Dataset upload URL: $OSMO_DATASET_UPLOAD_URL ==="
+    if [[ -n "$OSMO_DATASET_INPUT_URL" ]]; then
+        echo "=== Dataset input URL: $OSMO_DATASET_INPUT_URL ==="
+    fi
+    echo "=== Output parent URL: $OSMO_OUTPUT_URL ==="
+fi
 TMP_DIR="$(mktemp -d)"
 cleanup() {
     rm -rf "$TMP_DIR"
@@ -316,7 +390,11 @@ python3 "$SCRIPT_DIR/lib/package_code.py" \
     --project-root "$PROJECT_ROOT" \
     --archive-path "$ARCHIVE_PATH"
 
-if [[ "$STORAGE_BACKEND" == "swift" ]]; then
+if [[ "$STORAGE_BACKEND" == "osmo_data" ]]; then
+    echo "=== Uploading code archive through OSMO DATA: $OSMO_CODE_URL ==="
+    osmo data upload "$OSMO_CODE_URL" "$ARCHIVE_PATH"
+    osmo data check "$OSMO_CODE_URL"
+elif [[ "$STORAGE_BACKEND" == "swift" ]]; then
     echo "=== Ensuring local Swift client ==="
     export SWIFT_AUTH_URL SWIFT_AUTH_VERSION SWIFT_USER SWIFT_AUTH_KEY
     if ! python3 "$SCRIPT_DIR/lib/swift_io.py" check >/dev/null 2>&1; then
@@ -364,7 +442,9 @@ credential_exists() {
     [[ "$credential_list" == *"$STORAGE_CREDENTIAL"* ]]
 }
 
-if [[ "$REFRESH_CREDENTIAL" != "1" ]] && credential_exists; then
+if [[ "$STORAGE_BACKEND" == "osmo_data" ]]; then
+    echo "=== Reusing existing OSMO DATA credential: $OSMO_DATA_CREDENTIAL ==="
+elif [[ "$REFRESH_CREDENTIAL" != "1" ]] && credential_exists; then
     echo "=== Reusing existing OSMO storage credential: $STORAGE_CREDENTIAL ==="
 else
     echo "=== Setting OSMO storage credential: $STORAGE_CREDENTIAL ==="
@@ -422,7 +502,12 @@ SUBMIT_ARGS=(
     "workflow_base_name=$WORKFLOW_BASE_NAME"
     "dataset_subdir=$DATASET_SUBDIR"
     "dataset_cache_mode=$DATASET_CACHE_MODE"
+    "train_seed=$TRAIN_SEED"
     "storage_backend=$STORAGE_BACKEND"
+    "osmo_code_url=$OSMO_CODE_URL"
+    "osmo_dataset_input_url=$OSMO_DATASET_INPUT_URL"
+    "osmo_dataset_upload_url=$OSMO_DATASET_UPLOAD_URL"
+    "osmo_output_url=$OSMO_OUTPUT_URL"
     "storage_credential=$STORAGE_CREDENTIAL"
     "storage_auth_url_env=$STORAGE_AUTH_URL_ENV"
     "storage_auth_url_key=$STORAGE_AUTH_URL_KEY"
@@ -453,10 +538,10 @@ SUBMIT_ARGS=(
 if [[ "$ENABLE_WANDB" == "1" ]]; then
     SUBMIT_ARGS+=(
         "enable_wandb=true"
+        "wandb_credential=$WANDB_CREDENTIAL"
         "wandb_project_name=$WANDB_PROJECT_NAME"
         "wandb_exp_name=$WANDB_EXP_NAME"
         "wandb_entity=$WANDB_ENTITY"
-        "wandb_api_key=$WANDB_API_KEY"
     )
 fi
 OSMO_RESOURCE_ARGS=()
@@ -468,7 +553,7 @@ if [[ -n "$OSMO_PRIORITY_OVERRIDE" ]]; then
     OSMO_SUBMIT_ONLY_ARGS+=(--priority "$OSMO_PRIORITY_OVERRIDE")
 fi
 
-echo "=== Resolved OSMO resources: gpu=$OSMO_NUM_GPU cpu=$OSMO_NUM_CPU memory=$OSMO_MEMORY storage=$OSMO_STORAGE platform=$OSMO_PLATFORM pool=${OSMO_POOL_OVERRIDE:-<default>} ==="
+echo "=== Resolved OSMO resources: gpu=$OSMO_NUM_GPU cpu=$OSMO_NUM_CPU memory=$OSMO_MEMORY storage=$OSMO_STORAGE platform=$OSMO_PLATFORM pool=${OSMO_POOL_OVERRIDE:-<default>} train_seed=$TRAIN_SEED ==="
 
 echo "=== Validating OSMO workflow ==="
 osmo workflow validate "${SUBMIT_ARGS[@]}" "${OSMO_RESOURCE_ARGS[@]}" "${OSMO_ARGS[@]}" -- "$WORKFLOW_FILE"

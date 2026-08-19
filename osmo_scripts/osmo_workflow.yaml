@@ -28,7 +28,12 @@ workflow:
       WORKFLOW_BASE_NAME: "{{ workflow_base_name }}"
       DATASET_SUBDIR: "{{ dataset_subdir }}"
       DATASET_CACHE_MODE: "{{ dataset_cache_mode }}"
+      TRAIN_SEED: "{{ train_seed }}"
       STORAGE_BACKEND: "{{ storage_backend }}"
+      OSMO_CODE_DIR: /osmo/data/input/0
+      OSMO_DATA_DIR: /osmo/data/input/1
+      OSMO_DATASET_UPLOAD_URL: "{{ osmo_dataset_upload_url }}"
+      OSMO_OUTPUT_URL: "{{ osmo_output_url }}"
       SWIFT_CODE_DIR: /tmp/swift/code
       SWIFT_CODE_CONTAINER: "{{ swift_code_container }}"
       SWIFT_CODE_OBJECT: "{{ swift_code_object }}"
@@ -51,18 +56,32 @@ workflow:
       WANDB_PROJECT_NAME: "{{ wandb_project_name }}"
       WANDB_EXP_NAME: "{{ wandb_exp_name }}"
       WANDB_ENTITY: "{{ wandb_entity }}"
-      WANDB_API_KEY: "{{ wandb_api_key }}"
     command:
     - /bin/bash
     args:
     - /tmp/entrypoint.sh
+{% if storage_backend != "osmo_data" or enable_wandb == "true" %}
     credentials:
+{% if storage_backend != "osmo_data" %}
       {{ storage_credential }}:
         {{ storage_auth_url_env }}: {{ storage_auth_url_key }}
         {{ storage_auth_version_env }}: {{ storage_auth_version_key }}
         {{ storage_user_env }}: {{ storage_user_key }}
         {{ storage_key_env }}: {{ storage_key_key }}
         {{ storage_tenant_env }}: {{ storage_tenant_key }}
+{% endif %}
+{% if enable_wandb == "true" %}
+      {{ wandb_credential }}:
+        WANDB_API_KEY: wandb_api_key
+{% endif %}
+{% endif %}
+{% if storage_backend == "osmo_data" %}
+    inputs:
+    - url: {{ osmo_code_url }}
+{% if osmo_dataset_input_url %}
+    - url: {{ osmo_dataset_input_url }}
+{% endif %}
+{% endif %}
     files:
     - path: /tmp/init.sh
       localpath: {{ init_sh_localpath }}
@@ -85,7 +104,12 @@ default-values:
   resource_platform: ovx-l40s
   dataset_subdir: anymal-c-fixed-ground
   dataset_cache_mode: auto
+  train_seed: "0"
   storage_backend: nvdataset
+  osmo_code_url: ""
+  osmo_dataset_input_url: ""
+  osmo_dataset_upload_url: ""
+  osmo_output_url: ""
   storage_credential: nvdataset_cred
   storage_auth_url_env: STORAGE_UNUSED_AUTH_URL
   storage_auth_url_key: tenant_id
@@ -112,10 +136,10 @@ default-values:
   nvdataset_output_description: IsaacLab-NeRD OSMO training outputs.
   nvdataset_index_url: https://artifactory.pdx.nvidia.com/artifactory/api/pypi/sw-ngc-data-platform-pypi-local/simple
   enable_wandb: "false"
+  wandb_credential: wandb
   wandb_project_name: nerd-newton
   wandb_exp_name: ""
   wandb_entity: ""
-  wandb_api_key: ""
   init_sh_localpath: ./init.sh
   entrypoint_localpath: ./entrypoint.sh
   nvdataset_io_localpath: ./lib/nvdataset_io.py

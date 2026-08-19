@@ -264,13 +264,20 @@ def stage_generated_datasets(
     swift_data_container: str,
     nvdataset_data_dataset: str,
     nvdataset_data_description: str,
+    osmo_data_dataset_url: str,
 ):
     files = sorted(local_env_dir.glob("*.hdf5"))
     if not files:
         print(f"No generated HDF5 datasets found under {local_env_dir} to stage.")
         return
 
-    if storage_backend == "swift" and swift_data_container:
+    if storage_backend == "osmo_data" and osmo_data_dataset_url:
+        print(f"Uploading generated datasets through OSMO DATA to {osmo_data_dataset_url}.")
+        subprocess.run(
+            ["osmo", "data", "upload", osmo_data_dataset_url, str(local_env_dir)],
+            check=True,
+        )
+    elif storage_backend == "swift" and swift_data_container:
         from lib import swift_io
 
         prefix = f"{dataset_subdir}/{env_name}"
@@ -395,7 +402,7 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
         "--num-envs",
         str(experiment["train_num_envs"]),
         "--seed",
-        "0",
+        str(wandb_args.train_seed),
         "--headless",
         "--skip-check-log-override",
     ]
@@ -559,6 +566,7 @@ def run(args: argparse.Namespace):
             swift_data_container=args.swift_data_container,
             nvdataset_data_dataset=args.nvdataset_data_dataset,
             nvdataset_data_description=args.nvdataset_data_description,
+            osmo_data_dataset_url=args.osmo_data_dataset_url,
         )
 
     if experiment.get("diagnostic_only", False):
@@ -577,13 +585,15 @@ def main():
     parser.add_argument("--dataset-subdir", required=True)
     parser.add_argument("--dataset-cache-mode", default="auto", choices=("auto", "require", "off"))
     parser.add_argument("--dataset-input-path", default="")
-    parser.add_argument("--storage-backend", default="nvdataset", choices=("nvdataset", "swift"))
+    parser.add_argument("--storage-backend", default="nvdataset", choices=("nvdataset", "swift", "osmo_data"))
+    parser.add_argument("--osmo-data-dataset-url", default="")
     parser.add_argument("--swift-data-container", default="")
     parser.add_argument("--nvdataset-data-dataset", default="")
     parser.add_argument("--nvdataset-data-description", default="IsaacLab-NeRD generated HDF5 datasets.")
     parser.add_argument("--output-root", default="/tmp/runs/output")
     parser.add_argument("--dataset-dir", default="./data/datasets")
     parser.add_argument("--tensorboard-port", type=int, default=6006)
+    parser.add_argument("--train-seed", type=int, default=0)
     parser.add_argument("--enable-wandb", action="store_true", help="Enable Weights & Biases logging.")
     parser.add_argument("--wandb-project-name", default="nerd-newton")
     parser.add_argument("--wandb-exp-name", default="")

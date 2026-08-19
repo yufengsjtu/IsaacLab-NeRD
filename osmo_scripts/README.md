@@ -4,6 +4,11 @@ This directory contains the OSMO entrypoints for running IsaacLab-NeRD training
 jobs with NV-Datasets or OpenStack Swift. NV-Datasets remains the default;
 select Swift with `--storage-backend swift`.
 
+`--storage-backend osmo_data` uses OSMO's existing DATA credentials instead of
+raw Swift user/key environment variables. Its default standalone prefix is
+`swift://pdx.s8k.io/AUTH_team-nvr-srl/users/jiex/isaaclab-nerd-rowan`; override
+it with `--osmo-swift-base` or `OSMO_SWIFT_BASE`.
+
 ## Storage Layout
 
 The default workflow uses three long-lived NV-Datasets datasets:
@@ -51,6 +56,8 @@ The launcher supports declarative presets in `osmo_scripts/presets/`:
   `Anymal-C-Rough-Native` dataset paths.
 - `anymal_rough_newton_native_contact_tokens`: rough-terrain equivalent with
   token HDF5 datasets and the contact-token transformer config.
+- `anymal_rough_newton_native_body_routed`: rough-terrain body-routed Deep Sets
+  model that reuses the same canonical contact-token HDF5 datasets.
 - `anymal_fixed_ground`: Anymal-C with fixed-ground abstract contacts.
 - `cartpole_fixed_ground`: Cartpole with fixed-ground contacts.
 
@@ -123,6 +130,7 @@ Training is launched from the preset's `train_task` and `train_cfg`.
 
 - Single-GPU presets run `python -m isaaclab_neural.train.train`.
 - Multi-GPU presets run `torch.distributed.run --nproc_per_node <num_gpus>`.
+- `--train-seed N` sets the training seed independently of the fixed dataset-generation seeds.
 - `train_preset` is forwarded as an Isaac Lab Hydra preset, for example
   `presets=newton_mjwarp` for Anymal Newton/MJWarp jobs.
 - `update_dataset_statistics: true` adds `--update-dataset-statistics` before
@@ -151,11 +159,12 @@ duplicating large datasets in run outputs.
 
 #### Weights & Biases (optional)
 
-TensorBoard is always enabled. To also log to W&B from OSMO:
+TensorBoard is always enabled. To also log to W&B, bind an existing OSMO
+GENERIC credential whose payload contains `wandb_api_key`:
 
 ```bash
-export WANDB_API_KEY=<your-wandb-api-key>
-./osmo_scripts/start.sh --enable-wandb --wandb-project nerd-newton
+osmo credential list
+./osmo_scripts/start.sh --enable-wandb --wandb-credential wandb --wandb-project nerd-newton
 ```
 
 Optional overrides:
@@ -206,6 +215,15 @@ Set NV-Datasets credentials first:
 ```bash
 export NGC_API_KEY=<your-nvapi-key>
 export NVDATASET_TENANTID=<your-tenant-id>
+```
+
+Use the credential-backed standalone Swift prefix without local Swift secrets:
+
+```bash
+./osmo_scripts/start.sh \
+  --storage-backend osmo_data \
+  --osmo-swift-base swift://pdx.s8k.io/AUTH_team-nvr-srl/users/jiex/isaaclab-nerd-rowan \
+  --osmo-data-credential css_team-nvr-srl
 ```
 
 To use Swift instead, provide legacy name/key authentication only through the

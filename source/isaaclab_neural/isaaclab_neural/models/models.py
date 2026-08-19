@@ -17,6 +17,7 @@ from isaaclab_neural.contacts.tensor_utils import (
     normalize_contact_tokens,
 )
 from isaaclab_neural.models.base_models import CNNBase, GRUBase, LSTMBase, MLPBase
+from isaaclab_neural.models.body_routed_contact_model import BodyRoutedContactEncoder
 from isaaclab_neural.models.contact_set_model import ContactSetEncoderBlock
 from isaaclab_neural.models.model_kan import KAN
 from isaaclab_neural.models.model_transformer import GPT, GPTConfig
@@ -200,10 +201,31 @@ class ModelMixedInput(nn.Module):
                     max_other_bodies=int(contact_cfg.get("max_other_bodies", 32)),
                     device=device,
                 )
+            elif encoder_type == "body_routed":
+                configured_num_bodies = contact_cfg.get("num_bodies")
+                if num_bodies is not None and configured_num_bodies is not None:
+                    if int(configured_num_bodies) != int(num_bodies):
+                        raise ValueError(
+                            "Configured contact_set num_bodies does not match runtime primary-body metadata."
+                        )
+                resolved_num_bodies = num_bodies if num_bodies is not None else configured_num_bodies
+                if resolved_num_bodies is None:
+                    raise ValueError(
+                        "contact_set encoder_type='body_routed' requires num_bodies from runtime metadata or config."
+                    )
+                if contact_dim != CONTACT_TOKEN_DIM:
+                    raise ValueError("body_routed contact encoding requires the canonical 17-D token schema.")
+                self.contact_set_encoder = BodyRoutedContactEncoder(
+                    num_bodies=int(resolved_num_bodies),
+                    body_latent_dim=int(contact_cfg.get("body_latent_dim", 64)),
+                    hidden_dim=int(contact_cfg.get("hidden_dim", 32)),
+                    max_other_bodies=int(contact_cfg.get("max_other_bodies", 32)),
+                    device=device,
+                )
             else:
                 raise ValueError(
                     f"Unsupported contact_set encoder_type '{encoder_type}'. "
-                    "Expected 'global_attention' or 'shared_per_body'."
+                    "Expected 'global_attention', 'shared_per_body', or 'body_routed'."
                 )
             encoders["contact_set"] = self.contact_set_encoder
 
@@ -268,7 +290,10 @@ class ModelMixedInput(nn.Module):
                 features.append(self.encoders[input_name](cur_input))
             elif input_name == "contact_set":
                 contact_features = self.encoders[input_name](input_dict["contact_tokens"])
-                if isinstance(self.encoders[input_name], SharedPerBodyContactEncoder):
+                if isinstance(
+                    self.encoders[input_name],
+                    SharedPerBodyContactEncoder | BodyRoutedContactEncoder,
+                ):
                     contact_features = contact_features.flatten(start_dim=-2)
                 features.append(contact_features)
             else:
