@@ -364,6 +364,67 @@ def test_active15_lr_variant_and_osmo_presets_share_one_dataset() -> None:
     assert dataset_preset["resources"]["memory"] == "111Gi"
 
 
+@pytest.mark.parametrize(
+    ("latent_dim", "encoder_parameters", "model_parameters", "feature_dim"),
+    (
+        (16, 1_312, 10_937_029, 330),
+        (32, 2_624, 11_042_789, 602),
+    ),
+)
+def test_active15_latent_dim_variants(
+    latent_dim: int,
+    encoder_parameters: int,
+    model_parameters: int,
+    feature_dim: int,
+) -> None:
+    standard_cfg_path = CFG_DIR / "transformer_rough_native_body_routed_active15.yaml"
+    variant_cfg_path = CFG_DIR / f"transformer_rough_native_body_routed_active15_d{latent_dim}.yaml"
+    standard_preset_path = PRESET_DIR / "anymal_rough_newton_native_active15.yaml"
+    variant_preset_path = PRESET_DIR / f"anymal_rough_newton_native_active15_d{latent_dim}.yaml"
+    standard = yaml.safe_load(standard_cfg_path.read_text())
+    variant = yaml.safe_load(variant_cfg_path.read_text())
+    standard_preset = yaml.safe_load(standard_preset_path.read_text())
+    variant_preset = yaml.safe_load(variant_preset_path.read_text())
+
+    assert variant["inputs"]["contact_set"]["body_latent_dim"] == latent_dim
+    assert variant["inputs"]["contact_set"]["hidden_dim"] == 32
+    assert variant["algorithm"]["optimizer"]["lr_start"] == "1e-4"
+    assert variant["algorithm"]["optimizer"]["lr_end"] == "1e-5"
+    normalized = copy.deepcopy(variant)
+    normalized["inputs"]["contact_set"]["body_latent_dim"] = 64
+    assert normalized == standard
+
+    assert variant_preset["workflow"]["dataset_subdir"] == "anymal-c-rough-newton-native-active15"
+    normalized_preset = copy.deepcopy(variant_preset)
+    normalized_preset["workflow"]["base_name"] = standard_preset["workflow"]["base_name"]
+    normalized_preset["experiment"]["train_cfg"] = standard_preset["experiment"]["train_cfg"]
+    assert normalized_preset == standard_preset
+
+    sample = {
+        "states_embedding": torch.randn(1, 10, 37),
+        "joint_f": torch.randn(1, 10, 18),
+        "gravity_dir": torch.randn(1, 10, 3),
+        "contact_tokens": torch.zeros(1, 10, 64, ACTIVE15_TOKEN_DIM),
+    }
+    model = ModelMixedInput(
+        input_sample=sample,
+        output_dim=37,
+        input_cfg=variant["inputs"],
+        network_cfg=variant["network"],
+        contact_mode="newton_native",
+        contact_representation=CONTACT_REPRESENTATION_ACTIVE15,
+        num_bodies=17,
+        device="cpu",
+    )
+
+    body_latents = model.contact_set_encoder(sample["contact_tokens"])
+    assert body_latents.shape == (1, 10, 17, latent_dim)
+    assert model.contact_set_encoder.out_features == 17 * latent_dim
+    assert model.transformer_model.transformer.wte.in_features == feature_dim
+    assert sum(parameter.numel() for parameter in model.contact_set_encoder.parameters()) == encoder_parameters
+    assert sum(parameter.numel() for parameter in model.parameters()) == model_parameters
+
+
 def test_active15_production_config_forward_backward_and_checkpoint(tmp_path: Path) -> None:
     torch.manual_seed(7)
     cfg = yaml.safe_load((CFG_DIR / "transformer_rough_native_body_routed_active15.yaml").read_text())

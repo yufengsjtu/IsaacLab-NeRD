@@ -1,0 +1,106 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+env:
+  env_name: Anymal-C-Rough-Native-Active15
+  num_envs: 512
+  neural_solver_cfg:
+    name: TransformerNeuralSolver
+    states_frame: body
+    anchor_frame_step: every
+    states_embedding_type: identical
+    prediction_type: relative
+    orientation_prediction_parameterization: quaternion
+    num_states_history: 10
+    min_contact_event_threshold: 0.12
+    contact_mode: newton_native
+    contact_representation: active15_tokens
+    # Flat slot width is unused in token mode; capacity is max_contact_tokens.
+    num_contacts_per_env: 64
+    max_contact_tokens: 64
+    # Active15 packing preserves owner-body round-robin coverage before K truncation.
+    contact_packing_policy: body_round_robin_pair_atomic
+
+algorithm:
+  name: SequenceModelTrainer
+  num_epochs: 1000
+  num_iters_per_epoch: 5000
+  sample_sequence_length: 10
+  batch_size: 512
+  num_valid_batches: 100
+  truncate_grad: True
+  grad_norm: 1.0
+  update_dataset_statistics: True
+  loss:
+    type: MSE
+    beta: 0.0
+  optimizer:
+    type: Adam
+    weight_decay: 0.0
+    lr_start: 1e-4
+    lr_end: 1e-5
+    lr_schedule: linear
+    betas: [0.9, 0.999]
+
+  dataset:
+    train_dataset_path: ./data/datasets/Anymal-C-Rough-Native-Active15/dataset_train.hdf5
+    valid_datasets:
+      exp_trajectory: ./data/datasets/Anymal-C-Rough-Native-Active15/dataset_valid.hdf5
+      zero_action_trajectory: ./data/datasets/Anymal-C-Rough-Native-Active15/dataset_zero_action_valid.hdf5
+      lstm_actuator_zero_action_trajectory: ./data/datasets/Anymal-C-Rough-Native-Active15/dataset_lstm_actuator_zero_action_valid.hdf5
+      lstm_actuator_policy_trajectory: ./data/datasets/Anymal-C-Rough-Native-Active15/dataset_lstm_actuator_policy_valid.hdf5
+    max_capacity: 20000000
+    load_mode: eager
+    num_data_workers: 8
+
+  eval:
+    mode: dataset
+    action_mode: joint_f
+    rollout_horizon: 10
+    num_rollouts: 1024
+    require_terrain_context: True
+    contact_context_validation: warn
+    state_context_tolerance: 1.0e-5
+    contact_context_tolerance: 1.0e-4
+    contact_context_normal_tolerance: 1.0e-3
+    contact_context_velocity_tolerance: 1.0e-3
+    dataset_path: ./data/datasets/Anymal-C-Rough-Native-Active15/dataset_lstm_actuator_policy_valid.hdf5
+
+inputs:
+  low_dim: [
+    states_embedding,
+    joint_f,
+    gravity_dir
+  ]
+  contact_set:
+    dim: 17
+    encoder_type: body_routed_active15
+    body_latent_dim: 32
+    hidden_dim: 32
+
+network:
+  normalize_input: True
+  normalize_output: True
+
+  encoder:
+    low_dim:
+      layer_sizes: []
+      activation: relu
+      layernorm: False
+
+  transformer:
+    block_size: 32
+    n_layer: 6
+    n_head: 12
+    n_embd: 384
+    dropout: 0.0
+    bias: False
+
+  model:
+    output_tanh: False
+    mlp:
+      layer_sizes: [64]
+      activation: relu
+      layernorm: False

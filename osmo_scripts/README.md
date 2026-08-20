@@ -68,6 +68,9 @@ The launcher supports declarative presets in `osmo_scripts/presets/`:
 - `anymal_rough_newton_native_active15` and
   `anymal_rough_newton_native_active15_lr_1e-3`: train Active15 with the two
   requested learning-rate schedules on the dedicated Active15 HDF5 dataset.
+- `anymal_rough_newton_native_active15_d16` and
+  `anymal_rough_newton_native_active15_d32`: train the standard-LR Active15
+  latent-dimension ablations while reusing the same Active15 HDF5 dataset.
 - `anymal_fixed_ground`: Anymal-C with fixed-ground abstract contacts.
 - `cartpole_fixed_ground`: Cartpole with fixed-ground contacts.
 
