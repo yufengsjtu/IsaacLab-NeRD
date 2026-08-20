@@ -7,9 +7,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
+from typing import TYPE_CHECKING
+
+import torch
 
 import isaaclab.envs.mdp as base_mdp
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
@@ -22,6 +27,10 @@ from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c.flat_env_c
 from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c.rough_env_cfg import AnymalCRoughEnvCfg
 
 from isaaclab_assets.robots.anymal import ANYDRIVE_3_SIMPLE_ACTUATOR_CFG
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedRLEnv
+    from isaaclab.terrains import TerrainImporter
 
 
 @configclass
@@ -58,6 +67,16 @@ class ObservationsCfg:
 ROOT_HEIGHT_MINIMUM = 0.4
 KP_RANGE = (30.0, 200.0)
 KD_RANGE = (0.0, 4.0)
+
+
+def _sample_terrain_levels_uniform(env: ManagerBasedRLEnv, env_ids: Sequence[int]) -> torch.Tensor:
+    """Uniformly resample terrain levels while preserving each environment's terrain type."""
+    terrain: TerrainImporter = env.scene.terrain
+    terrain.terrain_levels[env_ids] = torch.randint_like(terrain.terrain_levels[env_ids], terrain.max_terrain_level)
+    terrain.env_origins[env_ids] = terrain.terrain_origins[
+        terrain.terrain_levels[env_ids], terrain.terrain_types[env_ids]
+    ]
+    return torch.mean(terrain.terrain_levels.float())
 
 
 @configclass
@@ -107,13 +126,14 @@ class AnymalCDatasetGenFlatEnvCfg(AnymalCFlatEnvCfg):
 class AnymalCDatasetGenRoughEnvCfg(AnymalCRoughEnvCfg):
     """Anymal-C rough config for NeRD dataset generation.
 
-    This keeps the upstream rough-terrain observation and terrain curriculum
-    setup so policy-driven collection can use rough-terrain policies, while
-    replacing the actuator with a simple explicit actuator for data generation.
+    This keeps the upstream rough-terrain observations and generated terrain
+    layout, but samples terrain levels uniformly at each trajectory reset.
     """
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        self.scene.terrain.max_init_terrain_level = None
+        self.curriculum.terrain_levels = CurrTerm(func=_sample_terrain_levels_uniform)
         # Disable contact-sensor related reward/termination terms (not working with NeRD solver)
         setattr(self.terminations, "base_contact", None)
         setattr(self.rewards, "feet_air_time", None)
