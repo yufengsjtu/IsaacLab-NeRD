@@ -10,6 +10,7 @@ from __future__ import annotations
 import inspect
 import os
 import shutil
+import time
 import traceback
 from pathlib import Path
 from typing import Any, cast
@@ -43,6 +44,13 @@ from isaaclab_neural.data import (
 )
 from isaaclab_neural.eval.training_evaluator import TrainingRolloutEvaluator
 from isaaclab_neural.models.models import ModelMixedInput
+from isaaclab_neural.train.training_diagnostics import (
+    mean_predictor_loss,
+    parameter_change_metrics,
+    snapshot_trainable_parameters,
+    state_error_metrics,
+    tensor_distribution_metrics,
+)
 from isaaclab_neural.utils.checkpoint import reconstruct_model_from_checkpoint, save_checkpoint
 from isaaclab_neural.utils.logger import Logger
 from isaaclab_neural.utils.python_utils import format_dict, print_info, print_ok, print_warning, set_random_seed
@@ -198,7 +206,8 @@ class VanillaTrainer:
             print("# Model Parameters = ", num_params_torch_model(self.neural_model))
         self.neural_solver.set_neural_solver_model(self.neural_model)
 
-        self.batch_size = int(algo_cfg["batch_size"])
+        self.configured_batch_size = int(algo_cfg["batch_size"])
+        self.batch_size = self.configured_batch_size
         self.num_valid_batches = int(algo_cfg.get("num_valid_batches", 50))
         dataset_cfg = algo_cfg["dataset"]
         self.dataset_contact_representation = dataset_cfg.get(
@@ -245,7 +254,12 @@ class VanillaTrainer:
         self.valid_datasets = {}
         self.collate_fn = None
         self.train_dataset_rank_sharded = False
+        dataset_load_start = time.perf_counter()
         self.get_datasets(algo_cfg["dataset"].get("train_dataset_path"), algo_cfg["dataset"].get("valid_datasets"))
+        self.dataset_load_seconds_local = time.perf_counter() - dataset_load_start
+        self.dataset_load_seconds_by_rank = self._distributed_scalar_values(self.dataset_load_seconds_local)
+        self.dataset_load_seconds_mean = sum(self.dataset_load_seconds_by_rank) / len(self.dataset_load_seconds_by_rank)
+        self.dataset_load_seconds_max = max(self.dataset_load_seconds_by_rank)
 
         if cli_cfg["train"]:
             self.num_epochs = int(algo_cfg["num_epochs"])
@@ -254,6 +268,7 @@ class VanillaTrainer:
             self.best_valid_losses = {}
             self.best_eval_error = np.inf
 
+            dataset_statistics_start = time.perf_counter()
             if (
                 algo_cfg.get("update_dataset_statistics", True)
                 or self._checkpoint is None
@@ -271,6 +286,18 @@ class VanillaTrainer:
                 )
             else:
                 print_info("Using dataset statistics from checkpoint...")
+            self.dataset_statistics_seconds_local = time.perf_counter() - dataset_statistics_start
+            self.dataset_statistics_seconds_by_rank = self._distributed_scalar_values(
+                self.dataset_statistics_seconds_local
+            )
+            self.dataset_statistics_seconds_mean = sum(self.dataset_statistics_seconds_by_rank) / len(
+                self.dataset_statistics_seconds_by_rank
+            )
+            self.dataset_statistics_seconds_max = max(self.dataset_statistics_seconds_by_rank)
+            self.mean_predictor_loss_baseline = mean_predictor_loss(
+                self.dataset_rms["prediction_target"].var,
+                self.loss_weights,
+            )
 
             self._wrap_distributed_model()
             self._init_optimizer(algo_cfg)
@@ -280,6 +307,34 @@ class VanillaTrainer:
             self._checkpoint = None
             self.truncate_grad = algo_cfg.get("truncate_grad", False)
             self.grad_norm = algo_cfg.get("grad_norm", 1.0)
+            profiling_cfg = algo_cfg.get("profiling", {})
+            self.profile_cuda_synchronize = bool(profiling_cfg.get("cuda_synchronize", False))
+            self.profile_cuda_event_timing = bool(profiling_cfg.get("cuda_event_timing", False))
+            self.profile_record_samples = bool(profiling_cfg.get("record_samples", False))
+            self.profile_warmup_steps = int(profiling_cfg.get("warmup_steps", 0))
+            self.profile_phase_steps = int(profiling_cfg.get("phase_steps", 0))
+            self.profile_wandb_stats_interval_seconds = profiling_cfg.get("wandb_system_stats_interval_seconds")
+            if self.profile_wandb_stats_interval_seconds is not None:
+                self.profile_wandb_stats_interval_seconds = float(self.profile_wandb_stats_interval_seconds)
+            if self.profile_warmup_steps < 0:
+                raise ValueError("profiling.warmup_steps must be non-negative.")
+            if self.profile_phase_steps < 0:
+                raise ValueError("profiling.phase_steps must be non-negative.")
+            if (
+                self.profile_wandb_stats_interval_seconds is not None
+                and self.profile_wandb_stats_interval_seconds <= 0.0
+            ):
+                raise ValueError("profiling.wandb_system_stats_interval_seconds must be positive.")
+            diagnostics_cfg = algo_cfg.get("diagnostics", {})
+            self.diagnostics_enabled = bool(diagnostics_cfg.get("enabled", False))
+            self.diagnostic_batches_per_epoch = int(diagnostics_cfg.get("batches_per_epoch", 1))
+            if self.diagnostics_enabled and self.diagnostic_batches_per_epoch <= 0:
+                raise ValueError("diagnostics.batches_per_epoch must be positive when diagnostics are enabled.")
+            self._capture_forward_diagnostics = False
+            self._forward_diagnostic_outputs: dict[str, torch.Tensor] = {}
+            self._diagnostic_handles: list[Any] = []
+            if self.diagnostics_enabled:
+                self._register_diagnostic_hooks()
             self._init_logging(cli_cfg)
             if self.is_main_process:
                 with open(os.path.join(self.log_dir, "cfg.yaml"), "w") as cfg_file:
@@ -322,6 +377,189 @@ class VanillaTrainer:
         if not self.is_distributed:
             return values
         return {key: self._distributed_mean(value) for key, value in values.items()}
+
+    def _distributed_scalar_stats(self, value: float) -> tuple[float, float]:
+        """Return distributed mean and maximum for one scalar."""
+        if not self.is_distributed:
+            return value, value
+        value_sum = torch.tensor(value, device=self.device, dtype=torch.float64)
+        value_max = value_sum.clone()
+        dist.all_reduce(value_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(value_max, op=dist.ReduceOp.MAX)
+        return float((value_sum / self.world_size).cpu()), float(value_max.cpu())
+
+    def _distributed_scalar_values(self, value: float) -> list[float]:
+        """Gather one scalar from every rank in rank order."""
+        if not self.is_distributed:
+            return [value]
+        local_value = torch.tensor(value, device=self.device, dtype=torch.float64)
+        gathered = [torch.empty_like(local_value) for _ in range(self.world_size)]
+        dist.all_gather(gathered, local_value)
+        return [float(rank_value.cpu()) for rank_value in gathered]
+
+    def _capture_peak_gpu_memory(self) -> None:
+        """Capture epoch peak allocated and reserved GPU memory across ranks."""
+        if not torch.cuda.is_available() or torch.device(self.device).type != "cuda":
+            allocated_gib = 0.0
+            reserved_gib = 0.0
+        else:
+            allocated_gib = float(torch.cuda.max_memory_allocated(self.device)) / 1024**3
+            reserved_gib = float(torch.cuda.max_memory_reserved(self.device)) / 1024**3
+        self.peak_gpu_memory_gib_local = allocated_gib
+        (
+            self.peak_gpu_memory_gib_mean,
+            self.peak_gpu_memory_gib_max,
+        ) = self._distributed_scalar_stats(allocated_gib)
+        self.peak_gpu_reserved_gib_local = reserved_gib
+        (
+            self.peak_gpu_reserved_gib_mean,
+            self.peak_gpu_reserved_gib_max,
+        ) = self._distributed_scalar_stats(reserved_gib)
+
+    def _gather_profile_samples(
+        self,
+        samples: dict[str, list[float]],
+    ) -> tuple[dict[str, list[list[float]]], dict[str, list[float]]]:
+        """Gather phase samples once and select each step's slowest-rank path."""
+        timer_names = tuple(samples)
+        sample_counts = {len(values) for values in samples.values()}
+        if len(sample_counts) != 1:
+            raise ValueError("Profile timers must have the same number of samples.")
+        num_samples = sample_counts.pop()
+        if num_samples == 0:
+            return {name: [] for name in timer_names}, {name: [] for name in timer_names}
+        local_samples = torch.tensor(
+            [samples[name] for name in timer_names],
+            device=self.device,
+            dtype=torch.float64,
+        )
+        if self.is_distributed:
+            gathered = [torch.empty_like(local_samples) for _ in range(self.world_size)]
+            dist.all_gather(gathered, local_samples)
+        else:
+            gathered = [local_samples]
+        rank_samples = torch.stack(gathered).cpu()
+        step_index = timer_names.index("train_step")
+        slowest_ranks = rank_samples[:, step_index, :].argmax(dim=0)
+        sample_indices = torch.arange(num_samples)
+        by_rank = {name: rank_samples[:, timer_index, :].tolist() for timer_index, name in enumerate(timer_names)}
+        critical_path = {
+            name: rank_samples[slowest_ranks, timer_index, sample_indices].tolist()
+            for timer_index, name in enumerate(timer_names)
+        }
+        return by_rank, critical_path
+
+    @staticmethod
+    def _summarize_samples(samples: list[float]) -> dict[str, float]:
+        """Return distribution statistics for a non-empty latency series."""
+        if not samples:
+            return {}
+        values = torch.tensor(samples, dtype=torch.float64)
+        mean = float(values.mean())
+        std = float(values.std(unbiased=False))
+        return {
+            "count": float(values.numel()),
+            "mean": mean,
+            "p50": float(torch.quantile(values, 0.50)),
+            "p95": float(torch.quantile(values, 0.95)),
+            "min": float(values.min()),
+            "max": float(values.max()),
+            "cv": std / mean if mean > 0.0 else 0.0,
+        }
+
+    def _finalize_train_profile(self) -> None:
+        """Resolve train timings and aggregate the DDP critical path before validation."""
+        self.time_report.finalize()
+        if self.profile_measurement_start_unix is not None:
+            self.profile_measurement_end_unix = time.time()
+        timing_seconds = self.time_report.as_dict()
+        train_total_local = timing_seconds["train_total"]
+        self.train_total_seconds_local = train_total_local
+        (
+            self.train_total_seconds_mean,
+            self.train_total_seconds_max,
+        ) = self._distributed_scalar_stats(train_total_local)
+        measurement_window_local = timing_seconds["train_measurement_window"]
+        self.measurement_window_seconds_local = measurement_window_local
+        self.measurement_window_seconds_by_rank = self._distributed_scalar_values(measurement_window_local)
+        self.measurement_window_seconds_mean = sum(self.measurement_window_seconds_by_rank) / len(
+            self.measurement_window_seconds_by_rank
+        )
+        self.measurement_window_seconds_max = max(self.measurement_window_seconds_by_rank)
+        self._capture_peak_gpu_memory()
+        self.train_iterator_reset_count_local = float(len(self.train_iterator_reset_steps))
+        (
+            self.train_iterator_reset_count_mean,
+            self.train_iterator_reset_count_max,
+        ) = self._distributed_scalar_stats(self.train_iterator_reset_count_local)
+        self.profile_samples_by_rank = {}
+        self.profile_critical_path_samples = {}
+        if not self.profile_record_samples:
+            return
+
+        train_step_samples = self.time_report.timers["train_step"].samples
+        (
+            self.profile_samples_by_rank,
+            self.profile_critical_path_samples,
+        ) = self._gather_profile_samples({"train_step": train_step_samples})
+        phase_start = self.profile_warmup_steps
+        phase_end = phase_start + self.profile_phase_steps if self.profile_phase_steps > 0 else len(train_step_samples)
+        phase_samples = {
+            "train_step": train_step_samples[phase_start:phase_end],
+            **{name: self.time_report.timers[name].samples for name in self.profile_phase_timer_names},
+        }
+        phase_samples_by_rank, phase_critical_path_samples = self._gather_profile_samples(phase_samples)
+        self.profile_phase_train_step_samples = phase_critical_path_samples["train_step"]
+        self.profile_samples_by_rank.update(
+            {name: samples for name, samples in phase_samples_by_rank.items() if name != "train_step"}
+        )
+        self.profile_critical_path_samples.update(
+            {name: samples for name, samples in phase_critical_path_samples.items() if name != "train_step"}
+        )
+        self.profile_phase_sample_steps = float(phase_end - phase_start)
+
+    def _register_diagnostic_hooks(self) -> None:
+        """Capture selected forward representations only on diagnostic batches."""
+
+        def make_hook(name: str):
+            def hook(_module, _inputs, output):
+                if self._capture_forward_diagnostics:
+                    self._forward_diagnostic_outputs[name] = output.detach()
+
+            return hook
+
+        model = self.neural_model_unwrapped
+        final_feature_net = getattr(getattr(model, "model", None), "feature_net", None)
+        if final_feature_net is not None:
+            self._diagnostic_handles.append(final_feature_net.register_forward_hook(make_hook("final_hidden")))
+        contact_encoder = getattr(model, "contact_set_encoder", None)
+        if contact_encoder is not None:
+            self._diagnostic_handles.append(contact_encoder.register_forward_hook(make_hook("contact_representation")))
+
+    def _set_diagnostic_capture(self, enabled: bool) -> None:
+        self._capture_forward_diagnostics = enabled
+        self._forward_diagnostic_outputs = {}
+
+    def _collect_forward_diagnostics(self, prediction: torch.Tensor) -> dict[str, float]:
+        metrics = tensor_distribution_metrics(prediction, "prediction")
+        final_hidden = self._forward_diagnostic_outputs.get("final_hidden")
+        if final_hidden is not None:
+            metrics.update(
+                tensor_distribution_metrics(
+                    final_hidden,
+                    "final_hidden",
+                    include_positive_fraction=True,
+                )
+            )
+        contact_representation = self._forward_diagnostic_outputs.get("contact_representation")
+        if contact_representation is not None:
+            metrics.update(
+                tensor_distribution_metrics(
+                    contact_representation,
+                    "contact_representation",
+                )
+            )
+        return metrics
 
     def _serialize_dataset_rms(self) -> dict[str, dict[str, Any]]:
         """Return CPU tensors for broadcasting dataset RMS state."""
@@ -399,6 +637,7 @@ class VanillaTrainer:
                 wandb_entity=cli_cfg.get("wandb_entity"),
                 config=self._wandb_config(),
                 save_checkpoints=cli_cfg.get("wandb_save_checkpoints", True),
+                system_stats_interval_seconds=self.profile_wandb_stats_interval_seconds,
             )
 
         self.save_interval = cli_cfg.get("save_interval", 50)
@@ -427,12 +666,33 @@ class VanillaTrainer:
             "algorithm": algo_cfg.get("name"),
             "seed": self.seed,
             "batch_size": algo_cfg.get("batch_size"),
+            "world_size": getattr(self, "world_size", 1),
+            "global_batch_windows": int(algo_cfg.get("batch_size", 0)) * getattr(self, "world_size", 1),
             "num_epochs": algo_cfg.get("num_epochs"),
             "num_iters_per_epoch": getattr(self, "num_iters_per_epoch", algo_cfg.get("num_iters_per_epoch")),
             "dataset_max_capacity": self.dataset_max_capacity,
+            "dataset_load_seconds_local": getattr(self, "dataset_load_seconds_local", None),
+            "dataset_load_seconds_mean": getattr(self, "dataset_load_seconds_mean", None),
+            "dataset_load_seconds_max": getattr(self, "dataset_load_seconds_max", None),
+            "dataset_statistics_seconds_local": getattr(self, "dataset_statistics_seconds_local", None),
+            "dataset_statistics_seconds_mean": getattr(self, "dataset_statistics_seconds_mean", None),
+            "dataset_statistics_seconds_max": getattr(self, "dataset_statistics_seconds_max", None),
+            "target_mean_loss_baseline": getattr(self, "mean_predictor_loss_baseline", None),
             "lr_start": algo_cfg.get("optimizer", {}).get("lr_start"),
             "lr_end": algo_cfg.get("optimizer", {}).get("lr_end"),
             "lr_schedule": algo_cfg.get("optimizer", {}).get("lr_schedule"),
+            "profiling_cuda_synchronize": getattr(self, "profile_cuda_synchronize", False),
+            "profiling_cuda_event_timing": getattr(self, "profile_cuda_event_timing", False),
+            "profiling_record_samples": getattr(self, "profile_record_samples", False),
+            "profiling_warmup_steps": getattr(self, "profile_warmup_steps", 0),
+            "profiling_phase_steps": getattr(self, "profile_phase_steps", 0),
+            "profiling_wandb_system_stats_interval_seconds": getattr(
+                self, "profile_wandb_stats_interval_seconds", None
+            ),
+            "dataset_load_seconds_by_rank": getattr(self, "dataset_load_seconds_by_rank", []),
+            "dataset_statistics_seconds_by_rank": getattr(self, "dataset_statistics_seconds_by_rank", []),
+            "diagnostics_enabled": getattr(self, "diagnostics_enabled", False),
+            "diagnostic_batches_per_epoch": getattr(self, "diagnostic_batches_per_epoch", 0),
             "model_num_parameters": num_params_torch_model(self.neural_model),
             "contact_encoder_type": contact_cfg.get("encoder_type"),
             "contact_body_latent_dim": contact_cfg.get("body_latent_dim"),
@@ -685,11 +945,17 @@ class VanillaTrainer:
         raise NotImplementedError(f"Unsupported lr schedule: {self.lr_schedule}")
 
     @torch.no_grad()
-    def preprocess_data_batch(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    def transfer_data_batch(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Remove metadata fields and transfer a batch to the training device."""
         for key in NON_MODEL_DATA_KEYS.intersection(data):
             data.pop(key)
         for key, value in data.items():
             data[key] = value.to(self.device, non_blocking=self.non_blocking_data_transfer)
+        return data
+
+    @torch.no_grad()
+    def preprocess_transferred_data_batch(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Construct model inputs and targets after device transfer."""
         if "contact_masks" in data:
             data["contact_masks"] = data["contact_masks"].bool()
         elif "contact_tokens" not in data:
@@ -706,42 +972,38 @@ class VanillaTrainer:
         )
         return data
 
-    def compute_loss(self, data: dict[str, torch.Tensor], train: bool):
+    @torch.no_grad()
+    def preprocess_data_batch(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Transfer and preprocess one data batch."""
+        data = self.transfer_data_batch(data)
+        return self.preprocess_transferred_data_batch(data)
+
+    def compute_loss(self, data: dict[str, torch.Tensor], train: bool) -> tuple[torch.Tensor, torch.Tensor]:
         if self.neural_model_unwrapped.is_rnn:
             self.neural_model_unwrapped.init_rnn(self.batch_size)
         prediction_target = data["prediction_target"]
         prediction = self._forward_model(data, train)
         loss = self.loss_func(prediction * self.loss_weights, prediction_target * self.loss_weights)
+        return loss, prediction
 
-        with torch.no_grad():
-            predicted_next_states = self.neural_solver.convert_prediction_to_next_states(
-                states=data["states"],
-                prediction=prediction,
-                dt=self.neural_env.frame_dt,
-            )
-            self.neural_solver.wrap2PI(predicted_next_states)
-            loss_itemized = {
-                "state_MSE": torch.nn.MSELoss()(predicted_next_states, data["next_states"]).detach().cpu().item(),
-                "q_error_norm": torch.norm(
-                    predicted_next_states[..., : self.neural_solver.dof_q_per_env]
-                    - data["next_states"][..., : self.neural_solver.dof_q_per_env],
-                    dim=-1,
-                )
-                .mean()
-                .detach()
-                .cpu()
-                .item(),
-                "qd_error_norm": torch.norm(
-                    predicted_next_states[..., self.neural_solver.dof_q_per_env :]
-                    - data["next_states"][..., self.neural_solver.dof_q_per_env :],
-                    dim=-1,
-                )
-                .mean()
-                .detach()
-                .cpu()
-                .item(),
-            }
-        return loss, loss_itemized
+    @torch.no_grad()
+    def compute_state_error_metrics(
+        self,
+        data: dict[str, torch.Tensor],
+        prediction: torch.Tensor,
+    ) -> dict[str, float]:
+        """Convert predictions to physical next states and return unweighted errors."""
+        predicted_next_states = self.neural_solver.convert_prediction_to_next_states(
+            states=data["states"],
+            prediction=prediction,
+            dt=self.neural_env.frame_dt,
+        )
+        self.neural_solver.wrap2PI(predicted_next_states)
+        return state_error_metrics(
+            predicted_next_states,
+            data["next_states"],
+            dof_q=self.neural_solver.dof_q_per_env,
+        )
 
     def one_epoch(
         self,
@@ -753,57 +1015,115 @@ class VanillaTrainer:
         distributed_reduce: bool = True,
     ):
         self.neural_model.train(train)
+        phase = "train" if train else "validation"
         sum_loss = torch.tensor(0.0, device=self.device)
         sum_loss_itemized: dict[str, float] = {}
+        diagnostic_info: dict[str, float] = {}
+        diagnostic_batch_count = 0
         grad_info = {"grad_norm_before_clip": 0.0} if train else {}
         if train and self.truncate_grad:
             grad_info["grad_norm_after_clip"] = 0.0
+            grad_info["clip_fraction"] = 0.0
 
+        iterator_reset_steps: list[int] = []
+        phase_sample_start = getattr(self, "profile_warmup_steps", 0)
+        phase_sample_end = (
+            phase_sample_start + getattr(self, "profile_phase_steps", 0)
+            if getattr(self, "profile_phase_steps", 0) > 0
+            else num_batches
+        )
+        if train and getattr(self, "profile_record_samples", False):
+            for timer_name in self.profile_phase_timer_names:
+                self.time_report.set_timer_enabled(timer_name, False)
         with torch.set_grad_enabled(train):
-            for _ in tqdm(range(num_batches), disable=not self.is_main_process):
-                with TimeProfiler(self.time_report, "dataloader"):
+            for batch_index in tqdm(range(num_batches), disable=not self.is_main_process):
+                if train:
+                    if getattr(self, "profile_record_samples", False):
+                        if batch_index == phase_sample_start:
+                            for timer_name in self.profile_phase_timer_names:
+                                self.time_report.set_timer_enabled(timer_name, True)
+                        elif batch_index == phase_sample_end:
+                            for timer_name in self.profile_phase_timer_names:
+                                self.time_report.set_timer_enabled(timer_name, False)
+                        if batch_index == self.profile_warmup_steps:
+                            self.profile_measurement_start_unix = time.time()
+                            self.time_report.start_timer("train_measurement_window")
+                    self.time_report.start_timer("train_step")
+                capture_diagnostics = (
+                    train and self.diagnostics_enabled and batch_index < self.diagnostic_batches_per_epoch
+                )
+                self._set_diagnostic_capture(capture_diagnostics)
+
+                with TimeProfiler(self.time_report, f"{phase}_dataloader"):
                     try:
                         data = next(dataloader_iter)
                     except StopIteration:
+                        iterator_reset_steps.append(batch_index)
                         if shuffle and self.train_dataset is not None:
                             self.train_dataset.shuffle()
                         dataloader_iter = iter(dataloader)
                         data = next(dataloader_iter)
-                    data = self.preprocess_data_batch(data)
 
-                with TimeProfiler(self.time_report, "compute_loss"):
-                    if train:
+                with TimeProfiler(self.time_report, f"{phase}_data_transfer"):
+                    data = self.transfer_data_batch(data)
+                with TimeProfiler(self.time_report, f"{phase}_preprocess"):
+                    data = self.preprocess_transferred_data_batch(data)
+
+                if train:
+                    with TimeProfiler(self.time_report, "train_zero_grad"):
                         self.optimizer.zero_grad()
-                    loss, loss_itemized = self.compute_loss(data, train)
+                with TimeProfiler(self.time_report, f"{phase}_forward_loss"):
+                    loss, prediction = self.compute_loss(data, train)
+                with TimeProfiler(self.time_report, f"{phase}_metrics"):
+                    loss_itemized = self.compute_state_error_metrics(data, prediction)
+                    if capture_diagnostics:
+                        batch_diagnostics = self._collect_forward_diagnostics(prediction)
+                        for key, value in batch_diagnostics.items():
+                            diagnostic_info[key] = diagnostic_info.get(key, 0.0) + value
+                        diagnostic_batch_count += 1
+                self._set_diagnostic_capture(False)
 
-                with TimeProfiler(self.time_report, "backward"):
-                    if train:
+                if train:
+                    with TimeProfiler(self.time_report, "train_backward_ddp"):
                         loss.backward()
+                    with TimeProfiler(self.time_report, "train_gradient_diagnostics"):
                         with torch.no_grad():
                             grad_norm_before_clip = float(grad_norm(self.neural_model.parameters()).detach().cpu())
                             grad_info["grad_norm_before_clip"] += grad_norm_before_clip
                             if self.truncate_grad:
+                                grad_info["clip_fraction"] += float(grad_norm_before_clip > self.grad_norm)
                                 clip_grad_norm_(self.neural_model.parameters(), self.grad_norm)
                                 grad_info["grad_norm_after_clip"] += float(
                                     grad_norm(self.neural_model.parameters()).detach().cpu()
                                 )
+                    with TimeProfiler(self.time_report, "train_optimizer_step"):
                         self.optimizer.step()
 
-                with TimeProfiler(self.time_report, "other"):
+                with TimeProfiler(self.time_report, f"{phase}_bookkeeping"):
                     sum_loss += loss.detach()
                     for key, value in loss_itemized.items():
                         sum_loss_itemized[key] = sum_loss_itemized.get(key, 0.0) + value
+                if train:
+                    self.time_report.end_timer("train_step")
 
+        if train:
+            if getattr(self, "profile_record_samples", False):
+                self.time_report.end_timer("train_measurement_window")
+            self.train_iterator_reset_steps = iterator_reset_steps
+        self._set_diagnostic_capture(False)
         avg_loss = sum_loss.cpu().item() / num_batches
         avg_loss_itemized = {key: value / num_batches for key, value in sum_loss_itemized.items()}
         if train:
             for key in grad_info:
                 grad_info[key] /= num_batches
+        if diagnostic_batch_count > 0:
+            diagnostic_info = {key: value / diagnostic_batch_count for key, value in diagnostic_info.items()}
         if distributed_reduce:
             avg_loss = self._distributed_mean(avg_loss)
             avg_loss_itemized = self._distributed_mean_dict(avg_loss_itemized)
             grad_info = self._distributed_mean_dict(grad_info)
-        return avg_loss, avg_loss_itemized, grad_info
+            diagnostic_info = self._distributed_mean_dict(diagnostic_info)
+        return avg_loss, avg_loss_itemized, grad_info, diagnostic_info
 
     def train(self) -> None:
         if self.train_dataset is None:
@@ -841,13 +1161,65 @@ class VanillaTrainer:
                 )
                 self.best_valid_losses.setdefault(valid_dataset_name, np.inf)
 
-        self.time_report = TimeReport(cuda_synchronize=False)
-        self.time_report.add_timers(["epoch", "other", "dataloader", "compute_loss", "backward", "eval"])
+        if self.profile_record_samples and self.profile_warmup_steps >= self.num_train_batches:
+            raise ValueError("profiling.warmup_steps must be smaller than the number of training iterations.")
+        if (
+            self.profile_record_samples
+            and self.profile_phase_steps > 0
+            and self.profile_warmup_steps + self.profile_phase_steps > self.num_train_batches
+        ):
+            raise ValueError("profiling warmup_steps + phase_steps must not exceed the training iterations.")
+        self.time_report = TimeReport(
+            cuda_synchronize=self.profile_cuda_synchronize,
+            cuda_event_timing=self.profile_cuda_event_timing,
+            record_samples=self.profile_record_samples,
+        )
+        batch_sections = (
+            "dataloader",
+            "data_transfer",
+            "preprocess",
+            "forward_loss",
+            "metrics",
+            "bookkeeping",
+        )
+        self.time_report.add_timers(
+            [
+                "epoch",
+                "train_total",
+                "train_iterator_setup",
+                "train_measurement_window",
+                "train_step",
+                "train_backward_ddp",
+                "train_gradient_diagnostics",
+                "train_zero_grad",
+                "train_optimizer_step",
+                "validation_total",
+                "validation_iterator_setup",
+                "rollout_eval",
+                *(f"train_{section}" for section in batch_sections),
+                *(f"validation_{section}" for section in batch_sections),
+            ]
+        )
+        self.profile_phase_timer_names = (
+            "train_dataloader",
+            "train_data_transfer",
+            "train_preprocess",
+            "train_zero_grad",
+            "train_forward_loss",
+            "train_metrics",
+            "train_backward_ddp",
+            "train_gradient_diagnostics",
+            "train_optimizer_step",
+            "train_bookkeeping",
+        )
+        self.profile_step_timer_names = ("train_step", *self.profile_phase_timer_names)
+        self.global_batch_windows = self.configured_batch_size * self.world_size
+        self.optimizer_steps = self.start_epoch * self.num_train_batches
+        self.windows_seen = self.optimizer_steps * self.global_batch_windows
         for epoch in range(self.start_epoch, self.num_epochs):
             self.current_epoch = epoch
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
-            train_loader_iter = iter(train_loader)
             self.time_report.reset_timer()
             with TimeProfiler(self.time_report, "epoch"):
                 self.lr = self.get_scheduled_learning_rate(epoch, self.num_epochs)
@@ -855,30 +1227,61 @@ class VanillaTrainer:
                     param_group["lr"] = self.lr
                 self.logger.init_epoch(epoch)
 
-                avg_train_loss, avg_train_loss_itemized, grad_info = self.one_epoch(
-                    train=True,
-                    dataloader=train_loader,
-                    dataloader_iter=train_loader_iter,
-                    num_batches=self.num_train_batches,
-                    shuffle=True,
+                self.profile_measurement_start_unix = None
+                self.profile_measurement_end_unix = None
+                if torch.cuda.is_available() and torch.device(self.device).type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                    torch.cuda.reset_peak_memory_stats(self.device)
+                parameter_snapshot = (
+                    snapshot_trainable_parameters(self.neural_model_unwrapped)
+                    if self.is_main_process and self.diagnostics_enabled
+                    else None
                 )
+                with TimeProfiler(self.time_report, "train_total"):
+                    with TimeProfiler(self.time_report, "train_iterator_setup"):
+                        train_loader_iter = iter(train_loader)
+                    (
+                        avg_train_loss,
+                        avg_train_loss_itemized,
+                        grad_info,
+                        diagnostic_info,
+                    ) = self.one_epoch(
+                        train=True,
+                        dataloader=train_loader,
+                        dataloader_iter=train_loader_iter,
+                        num_batches=self.num_train_batches,
+                        shuffle=True,
+                    )
+                self._finalize_train_profile()
+                if parameter_snapshot is not None:
+                    diagnostic_info.update(
+                        parameter_change_metrics(
+                            parameter_snapshot,
+                            self.neural_model_unwrapped,
+                        )
+                    )
                 avg_valid_losses, avg_valid_losses_itemized = {}, {}
                 main_process_exception = None
                 main_process_traceback = None
                 if self.is_main_process:
                     try:
-                        valid_loader_iters = _reset_validation_iterators(valid_loaders)
-                        for valid_dataset_name in self.valid_datasets:
-                            avg_valid_losses[valid_dataset_name], avg_valid_losses_itemized[valid_dataset_name], _ = (
-                                self.one_epoch(
+                        with TimeProfiler(self.time_report, "validation_total"):
+                            with TimeProfiler(self.time_report, "validation_iterator_setup"):
+                                valid_loader_iters = _reset_validation_iterators(valid_loaders)
+                            for valid_dataset_name in self.valid_datasets:
+                                (
+                                    avg_valid_losses[valid_dataset_name],
+                                    avg_valid_losses_itemized[valid_dataset_name],
+                                    _,
+                                    _,
+                                ) = self.one_epoch(
                                     train=False,
                                     dataloader=valid_loaders[valid_dataset_name],
                                     dataloader_iter=valid_loader_iters[valid_dataset_name],
                                     num_batches=min(self.num_valid_batches, len(valid_loaders[valid_dataset_name])),
                                     distributed_reduce=False,
                                 )
-                            )
-                        with TimeProfiler(self.time_report, "eval"):
+                        with TimeProfiler(self.time_report, "rollout_eval"):
                             if self.eval_interval > 0 and (epoch + 1) % self.eval_interval == 0:
                                 self.eval(epoch)
                     except Exception as exc:
@@ -894,6 +1297,9 @@ class VanillaTrainer:
                         raise RuntimeError(message) from main_process_exception
                     raise RuntimeError(message)
 
+            self.time_report.finalize()
+            self.optimizer_steps += self.num_train_batches
+            self.windows_seen += self.num_train_batches * self.global_batch_windows
             if self.is_main_process and epoch % self.log_interval == 0:
                 self._log_training_epoch_summary(
                     epoch,
@@ -902,6 +1308,7 @@ class VanillaTrainer:
                     avg_valid_losses,
                     avg_valid_losses_itemized,
                     grad_info,
+                    diagnostic_info,
                 )
             if self.is_main_process:
                 self.logger.flush()
@@ -923,9 +1330,214 @@ class VanillaTrainer:
                         f"with loss {avg_valid_losses[valid_dataset_name]:.8f}."
                     )
 
+        for handle in self._diagnostic_handles:
+            handle.remove()
         if self.is_main_process:
             self.save_model("final_model")
             self.logger.finish()
+
+    def _log_profile_metrics(self, epoch: int) -> None:
+        """Log inclusive and steady-state distributed profiling metrics."""
+        sequence_length = getattr(self, "sample_sequence_length", 1)
+        for suffix, value in (
+            ("local", self.train_total_seconds_local),
+            ("mean", self.train_total_seconds_mean),
+            ("max", self.train_total_seconds_max),
+        ):
+            self.logger.add_scalar(f"performance/train_total_seconds_{suffix}/epoch", value, epoch)
+        if self.train_total_seconds_max > 0.0:
+            inclusive_steps_per_second = self.num_train_batches / self.train_total_seconds_max
+            self.logger.add_scalar(
+                "performance/inclusive_optimizer_steps_per_second/epoch",
+                inclusive_steps_per_second,
+                epoch,
+            )
+            self.logger.add_scalar(
+                "performance/inclusive_windows_per_second/epoch",
+                inclusive_steps_per_second * self.global_batch_windows,
+                epoch,
+            )
+            self.logger.add_scalar(
+                "performance/inclusive_processed_sequence_positions_per_second/epoch",
+                inclusive_steps_per_second * self.global_batch_windows * sequence_length,
+                epoch,
+            )
+
+        for suffix, value in (
+            ("local", self.measurement_window_seconds_local),
+            ("mean", self.measurement_window_seconds_mean),
+            ("max", self.measurement_window_seconds_max),
+        ):
+            self.logger.add_scalar(
+                f"performance/measurement_window_seconds_{suffix}/epoch",
+                value,
+                epoch,
+            )
+        for rank, value in enumerate(self.measurement_window_seconds_by_rank):
+            self.logger.add_scalar(
+                f"performance/measurement_window_seconds_rank_{rank}/epoch",
+                value,
+                epoch,
+            )
+
+        for name, value in (
+            ("allocated_local", self.peak_gpu_memory_gib_local),
+            ("allocated_mean", self.peak_gpu_memory_gib_mean),
+            ("allocated_max", self.peak_gpu_memory_gib_max),
+            ("reserved_local", self.peak_gpu_reserved_gib_local),
+            ("reserved_mean", self.peak_gpu_reserved_gib_mean),
+            ("reserved_max", self.peak_gpu_reserved_gib_max),
+        ):
+            self.logger.add_scalar(f"memory/peak_gpu_{name}_gib/epoch", value, epoch)
+        self.logger.add_scalar(
+            "performance/train_iterator_resets_local/epoch",
+            self.train_iterator_reset_count_local,
+            epoch,
+        )
+        self.logger.add_scalar(
+            "performance/train_iterator_resets_max/epoch",
+            self.train_iterator_reset_count_max,
+            epoch,
+        )
+        if self.profile_measurement_start_unix is not None:
+            self.logger.add_scalar(
+                "performance/measurement_start_unix/epoch",
+                self.profile_measurement_start_unix,
+                epoch,
+            )
+        if self.profile_measurement_end_unix is not None:
+            self.logger.add_scalar(
+                "performance/measurement_end_unix/epoch",
+                self.profile_measurement_end_unix,
+                epoch,
+            )
+
+        if not self.profile_critical_path_samples:
+            return
+        warmup_steps = self.profile_warmup_steps
+        step_samples = self.profile_critical_path_samples["train_step"]
+        measured_steps = step_samples[warmup_steps:]
+        latency_start = warmup_steps + self.profile_phase_steps if self.profile_phase_steps > 0 else warmup_steps
+        latency_samples = step_samples[latency_start:]
+        step_summary = self._summarize_samples(latency_samples)
+        measured_summary = self._summarize_samples(measured_steps)
+        phase_step_summary = self._summarize_samples(self.profile_phase_train_step_samples)
+        if not step_summary or not measured_summary:
+            return
+        for label, summary in (
+            ("steady", step_summary),
+            ("all_measured", measured_summary),
+            ("phase_sample", phase_step_summary),
+        ):
+            for statistic in ("mean", "p50", "p95", "min", "max"):
+                if statistic in summary:
+                    self.logger.add_scalar(
+                        f"performance/{label}_train_step_ms_{statistic}/epoch",
+                        summary[statistic] * 1000.0,
+                        epoch,
+                    )
+        self.logger.add_scalar(
+            "performance/steady_train_step_cv/epoch",
+            step_summary["cv"],
+            epoch,
+        )
+        self.logger.add_scalar(
+            "performance/measurement_steps/epoch",
+            measured_summary["count"],
+            epoch,
+        )
+        self.logger.add_scalar(
+            "performance/latency_sample_steps/epoch",
+            step_summary["count"],
+            epoch,
+        )
+        self.logger.add_scalar(
+            "performance/phase_sample_steps/epoch",
+            getattr(self, "profile_phase_sample_steps", 0.0),
+            epoch,
+        )
+        if step_summary["mean"] > 0.0 and phase_step_summary:
+            self.logger.add_scalar(
+                "performance/phase_vs_uninstrumented_step_mean_ratio/epoch",
+                phase_step_summary["mean"] / step_summary["mean"],
+                epoch,
+            )
+        if self.measurement_window_seconds_max > 0.0:
+            measured_steps_per_second = len(measured_steps) / self.measurement_window_seconds_max
+            self.logger.add_scalar(
+                "performance/steady_optimizer_steps_per_second/epoch",
+                measured_steps_per_second,
+                epoch,
+            )
+            self.logger.add_scalar(
+                "performance/steady_windows_per_second/epoch",
+                measured_steps_per_second * self.global_batch_windows,
+                epoch,
+            )
+            self.logger.add_scalar(
+                "performance/steady_processed_sequence_positions_per_second/epoch",
+                measured_steps_per_second * self.global_batch_windows * sequence_length,
+                epoch,
+            )
+
+        for rank, rank_samples in enumerate(self.profile_samples_by_rank["train_step"]):
+            rank_summary = self._summarize_samples(rank_samples[latency_start:])
+            for statistic in ("mean", "p50", "p95"):
+                self.logger.add_scalar(
+                    f"performance/rank_{rank}_train_step_ms_{statistic}/epoch",
+                    rank_summary[statistic] * 1000.0,
+                    epoch,
+                )
+
+        phase_mean_seconds = 0.0
+        for timer_name, timer_samples in self.profile_critical_path_samples.items():
+            if timer_name == "train_step":
+                continue
+            timer_summary = self._summarize_samples(timer_samples)
+            phase_mean_seconds += timer_summary["mean"]
+            for statistic in ("mean", "p50", "p95"):
+                self.logger.add_scalar(
+                    f"timing/critical_path_{timer_name}_ms_{statistic}/epoch",
+                    timer_summary[statistic] * 1000.0,
+                    epoch,
+                )
+            if phase_step_summary.get("mean", 0.0) > 0.0:
+                self.logger.add_scalar(
+                    f"timing/critical_path_{timer_name}_fraction/epoch",
+                    timer_summary["mean"] / phase_step_summary["mean"],
+                    epoch,
+                )
+        if phase_step_summary:
+            self.logger.add_scalar(
+                "timing/critical_path_phase_unattributed_ms/epoch",
+                (phase_step_summary["mean"] - phase_mean_seconds) * 1000.0,
+                epoch,
+            )
+
+        reset_indices = {
+            index for index in self.train_iterator_reset_steps if warmup_steps <= index < len(step_samples)
+        }
+        reset_samples = [step_samples[index] for index in sorted(reset_indices)]
+        non_reset_samples = [
+            value for index, value in enumerate(step_samples) if index >= latency_start and index not in reset_indices
+        ]
+        for label, samples in (("reset", reset_samples), ("non_reset", non_reset_samples)):
+            summary = self._summarize_samples(samples)
+            for statistic in ("mean", "p50", "p95", "max"):
+                if statistic in summary:
+                    self.logger.add_scalar(
+                        f"performance/{label}_train_step_ms_{statistic}/epoch",
+                        summary[statistic] * 1000.0,
+                        epoch,
+                    )
+
+        print_info(
+            "[Profile] slowest-rank steady step: "
+            f"mean={step_summary['mean'] * 1000.0:.3f} ms, "
+            f"p50={step_summary['p50'] * 1000.0:.3f} ms, "
+            f"p95={step_summary['p95'] * 1000.0:.3f} ms, "
+            f"iterator_resets={int(self.train_iterator_reset_count_max)}"
+        )
 
     def _log_training_epoch_summary(
         self,
@@ -935,6 +1547,7 @@ class VanillaTrainer:
         avg_valid_losses: dict[str, float],
         avg_valid_losses_itemized: dict[str, dict[str, float]],
         grad_info: dict[str, float],
+        diagnostic_info: dict[str, float],
     ) -> None:
         print_info("-" * 100)
         print_info(f"Epoch {epoch}")
@@ -946,12 +1559,70 @@ class VanillaTrainer:
             )
         print_info(f"[Time Report] {self.time_report.print(string_mode=True, in_second=True)}")
         print_info(f"[Grad Info] {format_dict(grad_info, 3)}")
+        if diagnostic_info:
+            print_info(f"[Diagnostics] {format_dict(diagnostic_info, 6)}")
         self.logger.add_scalar("params/lr/epoch", self.lr, epoch)
         self.logger.add_scalar("training/train_loss/epoch", avg_train_loss, epoch)
         if "grad_norm_before_clip" in grad_info:
             self.logger.add_scalar("training/gradients_before_clip/epoch", grad_info["grad_norm_before_clip"], epoch)
         if "grad_norm_after_clip" in grad_info:
             self.logger.add_scalar("training/gradients_after_clip/epoch", grad_info["grad_norm_after_clip"], epoch)
+        if "clip_fraction" in grad_info:
+            self.logger.add_scalar("training/gradient_clip_fraction/epoch", grad_info["clip_fraction"], epoch)
+        for key, value in diagnostic_info.items():
+            self.logger.add_scalar(f"diagnostics/{key}/epoch", value, epoch)
+        self.logger.add_scalar(
+            "diagnostics/target_mean_loss_baseline/epoch",
+            self.mean_predictor_loss_baseline,
+            epoch,
+        )
+        self.logger.add_scalar("progress/optimizer_steps/epoch", self.optimizer_steps, epoch)
+        self.logger.add_scalar("progress/windows_seen/epoch", self.windows_seen, epoch)
+        timing_seconds = self.time_report.as_dict()
+        sampled_phase_timers = set(getattr(self, "profile_phase_timer_names", ()))
+        for key, value in timing_seconds.items():
+            prefix = "timing/sampled" if key in sampled_phase_timers and self.profile_record_samples else "timing"
+            self.logger.add_scalar(f"{prefix}/{key}_seconds/epoch", value, epoch)
+        self._log_profile_metrics(epoch)
+        if epoch == self.start_epoch:
+            self.logger.add_scalar(
+                "startup/dataset_load_seconds_local/epoch",
+                self.dataset_load_seconds_local,
+                epoch,
+            )
+            self.logger.add_scalar(
+                "startup/dataset_load_seconds_mean/epoch",
+                self.dataset_load_seconds_mean,
+                epoch,
+            )
+            self.logger.add_scalar(
+                "startup/dataset_load_seconds_max/epoch",
+                self.dataset_load_seconds_max,
+                epoch,
+            )
+            self.logger.add_scalar(
+                "startup/dataset_statistics_seconds_local/epoch",
+                self.dataset_statistics_seconds_local,
+                epoch,
+            )
+            self.logger.add_scalar(
+                "startup/dataset_statistics_seconds_mean/epoch",
+                self.dataset_statistics_seconds_mean,
+                epoch,
+            )
+            self.logger.add_scalar(
+                "startup/dataset_statistics_seconds_max/epoch",
+                self.dataset_statistics_seconds_max,
+                epoch,
+            )
+            for rank, value in enumerate(self.dataset_load_seconds_by_rank):
+                self.logger.add_scalar(f"startup/dataset_load_seconds_rank_{rank}/epoch", value, epoch)
+            for rank, value in enumerate(self.dataset_statistics_seconds_by_rank):
+                self.logger.add_scalar(
+                    f"startup/dataset_statistics_seconds_rank_{rank}/epoch",
+                    value,
+                    epoch,
+                )
         for valid_dataset_name, valid_loss in avg_valid_losses.items():
             self.logger.add_scalar(f"training/valid_{valid_dataset_name}_loss/epoch", valid_loss, epoch)
         for key, value in avg_train_loss_itemized.items():

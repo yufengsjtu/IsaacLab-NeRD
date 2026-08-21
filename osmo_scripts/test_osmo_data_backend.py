@@ -84,6 +84,7 @@ def test_run_training_forwards_training_seed(tmp_path: Path):
         "env_name": "test-env",
         "train_num_envs": 1,
         "num_gpus": 1,
+        "eval_interval": 0,
     }
     args = argparse.Namespace(
         train_seed=2,
@@ -96,6 +97,8 @@ def test_run_training_forwards_training_seed(tmp_path: Path):
     command = run_mock.call_args.args[0]
     seed_index = command.index("--seed")
     assert command[seed_index + 1] == "2"
+    eval_index = command.index("--eval-interval")
+    assert command[eval_index + 1] == "0"
 
 
 def _write_active15_cache(path: Path) -> None:

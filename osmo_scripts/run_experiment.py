@@ -489,6 +489,8 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
         train_args.append("--update-dataset-statistics")
     if experiment.get("train_preset"):
         train_args.append(f"presets={experiment['train_preset']}")
+    if "eval_interval" in experiment:
+        train_args += ["--eval-interval", str(experiment["eval_interval"])]
     if wandb_args.enable_wandb:
         train_args.append("--enable-wandb")
         train_args += ["--wandb-project-name", wandb_args.wandb_project_name]

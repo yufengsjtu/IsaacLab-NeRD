@@ -35,6 +35,7 @@ class Logger:
         wandb_entity: str | None = None,
         config: dict[str, Any] | None = None,
         save_checkpoints: bool = True,
+        system_stats_interval_seconds: float | None = None,
     ) -> None:
         """Initialize Weights & Biases logging.
 
@@ -44,10 +45,13 @@ class Logger:
         import wandb
 
         self.save_checkpoints = save_checkpoints
+        settings_kwargs: dict[str, Any] = {"console": "wrap"}
+        if system_stats_interval_seconds is not None:
+            settings_kwargs["x_stats_sampling_interval"] = system_stats_interval_seconds
         init_kwargs: dict[str, Any] = {
             "project": wandb_project,
             "name": wandb_name,
-            "settings": wandb.Settings(console="wrap"),
+            "settings": wandb.Settings(**settings_kwargs),
         }
         if wandb_entity:
             init_kwargs["entity"] = wandb_entity
