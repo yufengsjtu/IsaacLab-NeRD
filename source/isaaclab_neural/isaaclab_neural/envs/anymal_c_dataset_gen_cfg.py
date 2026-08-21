@@ -15,6 +15,7 @@ import torch
 
 import isaaclab.envs.mdp as base_mdp
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
@@ -79,6 +80,27 @@ def _sample_terrain_levels_uniform(env: ManagerBasedRLEnv, env_ids: Sequence[int
     return torch.mean(terrain.terrain_levels.float())
 
 
+def _raise_root_above_terrain(
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int],
+    root_clearance: float,
+) -> None:
+    """Place the root above the highest terrain point under the height scan."""
+    robot = env.scene["robot"]
+    # Root/joint reset writes invalidate FK; refresh it before the attached scanner is moved.
+    _ = robot.data.body_link_pose_w.torch
+
+    height_scanner = env.scene["height_scanner"]
+    height_scanner.update(dt=0.0, force_recompute=True)
+    terrain_height = height_scanner.data.ray_hits_w.torch[env_ids, :, 2].amax(dim=1)
+
+    root_pose = robot.data.root_pose_w.torch[env_ids].clone()
+    root_pose[:, 2] = terrain_height + root_clearance
+    robot.write_root_pose_to_sim_index(root_pose=root_pose, env_ids=env_ids)
+    # Make the corrected pose visible to collision detection before recording starts.
+    _ = robot.data.body_link_pose_w.torch
+
+
 @configclass
 class AnymalCDatasetGenFlatEnvCfg(AnymalCFlatEnvCfg):
     """Anymal-C flat config for NeRD dataset generation.
@@ -134,6 +156,18 @@ class AnymalCDatasetGenRoughEnvCfg(AnymalCRoughEnvCfg):
         super().__post_init__()
         self.scene.terrain.max_init_terrain_level = None
         self.curriculum.terrain_levels = CurrTerm(func=_sample_terrain_levels_uniform)
+        # Start near platform edges so rough contacts appear within short rollouts.
+        self.events.reset_base.params["pose_range"]["x"] = (-1.0, 1.0)
+        self.events.reset_base.params["pose_range"]["y"] = (-1.0, 1.0)
+        setattr(
+            self.events,
+            "raise_base_above_terrain",
+            EventTerm(
+                func=_raise_root_above_terrain,
+                mode="reset",
+                params={"root_clearance": 0.61},
+            ),
+        )
         # Disable contact-sensor related reward/termination terms (not working with NeRD solver)
         setattr(self.terminations, "base_contact", None)
         setattr(self.rewards, "feet_air_time", None)
