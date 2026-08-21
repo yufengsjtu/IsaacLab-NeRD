@@ -14,9 +14,15 @@ from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
 from isaaclab_neural.data.hdf5 import append_rollouts_to_hdf5, write_rollouts_to_hdf5
 
 
-def _token_rollouts(*, num_envs: int = 4, trajectory_length: int = 3, max_tokens: int = 5) -> dict:
+def _token_rollouts(
+    *,
+    num_envs: int = 4,
+    trajectory_length: int = 3,
+    max_tokens: int = 5,
+    solver_active: bool = False,
+) -> dict:
     world_ids = torch.arange(num_envs, dtype=torch.long)
-    return {
+    rollouts = {
         "states": torch.zeros((num_envs, trajectory_length, 2)),
         "next_states": torch.zeros((num_envs, trajectory_length, 2)),
         "joint_f": torch.zeros((num_envs, trajectory_length, 1)),
@@ -36,6 +42,12 @@ def _token_rollouts(*, num_envs: int = 4, trajectory_length: int = 3, max_tokens
             "contact_token_overflow": torch.zeros((num_envs, trajectory_length), dtype=torch.long),
         },
     }
+    if solver_active:
+        rollouts["contacts"]["contact_token_solver_active"] = torch.zeros(
+            (num_envs, trajectory_length, max_tokens),
+            dtype=torch.bool,
+        )
+    return rollouts
 
 
 def test_write_and_append_accept_2d_contact_token_overflow(tmp_path) -> None:
@@ -48,6 +60,56 @@ def test_write_and_append_accept_2d_contact_token_overflow(tmp_path) -> None:
         assert overflow.shape == (8, 3)
         assert overflow.dtype == "int64"
         assert handle["data"].attrs["contact_token_frame"] == "world_v1"
+
+
+def test_solver_active_sidecar_roundtrips_and_is_required_only_on_request(tmp_path) -> None:
+    from isaaclab_neural.data.datasets import TrajectoryDataset
+
+    path = tmp_path / "tokens.hdf5"
+    rollouts = _token_rollouts(solver_active=True)
+    write_rollouts_to_hdf5(path, rollouts, env_name="Test-Env", contact_representation="contact_tokens")
+
+    with h5py.File(path, "r") as handle:
+        data = handle["data"]
+        assert data.attrs["contact_token_solver_active_schema"] == "mujoco_solver_included_v1"
+        assert data["contact_token_solver_active"].dtype.kind == "b"
+
+    dataset = TrajectoryDataset(
+        path,
+        sample_sequence_length=2,
+        expected_contact_representation="contact_tokens",
+        require_solver_active=True,
+    )
+    assert dataset[0]["contact_token_solver_active"].dtype == torch.bool
+
+    legacy_path = tmp_path / "legacy.hdf5"
+    write_rollouts_to_hdf5(
+        legacy_path,
+        _token_rollouts(),
+        env_name="Test-Env",
+        contact_representation="contact_tokens",
+    )
+    TrajectoryDataset(legacy_path, sample_sequence_length=2, expected_contact_representation="contact_tokens")
+    with pytest.raises(ValueError, match="contact_token_solver_active"):
+        TrajectoryDataset(
+            legacy_path,
+            sample_sequence_length=2,
+            expected_contact_representation="contact_tokens",
+            require_solver_active=True,
+        )
+
+
+def test_solver_active_sidecar_rejects_true_padding(tmp_path) -> None:
+    rollouts = _token_rollouts(solver_active=True)
+    rollouts["contacts"]["contact_token_solver_active"][0, 0, 0] = True
+
+    with pytest.raises(ValueError, match="padded"):
+        write_rollouts_to_hdf5(
+            tmp_path / "tokens.hdf5",
+            rollouts,
+            env_name="Test-Env",
+            contact_representation="contact_tokens",
+        )
 
 
 def test_contact_token_rollout_requires_root_velocity(tmp_path) -> None:

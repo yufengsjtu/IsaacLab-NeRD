@@ -60,7 +60,7 @@ class Active15ContactEncoder(ContactSetEncoder):
         effective_radius1 = other_margin - shape_margin1
         signed_gap = torch.sum(normal01_world * (point1_world - point0_world), dim=-1)
         signed_gap = signed_gap - effective_radius0 - effective_radius1
-        clearance = signed_gap - shape_margin0 - shape_margin1
+        solver_active = self._solver_active_mask(raw_contacts)
 
         body_q = _as_torch_array(state.body_q, self.device)
         body_qd = _as_torch_array(state.body_qd, self.device)
@@ -87,7 +87,7 @@ class Active15ContactEncoder(ContactSetEncoder):
         # applies Newton's strict solver-active gate.
         valid = primary0 & ~primary1 & (owner_slot >= 0) & (world_id >= 0) & (world_id < self.num_envs)
         if self._solver_active_only:
-            valid &= clearance < 0.0
+            valid &= solver_active
         candidates = torch.cat(
             (
                 valid.to(torch.float32).unsqueeze(-1),

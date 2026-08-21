@@ -12,6 +12,17 @@ from typing import Any
 
 import torch
 
+from isaaclab_neural.contacts.contact_set_schema import (
+    ACTIVE15_OTHER_MARGIN_INDEX,
+    ACTIVE15_OTHER_POINT_SLICE,
+    ACTIVE15_OWNER_MARGIN_INDEX,
+    ACTIVE15_OWNER_NORMAL_SLICE,
+    ACTIVE15_OWNER_POINT_SLICE,
+    CONTACT_REPRESENTATION_TOKENS,
+    CONTACT_TOKEN_DIM,
+    CONTACT_TOKEN_VALID_INDEX,
+    is_native15_contact_representation,
+)
 from isaaclab_neural.utils.running_mean_std import RunningMeanStd
 
 MIN_CONTACT_RMS_SAMPLES = 1024
@@ -106,6 +117,44 @@ def mask_inactive_contact_fields(input_dict: MutableMapping[str, torch.Tensor]) 
             continue
         reshaped = reshape_contact_field(value, contact_masks)
         input_dict[input_name] = torch.where(expanded_mask, reshaped, 0.0).reshape_as(value)
+
+
+def filter_solver_active_contact_tokens(
+    contact_tokens: torch.Tensor,
+    *,
+    contact_representation: str,
+    solver_active: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Return tokens selected by Newton's strict solver-active decision."""
+    if contact_tokens.shape[-1] != CONTACT_TOKEN_DIM:
+        raise ValueError(
+            f"Contact tokens must end in {CONTACT_TOKEN_DIM} channels, got shape {tuple(contact_tokens.shape)}."
+        )
+
+    if contact_representation == CONTACT_REPRESENTATION_TOKENS:
+        if solver_active is None:
+            raise ValueError("contact_filter='solver_active' requires contact_token_solver_active.")
+        if solver_active.dtype != torch.bool:
+            raise ValueError("contact_token_solver_active must use a boolean dtype.")
+        if solver_active.shape != contact_tokens.shape[:-1]:
+            raise ValueError(
+                "contact_token_solver_active shape must match contact_tokens without its feature axis, "
+                f"got {tuple(solver_active.shape)} and {tuple(contact_tokens.shape)}."
+            )
+        active = solver_active
+    elif is_native15_contact_representation(contact_representation):
+        owner_point = contact_tokens[..., ACTIVE15_OWNER_POINT_SLICE]
+        other_point = contact_tokens[..., ACTIVE15_OTHER_POINT_SLICE]
+        owner_normal = contact_tokens[..., ACTIVE15_OWNER_NORMAL_SLICE]
+        clearance = torch.sum(owner_normal * (owner_point - other_point), dim=-1)
+        clearance -= contact_tokens[..., ACTIVE15_OWNER_MARGIN_INDEX]
+        clearance -= contact_tokens[..., ACTIVE15_OTHER_MARGIN_INDEX]
+        active = clearance < 0.0
+    else:
+        raise ValueError("contact_filter='solver_active' requires a contact-token representation.")
+
+    valid = contact_tokens[..., CONTACT_TOKEN_VALID_INDEX] > 0.5
+    return torch.where((valid & active).unsqueeze(-1), contact_tokens, torch.zeros_like(contact_tokens))
 
 
 def normalize_contact_field(

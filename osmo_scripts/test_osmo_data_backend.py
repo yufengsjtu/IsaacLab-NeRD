@@ -200,3 +200,65 @@ def test_raw15_cache_contract_requires_raw_selection_metadata(tmp_path: Path):
     with h5py.File(path, "r+") as handle:
         handle["data"].attrs["contact_selection"] = "mujoco_solver_included_v1"
     assert not dataset_cache_complete(tmp_path, [filename], experiment)
+
+
+def test_active15_view_accepts_raw15_storage_contract(tmp_path: Path) -> None:
+    filename = "dataset_train.hdf5"
+    path = tmp_path / filename
+    experiment = {
+        "env_name": "Anymal-C-Rough-Native-Active15",
+        "dataset_env_name": "Anymal-C-Rough-Native-Raw15",
+        "contact_representation": "active15_tokens",
+        "dataset_contact_representation": "raw15_tokens",
+        "contact_filter": "solver_active",
+        "max_contact_tokens": 4,
+        "train_transitions": 6,
+        "valid_transitions": 6,
+        "trajectory_length": 3,
+        "dataset_specs": [{"filename": filename, "seed": 0, "split": "train"}],
+    }
+
+    _write_active15_cache(path)
+    with h5py.File(path, "r+") as handle:
+        attrs = handle["data"].attrs
+        attrs["env"] = experiment["dataset_env_name"]
+        attrs["contact_representation"] = "raw15_tokens"
+        attrs["contact_schema"] = "raw15_owner_body_v1"
+        attrs["contact_selection"] = "newton_raw_candidates_v1"
+
+    assert dataset_cache_complete(tmp_path, [filename], experiment)
+
+
+def test_solver_filtered_contact_token_cache_requires_activity_sidecar(tmp_path: Path) -> None:
+    filename = "dataset_train.hdf5"
+    path = tmp_path / filename
+    experiment = {
+        "env_name": "Anymal-C-Rough-Native-ContactTokens",
+        "contact_representation": "contact_tokens",
+        "dataset_contact_representation": "contact_tokens",
+        "contact_filter": "solver_active",
+        "max_contact_tokens": 4,
+        "train_transitions": 6,
+        "valid_transitions": 6,
+        "trajectory_length": 3,
+        "dataset_specs": [{"filename": filename, "seed": 0, "split": "train"}],
+    }
+
+    _write_active15_cache(path)
+    with h5py.File(path, "r+") as handle:
+        attrs = handle["data"].attrs
+        attrs["env"] = experiment["env_name"]
+        attrs["contact_representation"] = "contact_tokens"
+        attrs["contact_token_frame"] = "world_v1"
+
+    assert not dataset_cache_complete(tmp_path, [filename], experiment)
+
+    with h5py.File(path, "r+") as handle:
+        data_group = handle["data"]
+        data_group.create_dataset(
+            "contact_token_solver_active",
+            data=np.zeros((2, 3, 4), dtype=np.bool_),
+        )
+        data_group.attrs["contact_token_solver_active_schema"] = "mujoco_solver_included_v1"
+
+    assert dataset_cache_complete(tmp_path, [filename], experiment)

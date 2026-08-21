@@ -17,7 +17,16 @@ import warp as wp
 from newton import Contacts, Control, JointType, Model, State
 from newton.solvers import SolverBase
 
+from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_FILTER_NONE,
+    CONTACT_FILTER_SOLVER_ACTIVE,
+    CONTACT_REPRESENTATION_TOKENS,
+    CONTACT_TOKEN_DIM,
+    CONTACT_TOKEN_SOLVER_ACTIVE_FIELD,
+    is_contact_token_representation,
+)
 from isaaclab_neural.contacts.newton_contact_adapter import NewtonContactAdapter
+from isaaclab_neural.contacts.tensor_utils import filter_solver_active_contact_tokens
 from isaaclab_neural.utils import newton_utils, warp_utils
 from isaaclab_neural.utils.newton_utils import base_joint_type
 
@@ -65,6 +74,7 @@ class NeuralSolver(SolverBase):
         contact_mode: Literal["fixed_ground", "newton_native"] = "fixed_ground",
         contact_adapter: NewtonContactAdapter | None = None,
         contact_representation: str = "flat",
+        contact_filter: str = CONTACT_FILTER_NONE,
         max_contact_tokens: int = 0,
     ):
         """
@@ -156,6 +166,11 @@ class NeuralSolver(SolverBase):
         self.num_contacts_per_env = num_contacts_per_env
         self.contact_mode = contact_mode
         self.contact_representation = contact_representation
+        if contact_filter not in {CONTACT_FILTER_NONE, CONTACT_FILTER_SOLVER_ACTIVE}:
+            raise ValueError(f"Unsupported contact_filter: {contact_filter!r}.")
+        if contact_filter != CONTACT_FILTER_NONE and not is_contact_token_representation(contact_representation):
+            raise ValueError("contact_filter requires a contact-token representation.")
+        self.contact_filter = contact_filter
         self.max_contact_tokens = int(max_contact_tokens)
         self.contact_adapter = contact_adapter
         if self.contact_mode == "newton_native" and self.contact_adapter is None:
@@ -451,20 +466,20 @@ class NeuralSolver(SolverBase):
         }
 
     def _empty_contacts(self):
-        from isaaclab_neural.contacts.contact_set_schema import (
-            CONTACT_TOKEN_DIM,
-            is_contact_token_representation,
-        )
-
         if is_contact_token_representation(self.contact_representation):
             max_tokens = self.max_contact_tokens or self.num_contacts_per_env
-            return {
+            contacts = {
                 "contact_tokens": torch.zeros(
                     (self.num_envs, max_tokens, CONTACT_TOKEN_DIM),
                     device=self.torch_device,
                 ),
                 "contact_token_overflow": torch.zeros((self.num_envs,), dtype=torch.long, device=self.torch_device),
             }
+            if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
+                contacts[CONTACT_TOKEN_SOLVER_ACTIVE_FIELD] = torch.zeros(
+                    (self.num_envs, max_tokens), dtype=torch.bool, device=self.torch_device
+                )
+            return contacts
 
         contact_depths = torch.zeros(
             (self.num_envs, self.num_contacts_per_env),
@@ -497,6 +512,14 @@ class NeuralSolver(SolverBase):
 
     def process_neural_model_inputs(self, model_inputs):
         from isaaclab_neural.contacts.contact_set_encoder import transform_contact_tokens_to_body_frame
+
+        solver_active = model_inputs.pop(CONTACT_TOKEN_SOLVER_ACTIVE_FIELD, None)
+        if self.contact_filter == CONTACT_FILTER_SOLVER_ACTIVE and "contact_tokens" in model_inputs:
+            model_inputs["contact_tokens"] = filter_solver_active_contact_tokens(
+                model_inputs["contact_tokens"],
+                contact_representation=self.contact_representation,
+                solver_active=solver_active,
+            )
 
         # convert frame
         (

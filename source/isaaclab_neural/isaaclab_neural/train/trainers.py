@@ -26,8 +26,10 @@ from tqdm import tqdm
 
 from isaaclab_neural.contacts.contact_set_schema import (
     ACTIVE15_CATEGORICAL_CHANNELS,
+    CONTACT_FILTER_SOLVER_ACTIVE,
     CONTACT_REPRESENTATION_ACTIVE15,
     CONTACT_REPRESENTATION_RAW15,
+    CONTACT_REPRESENTATION_TOKENS,
 )
 from isaaclab_neural.contacts.tensor_utils import (
     MIN_CONTACT_RMS_SAMPLES,
@@ -199,6 +201,12 @@ class VanillaTrainer:
         self.batch_size = int(algo_cfg["batch_size"])
         self.num_valid_batches = int(algo_cfg.get("num_valid_batches", 50))
         dataset_cfg = algo_cfg["dataset"]
+        self.dataset_contact_representation = dataset_cfg.get(
+            "contact_representation", self.neural_solver.contact_representation
+        )
+        self.require_solver_active = self.neural_solver.contact_filter == CONTACT_FILTER_SOLVER_ACTIVE and (
+            self.dataset_contact_representation == CONTACT_REPRESENTATION_TOKENS
+        )
         self.dataset_max_capacity = dataset_cfg.get("max_capacity", 100_000_000)
         self.dataset_load_mode = dataset_cfg.get("load_mode", "eager")
         self.num_data_workers = int(dataset_cfg.get("num_data_workers", 4))
@@ -468,6 +476,8 @@ class VanillaTrainer:
             self.neural_env,
             hdf5_dataset_path=self.eval_dataset_path,
             eval_horizon=self.eval_horizon,
+            dataset_contact_representation=self.dataset_contact_representation,
+            require_solver_active=self.require_solver_active,
             device=self.device,
             require_terrain_context=self.eval_require_terrain_context,
             contact_context_validation=self.eval_contact_context_validation,
@@ -1059,7 +1069,8 @@ class SequenceModelTrainer(VanillaTrainer):
             max_capacity=self.dataset_max_capacity,
             rank=self.rank if self.train_dataset_rank_sharded else 0,
             world_size=self.world_size if self.train_dataset_rank_sharded else 1,
-            expected_contact_representation=self.neural_solver.contact_representation,
+            expected_contact_representation=self.dataset_contact_representation,
+            require_solver_active=self.require_solver_active,
         )
         if valid_datasets_cfg is not None and (not self.is_distributed or self.is_main_process):
             for valid_dataset_name, valid_dataset_path in valid_datasets_cfg.items():
@@ -1067,6 +1078,7 @@ class SequenceModelTrainer(VanillaTrainer):
                     load_mode=self.dataset_load_mode,
                     sample_sequence_length=self.sample_sequence_length,
                     hdf5_dataset_path=valid_dataset_path,
-                    expected_contact_representation=self.neural_solver.contact_representation,
+                    expected_contact_representation=self.dataset_contact_representation,
+                    require_solver_active=self.require_solver_active,
                 )
         self.collate_fn = None

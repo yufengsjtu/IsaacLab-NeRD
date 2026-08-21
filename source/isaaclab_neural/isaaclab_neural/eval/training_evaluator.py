@@ -39,6 +39,8 @@ class TrainingRolloutEvaluator:
         hdf5_dataset_path: str | None = None,
         eval_horizon: int = 10,
         device="cuda:0",
+        dataset_contact_representation: str | None = None,
+        require_solver_active: bool = False,
         require_terrain_context: bool = False,
         contact_context_validation: str | None = None,
         state_context_tolerance: float = 1.0e-5,
@@ -66,10 +68,13 @@ class TrainingRolloutEvaluator:
         self.contact_context_velocity_tolerance = contact_context_velocity_tolerance
         self.trajectory_dataset = None
         if hdf5_dataset_path is not None:
+            if dataset_contact_representation is None:
+                dataset_contact_representation = getattr(neural_env.solver_neural, "contact_representation", None)
             self.trajectory_dataset = TrajectoryDataset(
                 hdf5_dataset_path=hdf5_dataset_path,
                 sample_sequence_length=eval_horizon + self.history_length - 1,
-                expected_contact_representation=getattr(neural_env.solver_neural, "contact_representation", None),
+                expected_contact_representation=dataset_contact_representation,
+                require_solver_active=require_solver_active,
             )
 
     @torch.no_grad()

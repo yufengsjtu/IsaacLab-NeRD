@@ -77,6 +77,7 @@ def create_neural_solver(
     cfg_dict.pop("neural_model_cfg", None)
     cfg_dict.pop("contact_packing_policy", None)
     cfg_dict.pop("contact_representation", None)
+    cfg_dict.pop("contact_filter", None)
     cfg_dict.pop("max_contact_tokens", None)
     cfg_dict.pop("use_cuda_graph", None)  # legacy checkpoints; lives on NerdNewtonCfg
     cfg_dict.pop("num_contacts_per_env", None)

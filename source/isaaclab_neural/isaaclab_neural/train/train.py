@@ -19,6 +19,13 @@ import yaml
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import isaaclab_neural.envs  # noqa: F401 - registers built-in NeRD tasks
+from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_FILTER_NONE,
+    CONTACT_FILTER_SOLVER_ACTIVE,
+    CONTACT_REPRESENTATION_ACTIVE15,
+    CONTACT_REPRESENTATION_RAW15,
+    is_contact_token_representation,
+)
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 from isaaclab_neural.train import SequenceModelTrainer, VanillaTrainer
 from isaaclab_neural.train.arguments import get_parser
@@ -149,8 +156,23 @@ def load_training_cfg(args):
 
 def validate_cfg(cfg) -> None:
     """Validate solver/network consistency for common NeRD training configs."""
-    neural_solver_name = cfg["env"]["neural_solver_cfg"]["name"]
-    contact_representation = cfg["env"]["neural_solver_cfg"].get("contact_representation", "flat")
+    solver_cfg = cfg["env"]["neural_solver_cfg"]
+    neural_solver_name = solver_cfg["name"]
+    contact_representation = solver_cfg.get("contact_representation", "flat")
+    contact_filter = solver_cfg.get("contact_filter", CONTACT_FILTER_NONE)
+    if contact_filter not in {CONTACT_FILTER_NONE, CONTACT_FILTER_SOLVER_ACTIVE}:
+        raise ValueError(f"Unsupported contact_filter: {contact_filter!r}.")
+    if contact_filter != CONTACT_FILTER_NONE and not is_contact_token_representation(contact_representation):
+        raise ValueError("contact_filter requires a contact-token representation.")
+    dataset_representation = cfg["algorithm"]["dataset"].get("contact_representation", contact_representation)
+    representations_match = dataset_representation == contact_representation
+    active15_raw15_view = (
+        contact_representation == CONTACT_REPRESENTATION_ACTIVE15
+        and dataset_representation == CONTACT_REPRESENTATION_RAW15
+        and contact_filter == CONTACT_FILTER_SOLVER_ACTIVE
+    )
+    if not representations_match and not active15_raw15_view:
+        raise ValueError("Dataset and model contact representations differ without a supported reusable contact view.")
     encoder_type = cfg.get("inputs", {}).get("contact_set", {}).get("encoder_type")
     native15_encoder_pairs = {
         "active15_tokens": "body_routed_active15",

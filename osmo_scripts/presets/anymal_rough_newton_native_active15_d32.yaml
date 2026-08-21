@@ -5,7 +5,7 @@
 
 workflow:
   base_name: anymal-c-rough-newton-native-active15-d32
-  dataset_subdir: anymal-c-rough-newton-native-active15
+  dataset_subdir: anymal-c-rough-newton-native-raw15
 
 resources:
   num_gpu: 8
@@ -15,6 +15,8 @@ resources:
   platform: ovx-l40
 
 experiment:
+  dataset_env_name: Anymal-C-Rough-Native-Raw15
+  dataset_contact_representation: raw15_tokens
   env_name: Anymal-C-Rough-Native-Active15
   robot_name: Anymal-C
   data_gen_task: Isaac-Velocity-Rough-Anymal-C-Dataset-Gen-v0
@@ -26,6 +28,7 @@ experiment:
   contact_mode: newton_native
   contact_representation: active15_tokens
   num_contacts_per_env: 64
+  contact_filter: solver_active
   max_contact_tokens: 64
   require_terrain_context: true
   contact_packing_policy: body_round_robin_pair_atomic

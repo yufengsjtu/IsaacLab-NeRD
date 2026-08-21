@@ -19,10 +19,12 @@ from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_REPRESENTATION_ACTIVE15,
     CONTACT_REPRESENTATION_FLAT,
     CONTACT_REPRESENTATION_RAW15,
+    CONTACT_TOKEN_SOLVER_ACTIVE_FIELD,
+    CONTACT_TOKEN_SOLVER_ACTIVE_SCHEMA,
 )
 from isaaclab_neural.utils.commons import DATASET_MODES
 
-BOOL_DATASET_KEYS = {"contact_masks"}
+BOOL_DATASET_KEYS = {"contact_masks", CONTACT_TOKEN_SOLVER_ACTIVE_FIELD}
 INTEGER_DATASET_KEYS = {
     "contact_body_ids",
     "contact_token_body_ids",
@@ -70,6 +72,7 @@ def _resolve_dataset_path(hdf5_dataset_path: str | Path) -> Path:
 def validate_contact_token_metadata(
     data_group: h5py.Group,
     expected_representation: str | None = None,
+    require_solver_active: bool = False,
 ) -> None:
     """Reject contact-token datasets with ambiguous frame or identity metadata."""
     has_tokens = "contact_tokens" in data_group
@@ -153,6 +156,25 @@ def validate_contact_token_metadata(
         invalid_dtypes["contact_tokens"] = str(tokens.dtype)
     if invalid_dtypes:
         raise ValueError(f"Contact-token fields have incompatible dtypes: {invalid_dtypes}.")
+    has_solver_active = CONTACT_TOKEN_SOLVER_ACTIVE_FIELD in data_group
+    if require_solver_active and not has_solver_active:
+        raise ValueError(
+            f"Contact-token dataset is missing {CONTACT_TOKEN_SOLVER_ACTIVE_FIELD!r}; regenerate this dataset."
+        )
+    if has_solver_active:
+        solver_active = cast(h5py.Dataset, data_group[CONTACT_TOKEN_SOLVER_ACTIVE_FIELD])
+        if solver_active.shape != expected_identity_shape:
+            raise ValueError(
+                f"{CONTACT_TOKEN_SOLVER_ACTIVE_FIELD} must have shape {expected_identity_shape}, "
+                f"got {solver_active.shape}."
+            )
+        if solver_active.dtype.kind != "b":
+            raise ValueError(f"{CONTACT_TOKEN_SOLVER_ACTIVE_FIELD} must use a boolean dtype.")
+        schema = _decode_attr(data_group.attrs.get("contact_token_solver_active_schema", ""))
+        if schema != CONTACT_TOKEN_SOLVER_ACTIVE_SCHEMA:
+            raise ValueError(
+                f"{CONTACT_TOKEN_SOLVER_ACTIVE_FIELD} requires schema {CONTACT_TOKEN_SOLVER_ACTIVE_SCHEMA!r}."
+            )
 
 
 def _read_hdf5_metadata(
@@ -160,13 +182,18 @@ def _read_hdf5_metadata(
     *,
     max_capacity: int,
     batch_size: int | None = None,
+    require_solver_active: bool = False,
     expected_contact_representation: str | None = None,
 ) -> dict[str, Any]:
     """Read dataset metadata without materializing rollout arrays."""
     dataset_path = _resolve_dataset_path(hdf5_dataset_path)
     with h5py.File(dataset_path, "r", swmr=True, libver="latest") as dataset_file:
         data_group = cast(h5py.Group, dataset_file["data"])
-        validate_contact_token_metadata(data_group, expected_contact_representation)
+        validate_contact_token_metadata(
+            data_group,
+            expected_contact_representation,
+            require_solver_active=require_solver_active,
+        )
         mode = _decode_attr(data_group.attrs["mode"])
         if mode not in DATASET_MODES:
             raise ValueError(f"Unsupported dataset mode: {mode!r}. Expected one of {DATASET_MODES}.")
@@ -475,6 +502,7 @@ class TrajectoryDataset(Dataset):
         rank: int = 0,
         world_size: int = 1,
         expected_contact_representation: str | None = None,
+        require_solver_active: bool = False,
     ):
         if world_size <= 0:
             raise ValueError("world_size must be positive.")
@@ -495,6 +523,7 @@ class TrajectoryDataset(Dataset):
         self.load_dataset(
             hdf5_dataset_path,
             expected_contact_representation=expected_contact_representation,
+            require_solver_active=require_solver_active,
         )
         self.update_sample_sequence_length(sample_sequence_length)
 
@@ -502,11 +531,16 @@ class TrajectoryDataset(Dataset):
         self,
         hdf5_dataset_path: str | Path,
         expected_contact_representation: str | None = None,
+        require_solver_active: bool = False,
     ) -> None:
         """Load a trajectory HDF5 dataset into memory."""
         with h5py.File(_resolve_dataset_path(hdf5_dataset_path), "r", swmr=True, libver="latest") as dataset_file:
             data_group = cast(h5py.Group, dataset_file["data"])
-            validate_contact_token_metadata(data_group, expected_contact_representation)
+            validate_contact_token_metadata(
+                data_group,
+                expected_contact_representation,
+                require_solver_active=require_solver_active,
+            )
             mode = _decode_attr(data_group.attrs["mode"])
             if mode != "trajectory":
                 raise ValueError(f"TrajectoryDataset requires dataset mode 'trajectory', got {mode!r}.")
@@ -607,6 +641,7 @@ class LazyTrajectoryDataset(Dataset):
         sample_sequence_length: int = 10,
         max_capacity: int = 100_000_000,
         expected_contact_representation: str | None = None,
+        require_solver_active: bool = False,
     ):
         self.max_capacity = max_capacity
         self.sample_sequence_length = sample_sequence_length
@@ -619,6 +654,7 @@ class LazyTrajectoryDataset(Dataset):
             hdf5_dataset_path,
             max_capacity=max_capacity,
             expected_contact_representation=expected_contact_representation,
+            require_solver_active=require_solver_active,
         )
         if metadata["mode"] != "trajectory":
             raise ValueError(f"LazyTrajectoryDataset requires dataset mode 'trajectory', got {metadata['mode']!r}.")
@@ -733,6 +769,7 @@ def create_trajectory_dataset(
     rank: int = 0,
     world_size: int = 1,
     expected_contact_representation: str | None = None,
+    require_solver_active: bool = False,
 ) -> TrajectoryDataset | LazyTrajectoryDataset:
     """Create an eager or lazy trajectory-window dataset."""
     if load_mode == "lazy":
@@ -741,6 +778,7 @@ def create_trajectory_dataset(
             sample_sequence_length=sample_sequence_length,
             max_capacity=max_capacity,
             expected_contact_representation=expected_contact_representation,
+            require_solver_active=require_solver_active,
         )
     if load_mode == "eager":
         return TrajectoryDataset(
@@ -750,5 +788,6 @@ def create_trajectory_dataset(
             rank=rank,
             world_size=world_size,
             expected_contact_representation=expected_contact_representation,
+            require_solver_active=require_solver_active,
         )
     raise ValueError(f"Unsupported dataset load_mode: {load_mode!r}. Expected 'eager' or 'lazy'.")

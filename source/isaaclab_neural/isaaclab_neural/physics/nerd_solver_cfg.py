@@ -32,6 +32,9 @@ ContactPackingPolicy = Literal[
 ContactRepresentation = Literal["flat", "contact_tokens", "raw15_tokens", "active15_tokens"]
 """Contact encoding used by the trained neural model."""
 
+ContactFilter = Literal["none", "solver_active"]
+"""Optional contact selection applied before normalization and model encoding."""
+
 
 @configclass
 class NerdSolverCfg(NewtonSolverCfg):
@@ -86,6 +89,9 @@ class NerdSolverCfg(NewtonSolverCfg):
 
     contact_representation: ContactRepresentation = "flat"
     """Contact encoding consumed by the trained model."""
+
+    contact_filter: ContactFilter = "none"
+    """Optional selection view applied to contact tokens before model preprocessing."""
 
     max_contact_tokens: int = 64
     """Maximum padded contact tokens per environment for either token representation."""

@@ -19,6 +19,8 @@ from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_REPRESENTATION_ACTIVE15,
     CONTACT_REPRESENTATION_RAW15,
     CONTACT_REPRESENTATION_TOKENS,
+    CONTACT_TOKEN_SOLVER_ACTIVE_FIELD,
+    CONTACT_TOKEN_SOLVER_ACTIVE_SCHEMA,
     is_native15_contact_representation,
 )
 
@@ -189,6 +191,16 @@ def _validate_contact_token_identity(
         raise ValueError("Every valid contact token must have nonnegative owner body and world ids.")
     if np.any(~valid & ((body_ids != -1) | (world_ids != -1))):
         raise ValueError("Every padded contact token must use owner body and world id -1.")
+    solver_active = arrays.get(CONTACT_TOKEN_SOLVER_ACTIVE_FIELD)
+    if solver_active is not None:
+        if solver_active.shape != expected_shape:
+            raise ValueError(
+                f"{CONTACT_TOKEN_SOLVER_ACTIVE_FIELD} must have shape {expected_shape}, got {solver_active.shape}."
+            )
+        if solver_active.dtype != np.bool_:
+            raise ValueError(f"{CONTACT_TOKEN_SOLVER_ACTIVE_FIELD} must use a boolean dtype.")
+        if np.any(~valid & solver_active):
+            raise ValueError(f"padded tokens must be false in {CONTACT_TOKEN_SOLVER_ACTIVE_FIELD}.")
 
     required_context = {"state_world_id", "root_world_id", "contact_world_id"}
     missing_context = sorted(required_context - set(trajectory_context))
@@ -240,6 +252,8 @@ def _validate_rollout_arrays(arrays: Mapping[str, Any]) -> None:
     for name in ("contact_token_body_ids", "contact_token_world_ids", "contact_token_overflow"):
         if name in arrays and not np.issubdtype(arrays[name].dtype, np.integer):
             raise ValueError(f"Rollout field {name!r} must use an integer dtype, got {arrays[name].dtype}.")
+    if CONTACT_TOKEN_SOLVER_ACTIVE_FIELD in arrays and arrays[CONTACT_TOKEN_SOLVER_ACTIVE_FIELD].dtype != np.bool_:
+        raise ValueError(f"Rollout field {CONTACT_TOKEN_SOLVER_ACTIVE_FIELD!r} must use a boolean dtype.")
 
     states = arrays["states"]
     if states.ndim < 3:
@@ -279,6 +293,8 @@ def _validate_append_target(
             ),
             "contact_identity_schema": "world_owner_v1",
         }
+        if CONTACT_TOKEN_SOLVER_ACTIVE_FIELD in arrays:
+            expected_metadata["contact_token_solver_active_schema"] = CONTACT_TOKEN_SOLVER_ACTIVE_SCHEMA
         if is_native15_contact_representation(representation):
             expected_metadata.update(
                 {
@@ -455,6 +471,8 @@ def _update_metadata(data_group: h5py.Group, contact_representation: str | None 
         )
         data_group.attrs["contact_representation"] = representation
         data_group.attrs["contact_identity_schema"] = "world_owner_v1"
+        if CONTACT_TOKEN_SOLVER_ACTIVE_FIELD in data_group:
+            data_group.attrs["contact_token_solver_active_schema"] = CONTACT_TOKEN_SOLVER_ACTIVE_SCHEMA
         if is_native15_contact_representation(representation):
             data_group.attrs["contact_frame"] = "owner_body_v1"
             data_group.attrs["contact_token_frame"] = "owner_body_v1"

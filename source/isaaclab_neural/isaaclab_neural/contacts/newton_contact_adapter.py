@@ -14,10 +14,14 @@ import warp as wp
 from isaaclab_neural.contacts.active15_contact_encoder import Active15ContactEncoder
 from isaaclab_neural.contacts.contact_set_encoder import ContactSetEncoder
 from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_FILTER_NONE,
+    CONTACT_FILTER_SOLVER_ACTIVE,
     CONTACT_REPRESENTATION_ACTIVE15,
     CONTACT_REPRESENTATION_FLAT,
     CONTACT_REPRESENTATION_RAW15,
+    CONTACT_REPRESENTATION_TOKENS,
     CONTACT_TOKEN_DIM,
+    CONTACT_TOKEN_SOLVER_ACTIVE_FIELD,
     DEFAULT_MAX_CONTACT_TOKENS,
     is_contact_token_representation,
 )
@@ -45,11 +49,17 @@ class NewtonContactAdapter:
         packing_policy: ContactPackingPolicy = "stable_index",
         *,
         contact_representation: str = CONTACT_REPRESENTATION_FLAT,
+        contact_filter: str = CONTACT_FILTER_NONE,
         max_contact_tokens: int = DEFAULT_MAX_CONTACT_TOKENS,
     ):
         self.model = model
         self.num_envs = int(model.world_count)
         self.contact_representation = contact_representation
+        if contact_filter not in {CONTACT_FILTER_NONE, CONTACT_FILTER_SOLVER_ACTIVE}:
+            raise ValueError(f"Unsupported contact_filter: {contact_filter!r}.")
+        if contact_filter != CONTACT_FILTER_NONE and not is_contact_token_representation(contact_representation):
+            raise ValueError("contact_filter requires a contact-token representation.")
+        self.contact_filter = contact_filter
         self.max_contact_tokens = int(max_contact_tokens)
         if is_contact_token_representation(self.contact_representation):
             self.num_contacts_per_env = self.max_contact_tokens
@@ -167,13 +177,24 @@ class NewtonContactAdapter:
             dtype=torch.long,
             device=self.device,
         )
+        self.contact_token_solver_active = torch.zeros(
+            (self.num_envs, self.max_contact_tokens),
+            dtype=torch.bool,
+            device=self.device,
+        )
         self._token_encoder: ContactSetEncoder | None = None
         if is_contact_token_representation(self.contact_representation):
             encoder_types = {
                 CONTACT_REPRESENTATION_ACTIVE15: Active15ContactEncoder,
                 CONTACT_REPRESENTATION_RAW15: Raw15ContactEncoder,
             }
-            encoder_type = encoder_types.get(self.contact_representation, ContactSetEncoder)
+            if (
+                self.contact_representation == CONTACT_REPRESENTATION_ACTIVE15
+                and self.contact_filter == CONTACT_FILTER_SOLVER_ACTIVE
+            ):
+                encoder_type = Raw15ContactEncoder
+            else:
+                encoder_type = encoder_types.get(self.contact_representation, ContactSetEncoder)
             self._token_encoder = encoder_type(
                 model=model,
                 primary_body_mask=self.primary_body_mask,
@@ -200,6 +221,8 @@ class NewtonContactAdapter:
         self.contact_token_overflow.zero_()
         if hasattr(self, "contact_token_body_ids"):
             self.contact_token_body_ids.fill_(-1)
+        if hasattr(self, "contact_token_solver_active"):
+            self.contact_token_solver_active.zero_()
 
     def update(
         self,
@@ -227,6 +250,11 @@ class NewtonContactAdapter:
             body_ids = self._token_encoder.last_body_ids
             if body_ids is not None:
                 self.contact_token_body_ids.copy_(body_ids)
+            if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
+                solver_active = self._token_encoder.last_solver_active
+                if solver_active is None:
+                    raise RuntimeError("Contact-token encoding did not produce solver-active flags.")
+                self.contact_token_solver_active.copy_(solver_active)
             valid_tokens = (self.contact_tokens[..., 0] > 0.5).sum()
             overflow_sum = self.contact_token_overflow.sum()
             self._raw_contacts_total += contact_count
@@ -377,10 +405,13 @@ class NewtonContactAdapter:
         :meth:`update`, which :class:`TransformerNeuralSolver` already does.
         """
         if is_contact_token_representation(self.contact_representation):
-            return {
+            inputs = {
                 "contact_tokens": self.contact_tokens,
                 "contact_token_overflow": self.contact_token_overflow,
             }
+            if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
+                inputs[CONTACT_TOKEN_SOLVER_ACTIVE_FIELD] = self.contact_token_solver_active
+            return inputs
 
         B = self.num_envs
         C = self.num_contacts_per_env

@@ -24,6 +24,7 @@ def _token_encoder() -> ContactSetEncoder:
         body_count=4,
         body_world=torch.tensor([0, 0, 0, 0]),
         body_com=torch.zeros(4, 3),
+        shape_margin=torch.tensor([0.0, 0.01, 0.01, 0.0]),
     )
     primary_body_mask = torch.tensor([True, True, False, False])
     shape_body_torch = torch.tensor([-1, 0, 1, -1])
@@ -56,6 +57,8 @@ def test_contact_set_encoder_respects_capacity_and_validity():
         "point1_world": torch.tensor([[0.05, 0.0, 0.0], [0.15, 0.0, 0.0]]),
         "normal": torch.tensor([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]),
         "surface_separation": torch.tensor([-0.01, -0.02]),
+        "thickness0": torch.tensor([0.03, 0.03]),
+        "thickness1": torch.tensor([0.02, 0.02]),
     }
 
     tokens = encoder.encode(raw, state)
@@ -64,6 +67,37 @@ def test_contact_set_encoder_respects_capacity_and_validity():
     assert tokens[0, 0, 0] == 1.0
     assert (tokens[0, :, 0] >= 0.0).all()
     assert tokens[0, :, 0].sum() <= 4
+
+
+def test_contact_set_encoder_records_aligned_solver_active_sidecar():
+    encoder = _token_encoder()
+    state = SimpleNamespace(
+        body_q=torch.tensor(
+            [
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                [0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            ]
+        ),
+        body_qd=torch.zeros(2, 6),
+    )
+    raw = {
+        "shape0": torch.tensor([1, 1]),
+        "shape1": torch.tensor([0, 0]),
+        "point0_world": torch.zeros(2, 3),
+        "point1_world": torch.tensor([[0.0, 0.0, 0.02], [0.0, 0.0, 0.10]]),
+        "normal": torch.tensor([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]),
+        "surface_separation": torch.tensor([-0.02, 0.06]),
+        "thickness0": torch.tensor([0.03, 0.03]),
+        "thickness1": torch.tensor([0.02, 0.02]),
+    }
+
+    tokens = encoder.encode(raw, state)
+
+    assert int((tokens[..., 0] > 0.5).sum()) == 2
+    torch.testing.assert_close(
+        encoder.last_solver_active,
+        torch.tensor([[True, False, False, False]]),
+    )
 
 
 def test_contact_token_moments_pin_identity_channels():
@@ -185,6 +219,8 @@ def test_pack_rows_overflow_does_not_contaminate_next_env():
         "point1_world": torch.tensor([[0.0, 0.0, -0.01], [0.1, 0.0, -0.01]]),
         "normal": torch.tensor([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]),
         "surface_separation": torch.tensor([-0.02, -0.01]),
+        "thickness0": torch.zeros(2),
+        "thickness1": torch.zeros(2),
     }
 
     tokens = encoder.encode(raw, state)
@@ -236,6 +272,8 @@ def test_body_slot_is_local_per_environment():
         "surface1_world": torch.tensor([[0.0, 0.0, -0.01], [1.0, 0.0, -0.01]]),
         "normal": torch.tensor([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]),
         "surface_separation": torch.tensor([-0.02, -0.02]),
+        "thickness0": torch.zeros(2),
+        "thickness1": torch.zeros(2),
     }
 
     tokens = encoder.encode(raw, state)

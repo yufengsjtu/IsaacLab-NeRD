@@ -34,6 +34,7 @@ class _DirectedContactRows:
     """One directed contact candidate per row before capacity packing."""
 
     valid: torch.Tensor
+    solver_active: torch.Tensor
     world_id: torch.Tensor
     body_id: torch.Tensor
     other_body_id: torch.Tensor
@@ -128,6 +129,7 @@ class ContactSetEncoder:
                 raise ValueError("model.body_com must provide one offset per body.")
         self._overflow: torch.Tensor | None = None
         self._body_ids: torch.Tensor | None = None
+        self._solver_active: torch.Tensor | None = None
         self._overflow_total = 0
         self._frames = 0
 
@@ -140,6 +142,11 @@ class ContactSetEncoder:
     def last_body_ids(self) -> torch.Tensor | None:
         """Global owner-body ids for the last packed token frame."""
         return self._body_ids
+
+    @property
+    def last_solver_active(self) -> torch.Tensor | None:
+        """Solver-active flags aligned with the last packed token frame."""
+        return self._solver_active
 
     def reset_overflow_stats(self) -> None:
         """Reset cumulative overflow telemetry."""
@@ -165,11 +172,12 @@ class ContactSetEncoder:
     ) -> torch.Tensor:
         """Pack raw Newton contacts into ``[num_envs, max_contact_tokens, 17]`` tokens."""
         rows = self._directed_rows(raw_contacts, state)
-        packed, overflow, body_ids = self._pack_rows(rows)
+        packed, overflow, body_ids, solver_active = self._pack_rows(rows)
         if self._overflow is None or self._overflow.device != packed.device:
             self._overflow = torch.zeros(self.num_envs, dtype=torch.long, device=packed.device)
         self._overflow.copy_(overflow)
         self._body_ids = body_ids
+        self._solver_active = solver_active
         self._overflow_total += int(overflow.sum().item())
         return packed
 
@@ -205,6 +213,7 @@ class ContactSetEncoder:
             empty = torch.empty(0, device=self.device)
             return _DirectedContactRows(
                 valid=empty.bool(),
+                solver_active=empty.bool(),
                 world_id=empty.long(),
                 body_id=empty.long(),
                 other_body_id=empty.long(),
@@ -227,6 +236,7 @@ class ContactSetEncoder:
         point1 = raw.get("surface1_world", raw["point1_world"])
         normal01 = raw["normal"]
         gap = raw["surface_separation"]
+        solver_active = self._solver_active_mask(raw)
 
         body_q = _as_torch_array(state.body_q, self.device)
         body_qd = _as_torch_array(state.body_qd, self.device)
@@ -251,6 +261,7 @@ class ContactSetEncoder:
 
         rows0 = _DirectedContactRows(
             valid=valid0,
+            solver_active=solver_active,
             world_id=pair_world,
             body_id=body0,
             other_body_id=body1,
@@ -263,6 +274,7 @@ class ContactSetEncoder:
         )
         rows1 = _DirectedContactRows(
             valid=valid1,
+            solver_active=solver_active,
             world_id=pair_world,
             body_id=body1,
             other_body_id=body0,
@@ -279,6 +291,7 @@ class ContactSetEncoder:
     def _concat_rows(first: _DirectedContactRows, second: _DirectedContactRows) -> _DirectedContactRows:
         return _DirectedContactRows(
             valid=torch.cat((first.valid, second.valid)),
+            solver_active=torch.cat((first.solver_active, second.solver_active)),
             world_id=torch.cat((first.world_id, second.world_id)),
             body_id=torch.cat((first.body_id, second.body_id)),
             other_body_id=torch.cat((first.other_body_id, second.other_body_id)),
@@ -290,7 +303,7 @@ class ContactSetEncoder:
             velocity_world=torch.cat((first.velocity_world, second.velocity_world)),
         )
 
-    def _pack_rows(self, rows: _DirectedContactRows) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _pack_rows(self, rows: _DirectedContactRows) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         worlds = self.num_envs
         capacity = self.max_contact_tokens
         device = self.device
@@ -298,7 +311,8 @@ class ContactSetEncoder:
         overflow = torch.zeros(worlds, dtype=torch.long, device=device)
         if rows.valid.numel() == 0:
             body_ids = torch.full((worlds, capacity), -1, dtype=torch.long, device=device)
-            return packed, overflow, body_ids
+            solver_active = torch.zeros((worlds, capacity), dtype=torch.bool, device=device)
+            return packed, overflow, body_ids, solver_active
 
         pairs = rows.valid.shape[0] // 2
         if rows.valid.shape[0] % 2 != 0:
@@ -391,13 +405,28 @@ class ContactSetEncoder:
         flat_body_ids.index_copy_(0, destination, rows.body_id)
         packed_body_ids = flat_body_ids[:dump_row].reshape(worlds, capacity)
         packed[..., CONTACT_TOKEN_VALID_INDEX] = (packed[..., CONTACT_TOKEN_VALID_INDEX] > 0.5).to(torch.float32)
+        flat_solver_active = torch.zeros(dump_row + 1, dtype=torch.bool, device=device)
+        flat_solver_active.index_copy_(0, destination, rows.solver_active)
+        packed_solver_active = flat_solver_active[:dump_row].reshape(worlds, capacity)
+        packed_solver_active &= packed[..., CONTACT_TOKEN_VALID_INDEX] > 0.5
 
         dropped = rows.valid & ~keep_row
         if dropped.any():
             dropped_counts = torch.zeros(worlds + 1, dtype=torch.long, device=device)
             dropped_counts.scatter_add_(0, world_row[dropped], torch.ones_like(world_row[dropped]))
             overflow.copy_(dropped_counts[:worlds])
-        return packed, overflow, packed_body_ids
+        return packed, overflow, packed_body_ids, packed_solver_active
+
+    @staticmethod
+    def _solver_active_mask(raw: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Return Newton's strict solver-inclusion decision for each raw contact."""
+        required = ("point0_world", "point1_world", "normal", "thickness0", "thickness1")
+        missing = [name for name in required if name not in raw]
+        if missing:
+            raise ValueError(f"Solver-active contact classification requires raw fields: {missing}.")
+        clearance = torch.sum(raw["normal"] * (raw["point1_world"] - raw["point0_world"]), dim=-1)
+        clearance = clearance - raw["thickness0"] - raw["thickness1"]
+        return clearance < 0.0
 
     def _shape_body_ids(self, shapes: torch.Tensor) -> torch.Tensor:
         body_ids = torch.full(shapes.shape, -1, dtype=torch.long, device=shapes.device)

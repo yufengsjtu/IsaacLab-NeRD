@@ -4,31 +4,31 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 workflow:
-  base_name: anymal-c-rough-newton-native-active15
-  dataset_subdir: anymal-c-rough-newton-native-raw15
+  base_name: anymal-c-rough-newton-native-shared-per-body-active-filter
+  # Reuse canonical contact-token HDF5; shared_per_body only changes the model encoder.
+  dataset_subdir: anymal-c-rough-newton-native-contact-tokens
 
 resources:
   num_gpu: 8
   num_cpu: 96
   memory: 512Gi
   storage: 512Gi
-  platform: ovx-l40
+  platform: ovx-l40s
 
 experiment:
-  dataset_env_name: Anymal-C-Rough-Native-Raw15
-  dataset_contact_representation: raw15_tokens
-  env_name: Anymal-C-Rough-Native-Active15
+  env_name: Anymal-C-Rough-Native-ContactTokens
   robot_name: Anymal-C
   data_gen_task: Isaac-Velocity-Rough-Anymal-C-Dataset-Gen-v0
   deployment_task: Isaac-Velocity-Rough-Anymal-C-v0
   train_task: Isaac-Velocity-Rough-Anymal-C-NeRD-v0
-  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native_body_routed_active15.yaml
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native_shared_per_body_active_filter.yaml
   train_preset: newton_mjwarp
   num_gpus: 8
   contact_mode: newton_native
-  contact_representation: active15_tokens
-  num_contacts_per_env: 64
+  contact_representation: contact_tokens
+  dataset_contact_representation: contact_tokens
   contact_filter: solver_active
+  num_contacts_per_env: 64
   max_contact_tokens: 64
   require_terrain_context: true
   contact_packing_policy: body_round_robin_pair_atomic

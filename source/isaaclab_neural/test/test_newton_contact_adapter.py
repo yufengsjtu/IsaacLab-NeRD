@@ -9,8 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_FILTER_SOLVER_ACTIVE,
+    CONTACT_REPRESENTATION_ACTIVE15,
+    CONTACT_REPRESENTATION_TOKENS,
+    CONTACT_TOKEN_SOLVER_ACTIVE_FIELD,
+)
 from isaaclab_neural.contacts.newton_contact_adapter import NewtonContactAdapter
 from isaaclab_neural.contacts.packing import get_contact_order, resolve_contact_packing_policy
+from isaaclab_neural.contacts.raw15_contact_encoder import Raw15ContactEncoder
 
 
 def _adapter() -> NewtonContactAdapter:
@@ -20,6 +27,51 @@ def _adapter() -> NewtonContactAdapter:
     adapter.primary_body_mask = torch.zeros(8, dtype=torch.bool)
     adapter.primary_body_mask[[3, 7]] = True
     return adapter
+
+
+def _token_model() -> SimpleNamespace:
+    return SimpleNamespace(
+        world_count=1,
+        body_count=2,
+        device="cpu",
+        shape_body=torch.tensor([-1, 0, 1]),
+        shape_margin=torch.tensor([0.01, 0.01, 0.01]),
+        body_world=torch.tensor([0, 0]),
+        body_com=torch.zeros(2, 3),
+        joint_articulation=None,
+        joint_parent=None,
+        joint_child=None,
+        joint_world=None,
+    )
+
+
+def test_active15_solver_filter_packs_raw15_before_filtering() -> None:
+    adapter = NewtonContactAdapter(
+        _token_model(),
+        num_contacts_per_env=4,
+        device="cpu",
+        contact_representation=CONTACT_REPRESENTATION_ACTIVE15,
+        contact_filter=CONTACT_FILTER_SOLVER_ACTIVE,
+        max_contact_tokens=4,
+    )
+
+    assert isinstance(adapter._token_encoder, Raw15ContactEncoder)
+    assert CONTACT_TOKEN_SOLVER_ACTIVE_FIELD not in adapter.to_neural_inputs()
+
+
+def test_generic_contact_tokens_expose_aligned_solver_active_sidecar() -> None:
+    adapter = NewtonContactAdapter(
+        _token_model(),
+        num_contacts_per_env=4,
+        device="cpu",
+        contact_representation=CONTACT_REPRESENTATION_TOKENS,
+        max_contact_tokens=4,
+    )
+
+    inputs = adapter.to_neural_inputs()
+
+    assert inputs[CONTACT_TOKEN_SOLVER_ACTIVE_FIELD].shape == (1, 4)
+    assert inputs[CONTACT_TOKEN_SOLVER_ACTIVE_FIELD].dtype == torch.bool
 
 
 def test_canonicalize_contact_sides_puts_dynamic_body_first():

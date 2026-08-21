@@ -135,6 +135,7 @@ class DataGenerationAdapter:
                 device=str(self.device),
                 packing_policy=solver_cfg.contact_packing_policy,
                 contact_representation=getattr(solver_cfg, "contact_representation", "flat"),
+                contact_filter=getattr(solver_cfg, "contact_filter", "none"),
                 max_contact_tokens=int(getattr(solver_cfg, "max_contact_tokens", 64)),
             )
         else:
@@ -151,6 +152,7 @@ class DataGenerationAdapter:
             contact_mode=self.contact_mode,
             contact_adapter=self.contact_adapter,
             contact_representation=getattr(self.solver_cfg, "contact_representation", "flat"),
+            contact_filter=getattr(self.solver_cfg, "contact_filter", "none"),
             max_contact_tokens=int(getattr(self.solver_cfg, "max_contact_tokens", 0)),
         )
         self.sync()

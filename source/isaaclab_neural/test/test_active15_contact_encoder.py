@@ -334,7 +334,7 @@ def test_active15_lr_variant_and_osmo_presets_share_one_dataset() -> None:
     old_lr = yaml.safe_load((CFG_DIR / "transformer_rough_native_body_routed_active15_lr_1e-3.yaml").read_text())
     standard_preset = yaml.safe_load((PRESET_DIR / "anymal_rough_newton_native_active15.yaml").read_text())
     old_lr_preset = yaml.safe_load((PRESET_DIR / "anymal_rough_newton_native_active15_lr_1e-3.yaml").read_text())
-    dataset_preset = yaml.safe_load((PRESET_DIR / "anymal_rough_newton_native_active15_dataset.yaml").read_text())
+    dataset_preset = yaml.safe_load((PRESET_DIR / "anymal_rough_newton_native_raw15_dataset.yaml").read_text())
 
     assert standard["env"]["neural_solver_cfg"]["contact_representation"] == "active15_tokens"
     assert standard["inputs"]["contact_set"]["encoder_type"] == "body_routed_active15"
@@ -351,8 +351,8 @@ def test_active15_lr_variant_and_osmo_presets_share_one_dataset() -> None:
         old_lr_preset["workflow"]["dataset_subdir"],
         dataset_preset["workflow"]["dataset_subdir"],
     }
-    assert dataset_subdirs == {"anymal-c-rough-newton-native-active15"}
-    expected_dataset_root = "./data/datasets/Anymal-C-Rough-Native-Active15/"
+    assert dataset_subdirs == {"anymal-c-rough-newton-native-raw15"}
+    expected_dataset_root = "./data/datasets/Anymal-C-Rough-Native-Raw15/"
     assert standard["algorithm"]["dataset"]["train_dataset_path"].startswith(expected_dataset_root)
     assert standard["algorithm"]["eval"]["dataset_path"].startswith(expected_dataset_root)
     assert all(
@@ -394,7 +394,7 @@ def test_active15_latent_dim_variants(
     normalized["inputs"]["contact_set"]["body_latent_dim"] = 64
     assert normalized == standard
 
-    assert variant_preset["workflow"]["dataset_subdir"] == "anymal-c-rough-newton-native-active15"
+    assert variant_preset["workflow"]["dataset_subdir"] == "anymal-c-rough-newton-native-raw15"
     normalized_preset = copy.deepcopy(variant_preset)
     normalized_preset["workflow"]["base_name"] = standard_preset["workflow"]["base_name"]
     normalized_preset["experiment"]["train_cfg"] = standard_preset["experiment"]["train_cfg"]

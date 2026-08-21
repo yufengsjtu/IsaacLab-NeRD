@@ -88,12 +88,27 @@ def required_dataset_files(experiment: dict, specs: list[DatasetSpec]) -> list[s
     return required_files
 
 
+def dataset_env_name(experiment: dict) -> str:
+    """Return the environment metadata/path name used by stored datasets."""
+    return str(experiment.get("dataset_env_name", experiment["env_name"]))
+
+
+def dataset_contact_representation(experiment: dict) -> str:
+    """Return the representation serialized in the shared dataset."""
+    return str(experiment.get("dataset_contact_representation", experiment.get("contact_representation", "flat")))
+
+
 def dataset_cache_complete(
     candidate_dir: Path,
     required_files: list[str],
     experiment: dict,
 ) -> bool:
     specs_by_filename = {spec.filename: spec for spec in parse_dataset_specs(experiment)}
+    stored_env_name = dataset_env_name(experiment)
+    stored_representation = dataset_contact_representation(experiment)
+    require_solver_active = (
+        experiment.get("contact_filter", "none") == "solver_active" and stored_representation == "contact_tokens"
+    )
     for filename in required_files:
         dataset_path = candidate_dir / filename
         if not dataset_path.is_file():
@@ -101,7 +116,7 @@ def dataset_cache_complete(
         if not h5py.is_hdf5(dataset_path):
             print(f"Rejected malformed cached dataset: {dataset_path}")
             return False
-        require_tokens = experiment.get("contact_representation", "flat") in {
+        require_tokens = stored_representation in {
             "contact_tokens",
             "raw15_tokens",
             "active15_tokens",
@@ -120,7 +135,7 @@ def dataset_cache_complete(
             expected_trajectory_length = int(experiment["trajectory_length"])
             if (
                 data_group.attrs.get("mode") != "trajectory"
-                or data_group.attrs.get("env") != experiment["env_name"]
+                or data_group.attrs.get("env") != stored_env_name
                 or states is None
                 or states.ndim != 3
                 or states.shape[1] != expected_trajectory_length
@@ -160,8 +175,10 @@ def dataset_cache_complete(
                     "next_states",
                     "joint_f",
                 }
+                if require_solver_active:
+                    required_token_fields.add("contact_token_solver_active")
                 missing_token_fields = sorted(required_token_fields - set(data_group.keys()))
-                expected_representation = str(experiment.get("contact_representation", "contact_tokens"))
+                expected_representation = stored_representation
                 native15_metadata = {
                     "active15_tokens": {
                         "contact_schema": "active15_owner_body_v1",
@@ -203,6 +220,7 @@ def dataset_cache_complete(
                 body_ids = cast(h5py.Dataset, data_group["contact_token_body_ids"])
                 world_ids = cast(h5py.Dataset, data_group["contact_token_world_ids"])
                 overflow = cast(h5py.Dataset, data_group["contact_token_overflow"])
+                solver_active = data_group.get("contact_token_solver_active")
                 token_shapes_ok = (
                     tokens.shape == (*step_shape, expected_capacity, 17)
                     and body_ids.shape == (*step_shape, expected_capacity)
@@ -215,6 +233,17 @@ def dataset_cache_complete(
                     and world_ids.dtype.kind in "iu"
                     and overflow.dtype.kind in "iu"
                 )
+                if solver_active is not None:
+                    solver_active = cast(h5py.Dataset, solver_active)
+                    token_shapes_ok = token_shapes_ok and solver_active.shape == (*step_shape, expected_capacity)
+                    token_dtypes_ok = token_dtypes_ok and solver_active.dtype.kind == "b"
+                    token_dtypes_ok = (
+                        token_dtypes_ok
+                        and str(data_group.attrs.get("contact_token_solver_active_schema", ""))
+                        == "mujoco_solver_included_v1"
+                    )
+                elif require_solver_active:
+                    token_shapes_ok = False
                 if not token_shapes_ok or not token_dtypes_ok:
                     print(f"Rejected cached dataset with incompatible token shapes or dtypes: {dataset_path}")
                     return False
@@ -361,7 +390,7 @@ def stage_generated_datasets(
 def contact_args(experiment: dict) -> list[str]:
     args = ["--contact-mode", str(experiment.get("contact_mode", "fixed_ground"))]
     if experiment.get("contact_mode") == "newton_native":
-        representation = str(experiment.get("contact_representation", "flat"))
+        representation = dataset_contact_representation(experiment)
         args += [
             "--num-contacts-per-env",
             str(experiment.get("num_contacts_per_env", 64)),
@@ -401,7 +430,7 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
         "--dataset-name",
         spec.filename,
         "--env-name",
-        str(experiment["env_name"]),
+        dataset_env_name(experiment),
         "--robot-name",
         str(experiment["robot_name"]),
         "--sample-mode",
@@ -495,7 +524,7 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
 def run_context_diagnostic(experiment: dict, specs: list[DatasetSpec], dataset_dir: Path):
     """Validate terrain and contact reconstruction for a generated dataset."""
     diagnostic_filename = str(experiment.get("diagnostic_dataset", specs[0].filename))
-    dataset_path = dataset_dir / str(experiment["env_name"]) / diagnostic_filename
+    dataset_path = dataset_dir / dataset_env_name(experiment) / diagnostic_filename
     command = [
         sys.executable,
         "-m",
@@ -579,12 +608,14 @@ def run(args: argparse.Namespace):
     specs = parse_dataset_specs(experiment)
     output_root = Path(args.output_root)
     dataset_dir = Path(args.dataset_dir)
-    local_env_dir = dataset_dir / str(experiment["env_name"])
+    stored_env_name = dataset_env_name(experiment)
+    local_env_dir = dataset_dir / stored_env_name
     required_files = required_dataset_files(experiment, specs)
 
     print(f"Workflow base name: {args.workflow_base_name}")
     print(f"Dataset subdirectory: {args.dataset_subdir}")
     print(f"Environment: {experiment['env_name']}")
+    print(f"Dataset environment: {stored_env_name}")
     print(f"Data generation envs: {experiment['data_gen_num_envs']}")
     print(f"Training envs per rank: {experiment['train_num_envs']}")
     print(f"Training config: {experiment['train_cfg']}")
@@ -603,13 +634,13 @@ def run(args: argparse.Namespace):
         datasets_available = load_dataset_cache_from_input(
             input_root=Path(args.dataset_input_path),
             dataset_subdir=args.dataset_subdir,
-            env_name=str(experiment["env_name"]),
+            env_name=stored_env_name,
             local_env_dir=local_env_dir,
             required_files=required_files,
             experiment=experiment,
         )
         if not datasets_available:
-            print(f"Storage input cache unavailable for {experiment['env_name']}; generating datasets locally.")
+            print(f"Storage input cache unavailable for {stored_env_name}; generating datasets locally.")
             if args.dataset_cache_mode == "require":
                 raise RuntimeError("DATASET_CACHE_MODE=require but required datasets were not found in storage input.")
     elif args.dataset_cache_mode == "require":
@@ -622,7 +653,7 @@ def run(args: argparse.Namespace):
         stage_generated_datasets(
             local_env_dir=local_env_dir,
             dataset_subdir=args.dataset_subdir,
-            env_name=str(experiment["env_name"]),
+            env_name=stored_env_name,
             storage_backend=args.storage_backend,
             swift_data_container=args.swift_data_container,
             nvdataset_data_dataset=args.nvdataset_data_dataset,
