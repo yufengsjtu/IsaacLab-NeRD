@@ -51,6 +51,10 @@ The launcher supports declarative presets in `osmo_scripts/presets/`:
   `Anymal-C-Rough-Native` dataset paths.
 - `anymal_rough_newton_native_contact_tokens`: rough-terrain equivalent with
   token HDF5 datasets and the contact-token transformer config.
+- `anymal_rough_newton_native_shared_per_body_contact_force_smoke`: 100K
+  rough-terrain smoke run with opt-in per-body contact-force labels.
+- `anymal_rough_newton_native_shared_per_body_contact_force_formal`: 10M
+  formal run with the same auxiliary force target.
 - `anymal_fixed_ground`: Anymal-C with fixed-ground abstract contacts.
 - `cartpole_fixed_ground`: Cartpole with fixed-ground contacts.
 
@@ -116,6 +120,11 @@ Contact-related generation options come from each preset:
   `body_round_robin_pair_atomic`.
 - `states_frame`: optional override for dataset generation, used by Cartpole
   fixed-ground to collect world-frame data.
+- `record_body_net_contact_forces`: opt-in recording of post-solve
+  `[17, 3]` world-frame Anymal-C resultant linear contact-force labels. These
+  include normal and tangential/friction components, exclude contact
+  moments/torques, and are enabled only by the force presets. The setting adds
+  `--record-body-net-contact-forces` to dataset generation.
 
 ### Training Features
 

@@ -99,6 +99,9 @@ def setup_rms_from_info(model, rms_info, device="cpu"):
     if "output_rms" in rms_info:
         shape = rms_info["output_rms"]
         model.output_rms = RunningMeanStd(shape=tuple(shape), device=device)
+    if "body_net_contact_force_rms" in rms_info:
+        shape = rms_info["body_net_contact_force_rms"]
+        model.body_net_contact_force_rms = RunningMeanStd(shape=tuple(shape), device=device)
 
 
 def reconstruct_model_from_checkpoint(checkpoint, neural_solver, device="cpu"):

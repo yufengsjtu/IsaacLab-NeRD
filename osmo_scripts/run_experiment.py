@@ -168,6 +168,25 @@ def dataset_cache_complete(
                         f"missing_fields={missing_token_fields}."
                     )
                     return False
+            if experiment.get("record_body_net_contact_forces", False):
+                force_key = "body_net_contact_forces_w"
+                expected_primary_bodies = int(experiment.get("num_primary_bodies", 17))
+                force_dataset = cast(h5py.Dataset, data_group[force_key]) if force_key in data_group else None
+                force_metadata_matches = (
+                    data_group.attrs.get("body_net_contact_force_schema") == "per_primary_body_v1"
+                    and data_group.attrs.get("body_net_contact_force_frame") == "world"
+                    and data_group.attrs.get("body_net_contact_force_units") == "N"
+                    and data_group.attrs.get("body_net_contact_force_timing") == "post_solve_t_to_t_plus_1"
+                )
+                if (
+                    force_dataset is None
+                    or force_dataset.ndim != 4
+                    or force_dataset.shape[:2] != step_shape
+                    or force_dataset.shape[-2:] != (expected_primary_bodies, 3)
+                    or not force_metadata_matches
+                ):
+                    print(f"Rejected cached dataset without compatible per-body force labels: {dataset_path}")
+                    return False
             if require_terrain_context:
                 data_group = cast(h5py.Group, handle["data"])
                 missing_root_kinematics = sorted({"root_body_q", "root_body_qd"} - set(data_group.keys()))
@@ -368,6 +387,8 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
         args += ["--states-frame", str(experiment["states_frame"])]
     if experiment.get("write_chunk_transitions"):
         args += ["--write-chunk-transitions", str(experiment["write_chunk_transitions"])]
+    if experiment.get("record_body_net_contact_forces", False):
+        args.append("--record-body-net-contact-forces")
     if spec.zero_actions:
         args.append("--zero-actions")
     if spec.use_policy:

@@ -101,6 +101,7 @@ class ContactSetEncoder:
         num_envs: int,
         max_contact_tokens: int,
         device: torch.device | str,
+        primary_body_ids_by_world: torch.Tensor | None = None,
     ) -> None:
         if max_contact_tokens <= 0:
             raise ValueError("max_contact_tokens must be a positive integer.")
@@ -111,6 +112,7 @@ class ContactSetEncoder:
         self.num_envs = num_envs
         self.max_contact_tokens = int(max_contact_tokens)
         self.device = torch.device(device)
+        self.primary_body_ids_by_world = primary_body_ids_by_world
         # Cache as int64: Newton exposes body_world as int32, but contact indexing
         # buffers are long and PyTorch index-put requires matching dtypes.
         if model.body_world is None:
@@ -176,6 +178,11 @@ class ContactSetEncoder:
     def _build_body_slot_lookup(self) -> torch.Tensor:
         """Map global body ids to per-environment local primary-body slots."""
         lookup = torch.full((int(self.model.body_count),), -1, dtype=torch.long, device=self.device)
+        if self.primary_body_ids_by_world is not None:
+            for env_ids in self.primary_body_ids_by_world:
+                for local_slot, body_id in enumerate(env_ids.tolist()):
+                    lookup[int(body_id)] = local_slot
+            return lookup
         if self.body_world is not None:
             for world_id in range(self.num_envs):
                 env_ids = torch.nonzero(

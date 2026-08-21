@@ -14,6 +14,94 @@ import numpy as np
 import torch
 
 
+def build_primary_body_sensor_indices(sensor_names: list[str], primary_body_names: list[str]) -> torch.Tensor:
+    """Map contact-sensor rows into the primary-body slot ordering.
+
+    Names may be full prim paths or leaf names. Every primary body must map
+    exactly once; extra sensor rows are allowed.
+    """
+
+    def leaf_name(name: str) -> str:
+        return str(name).rstrip("/").rsplit("/", maxsplit=1)[-1]
+
+    primary_leaves = [leaf_name(name) for name in primary_body_names]
+    if len(set(primary_leaves)) != len(primary_leaves):
+        raise ValueError(f"Primary body names are ambiguous after path normalization: {primary_leaves}.")
+
+    sensor_rows: dict[str, list[int]] = {}
+    for index, name in enumerate(sensor_names):
+        sensor_rows.setdefault(leaf_name(name), []).append(index)
+
+    missing = [name for name in primary_leaves if name not in sensor_rows]
+    ambiguous = {name: sensor_rows[name] for name in primary_leaves if len(sensor_rows.get(name, [])) > 1}
+    if missing or ambiguous:
+        raise ValueError(
+            "Contact sensor names do not map one-to-one to primary robot bodies: "
+            f"missing={missing}, ambiguous={ambiguous}."
+        )
+    return torch.tensor([sensor_rows[name][0] for name in primary_leaves], dtype=torch.long)
+
+
+class BodyNetContactForceRecorder:
+    """Read resultant Newton contact forces in primary-body slot order."""
+
+    def __init__(self, sensor: Any, contact_adapter: Any, *, num_envs: int, device: str | torch.device):
+        self.sensor = sensor
+        self.num_envs = int(num_envs)
+        self.device = torch.device(device)
+        body_ids_by_world = contact_adapter.primary_body_ids_by_world
+        if body_ids_by_world.ndim != 2 or body_ids_by_world.shape[0] != self.num_envs:
+            raise ValueError(
+                "Primary body ids must have shape [num_envs, num_primary_bodies], "
+                f"got {tuple(body_ids_by_world.shape)}."
+            )
+        labels = getattr(contact_adapter.model, "body_label", None)
+        if labels is None:
+            labels = getattr(contact_adapter.model, "body_key", None)
+        if labels is None:
+            raise RuntimeError("Newton model does not expose body_label or body_key metadata.")
+        labels = list(labels)
+        primary_names_by_world = [
+            [str(labels[int(body_id)]) for body_id in body_ids.tolist()] for body_ids in body_ids_by_world
+        ]
+        primary_leaves_by_world = [
+            [name.rstrip("/").rsplit("/", maxsplit=1)[-1] for name in names] for names in primary_names_by_world
+        ]
+        if any(names != primary_leaves_by_world[0] for names in primary_leaves_by_world[1:]):
+            raise ValueError("Primary body names and slot ordering must be identical across Newton worlds.")
+        sensor_names = getattr(sensor, "sensor_names", None)
+        if not sensor_names:
+            raise RuntimeError("Newton ContactSensor sensor_names metadata is unavailable.")
+        self.primary_body_names = primary_leaves_by_world[0]
+        self.sensor_indices = build_primary_body_sensor_indices(list(sensor_names), self.primary_body_names).to(
+            self.device
+        )
+
+    @property
+    def num_primary_bodies(self) -> int:
+        """Number of primary robot body slots."""
+        return int(self.sensor_indices.numel())
+
+    def read_post_solve(self) -> torch.Tensor:
+        """Return post-solve resultant linear contact forces [N] in the world frame.
+
+        The forces include normal and tangential/friction components but exclude
+        contact moments and torques.
+        """
+        net_forces = self.sensor.data.net_forces_w
+        if net_forces is None:
+            raise RuntimeError("Newton ContactSensor.data.net_forces_w is unavailable.")
+        values = net_forces.torch if hasattr(net_forces, "torch") else torch.as_tensor(net_forces)
+        values = values.to(self.device)
+        expected_prefix = (self.num_envs, len(getattr(self.sensor, "sensor_names", [])))
+        if values.ndim != 3 or tuple(values.shape[:2]) != expected_prefix or values.shape[-1] != 3:
+            raise RuntimeError(
+                "Newton ContactSensor.data.net_forces_w must have shape "
+                f"[{self.num_envs}, {expected_prefix[1]}, 3], got {tuple(values.shape)}."
+            )
+        return values.index_select(1, self.sensor_indices)
+
+
 class NewtonDataGenerationBackend:
     """Small wrapper around NewtonManager state needed by data generation."""
 
@@ -103,7 +191,7 @@ class DataGenerationAdapter:
     contacts into training datasets.
     """
 
-    def __init__(self, env: Any, solver_cfg: Any):
+    def __init__(self, env: Any, solver_cfg: Any, *, record_body_net_contact_forces: bool = False):
         self.env = getattr(env, "unwrapped", env)
         self.solver_cfg = solver_cfg
         self.device = getattr(self.env, "device", "cpu")
@@ -112,6 +200,7 @@ class DataGenerationAdapter:
         self.state = self.backend.state
         self.control = self.backend.control
         self._body_world_torch: torch.Tensor | None = None
+        self.body_net_contact_force_recorder: BodyNetContactForceRecorder | None = None
 
         self.contact_mode = solver_cfg.contact_mode
         self.abstract_contacts = None
@@ -139,6 +228,23 @@ class DataGenerationAdapter:
             )
         else:
             raise ValueError(f"Unsupported contact_mode: {self.contact_mode}")
+
+        if record_body_net_contact_forces:
+            if self.contact_mode != "newton_native" or self.contact_adapter is None:
+                raise ValueError("Body net contact-force labels require contact_mode='newton_native'.")
+            if getattr(solver_cfg, "contact_representation", "flat") != "contact_tokens":
+                raise ValueError("Body net contact-force labels require contact_representation='contact_tokens'.")
+            scene = getattr(self.env, "scene", None)
+            sensors = getattr(scene, "sensors", {})
+            sensor = sensors.get("contact_forces") if sensors is not None else None
+            if sensor is None:
+                raise RuntimeError("Body net contact-force recording requires scene sensor 'contact_forces'.")
+            self.body_net_contact_force_recorder = BodyNetContactForceRecorder(
+                sensor,
+                self.contact_adapter,
+                num_envs=int(getattr(self.env, "num_envs")),
+                device=self.device,
+            )
 
         from isaaclab_neural.solvers import create_neural_solver
 
@@ -221,6 +327,31 @@ class DataGenerationAdapter:
     def num_contacts_per_env(self) -> int:
         """Number of fixed contact slots per environment."""
         return int(self.solver.num_contacts_per_env)
+
+    @property
+    def num_primary_bodies(self) -> int:
+        """Number of primary body slots available for force labels."""
+        if self.body_net_contact_force_recorder is None:
+            return 0
+        return self.body_net_contact_force_recorder.num_primary_bodies
+
+    @property
+    def body_net_contact_force_body_names(self) -> tuple[str, ...]:
+        """Primary body names in force-label slot order."""
+        if self.body_net_contact_force_recorder is None:
+            return ()
+        return tuple(self.body_net_contact_force_recorder.primary_body_names)
+
+    def body_net_contact_forces_w(self) -> torch.Tensor:
+        """Return current per-primary-body resultant contact forces [N].
+
+        Values are read after the latest solve in the world frame and include
+        normal and tangential/friction components, but not contact moments or
+        torques.
+        """
+        if self.body_net_contact_force_recorder is None:
+            raise RuntimeError("Body net contact-force recording is not enabled.")
+        return self.body_net_contact_force_recorder.read_post_solve()
 
     def contact_truncation_summary(self) -> dict[str, int | float] | None:
         """Return native contact truncation statistics when available."""
