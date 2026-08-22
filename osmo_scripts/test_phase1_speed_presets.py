@@ -10,7 +10,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT / "source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal"
 PRESET_DIR = ROOT / "osmo_scripts/presets"
@@ -32,9 +31,7 @@ def _normalize_speed_config(config: dict) -> dict:
     algorithm["dataset"]["max_capacity"] = 20_000_000
     algorithm["dataset"]["valid_datasets"] = {
         "exp_trajectory": "./data/datasets/Anymal-C-Rough-Native-Raw15/dataset_valid.hdf5",
-        "zero_action_trajectory": (
-            "./data/datasets/Anymal-C-Rough-Native-Raw15/dataset_zero_action_valid.hdf5"
-        ),
+        "zero_action_trajectory": ("./data/datasets/Anymal-C-Rough-Native-Raw15/dataset_zero_action_valid.hdf5"),
         "lstm_actuator_zero_action_trajectory": (
             "./data/datasets/Anymal-C-Rough-Native-Raw15/dataset_lstm_actuator_zero_action_valid.hdf5"
         ),
@@ -42,9 +39,9 @@ def _normalize_speed_config(config: dict) -> dict:
             "./data/datasets/Anymal-C-Rough-Native-Raw15/dataset_lstm_actuator_policy_valid.hdf5"
         ),
     }
-    algorithm["eval"] = _load_yaml(
-        CONFIG_DIR / "transformer_rough_native_body_routed_active15.yaml"
-    )["algorithm"]["eval"]
+    algorithm["eval"] = _load_yaml(CONFIG_DIR / "transformer_rough_native_body_routed_active15.yaml")["algorithm"][
+        "eval"
+    ]
     return normalized
 
 
@@ -63,8 +60,19 @@ def test_speed_configs_only_change_the_approved_pilot_controls() -> None:
     standard = _load_yaml(CONFIG_DIR / "transformer_rough_native_body_routed_active15.yaml")
     batch_512 = _load_yaml(CONFIG_DIR / "transformer_rough_native_body_routed_active15_speed_b512.yaml")
     batch_64 = _load_yaml(CONFIG_DIR / "transformer_rough_native_body_routed_active15_speed_b64.yaml")
+    full20m_batch_1024 = _load_yaml(
+        CONFIG_DIR / "transformer_rough_native_body_routed_active15_speed_full20m_b1024.yaml"
+    )
+    full20m_batch_2048 = _load_yaml(
+        CONFIG_DIR / "transformer_rough_native_body_routed_active15_speed_full20m_b2048.yaml"
+    )
 
-    for config, batch_size in ((batch_512, 512), (batch_64, 64)):
+    for config, batch_size, max_capacity in (
+        (batch_512, 512, 1_024_000),
+        (batch_64, 64, 1_024_000),
+        (full20m_batch_1024, 1024, 20_000_000),
+        (full20m_batch_2048, 2048, 20_000_000),
+    ):
         algorithm = config["algorithm"]
         assert algorithm["num_epochs"] == 1
         assert algorithm["num_iters_per_epoch"] == 1000
@@ -78,7 +86,7 @@ def test_speed_configs_only_change_the_approved_pilot_controls() -> None:
             "wandb_system_stats_interval_seconds": 1.0,
         }
         assert algorithm["diagnostics"] == {"enabled": False}
-        assert algorithm["dataset"]["max_capacity"] == 1_024_000
+        assert algorithm["dataset"]["max_capacity"] == max_capacity
         assert algorithm["dataset"]["valid_datasets"] == {}
         assert algorithm["eval"] == {"interval": 0, "require_terrain_context": False}
         assert _normalize_speed_config(config) == standard
@@ -99,22 +107,67 @@ def test_speed_configs_have_the_expected_subset_and_iterator_lengths() -> None:
     assert [step for step in range(1, 1_000) if step % 244 == 0] == [244, 488, 732, 976]
 
 
+def test_full20m_speed_configs_have_matching_global_batch_and_no_iterator_reset() -> None:
+    trajectory_length = 400
+    sample_sequence_length = 10
+    num_trajectories = 20_000_000 // trajectory_length
+    windows_per_trajectory = trajectory_length - sample_sequence_length + 1
+    global_windows = num_trajectories * windows_per_trajectory
+
+    assert num_trajectories == 50_000
+    assert global_windows == 19_550_000
+    for world_size, batch_size in ((4, 1024), (2, 2048)):
+        assert world_size * batch_size == 4096
+        assert (global_windows // world_size) // batch_size == 4_772
+        assert 4_772 > 1_000
+
+
 def test_speed_presets_share_data_model_and_seed_contract() -> None:
     names = (
         "anymal_rough_newton_native_active15_speed_1g_b512",
         "anymal_rough_newton_native_active15_speed_8g_b64",
         "anymal_rough_newton_native_active15_speed_8g_b512",
+        "anymal_rough_newton_native_active15_speed_full20m_4g_b1024",
+        "anymal_rough_newton_native_active15_speed_full20m_2g_b2048",
     )
     expected = (
-        (1, 512, {"num_gpu": 1, "num_cpu": 12, "memory": "64Gi", "storage": "256Gi", "platform": "ovx-l40"}),
-        (8, 64, {"num_gpu": 8, "num_cpu": 96, "memory": "512Gi", "storage": "512Gi", "platform": "ovx-l40"}),
-        (8, 512, {"num_gpu": 8, "num_cpu": 96, "memory": "512Gi", "storage": "512Gi", "platform": "ovx-l40"}),
+        (
+            1,
+            512,
+            1_024_000,
+            {"num_gpu": 1, "num_cpu": 12, "memory": "64Gi", "storage": "256Gi", "platform": "ovx-l40"},
+        ),
+        (
+            8,
+            64,
+            1_024_000,
+            {"num_gpu": 8, "num_cpu": 96, "memory": "512Gi", "storage": "512Gi", "platform": "ovx-l40"},
+        ),
+        (
+            8,
+            512,
+            1_024_000,
+            {"num_gpu": 8, "num_cpu": 96, "memory": "512Gi", "storage": "512Gi", "platform": "ovx-l40"},
+        ),
+        (
+            4,
+            1024,
+            20_000_000,
+            {"num_gpu": 4, "num_cpu": 48, "memory": "384Gi", "storage": "512Gi", "platform": "ovx-l40"},
+        ),
+        (
+            2,
+            2048,
+            20_000_000,
+            {"num_gpu": 2, "num_cpu": 24, "memory": "220Gi", "storage": "512Gi", "platform": "ovx-l40"},
+        ),
     )
 
     standard = _load_yaml(PRESET_DIR / "anymal_rough_newton_native_active15.yaml")
-    for name, (num_gpus, batch_size, resources) in zip(names, expected, strict=True):
+    for name, (num_gpus, batch_size, max_capacity, resources) in zip(names, expected, strict=True):
         preset = _load_yaml(PRESET_DIR / f"{name}.yaml")
         experiment = preset["experiment"]
+        config = _load_yaml(ROOT / experiment["train_cfg"])
         assert preset["resources"] == resources
         assert preset["resources"]["num_gpu"] == num_gpus
         assert experiment["num_gpus"] == num_gpus
@@ -123,6 +176,8 @@ def test_speed_presets_share_data_model_and_seed_contract() -> None:
         assert experiment["contact_representation"] == "active15_tokens"
         assert experiment["contact_filter"] == "solver_active"
         assert experiment["eval_interval"] == 0
-        assert experiment["train_cfg"].endswith(f"_speed_b{batch_size}.yaml")
+        assert experiment["train_cfg"].endswith(f"_b{batch_size}.yaml")
+        assert config["algorithm"]["batch_size"] == batch_size
+        assert config["algorithm"]["dataset"]["max_capacity"] == max_capacity
         assert preset["workflow"]["dataset_subdir"] == "anymal-c-rough-newton-native-raw15"
         assert _normalize_speed_preset(preset) == standard
