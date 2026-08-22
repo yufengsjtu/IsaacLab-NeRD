@@ -730,17 +730,25 @@ class TrainingRolloutEvaluator:
         q_mse_per_step = (next_states_diff[..., : solver.dof_q_per_env] ** 2).mean((0, 2))
         qd_mse_per_step = (next_states_diff[..., solver.dof_q_per_env :] ** 2).mean((0, 2))
         l2_per_step = next_states_diff.norm(dim=-1).mean(0)
+        q_l2_per_step = next_states_diff[..., : solver.dof_q_per_env].norm(dim=-1).mean(0)
+        qd_l2_per_step = next_states_diff[..., solver.dof_q_per_env :].norm(dim=-1).mean(0)
 
         error_stats["overall"]["error(MSE)"] = mse_per_step.mean()
         error_stats["overall"]["q_error(MSE)"] = q_mse_per_step.mean()
         error_stats["overall"]["qd_error(MSE)"] = qd_mse_per_step.mean()
         error_stats["overall"]["error(L2)"] = l2_per_step.mean()
+        error_stats["overall"]["q_error(L2)"] = q_l2_per_step.mean()
+        error_stats["overall"]["qd_error(L2)"] = qd_l2_per_step.mean()
         error_stats["step-wise"]["error(MSE)"] = mse_per_step
         error_stats["step-wise"]["q_error(MSE)"] = q_mse_per_step
         error_stats["step-wise"]["qd_error(MSE)"] = qd_mse_per_step
         error_stats["step-wise"]["error(L2)"] = l2_per_step
+        error_stats["step-wise"]["q_error(L2)"] = q_l2_per_step
+        error_stats["step-wise"]["qd_error(L2)"] = qd_l2_per_step
         error_stats["final"]["error(MSE)"] = mse_per_step[-1]
         error_stats["final"]["q_error(MSE)"] = q_mse_per_step[-1]
         error_stats["final"]["qd_error(MSE)"] = qd_mse_per_step[-1]
         error_stats["final"]["error(L2)"] = l2_per_step[-1]
+        error_stats["final"]["q_error(L2)"] = q_l2_per_step[-1]
+        error_stats["final"]["qd_error(L2)"] = qd_l2_per_step[-1]
         return next_states_diff, error_stats

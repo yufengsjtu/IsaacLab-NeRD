@@ -387,6 +387,28 @@ def test_sampled_trajectories_include_source_window_coordinates(monkeypatch):
     torch.testing.assert_close(trajectories["_dataset_window_start"], torch.tensor([30, 10]))
 
 
+def test_rollout_error_metrics_report_q_and_qd_l2_separately():
+    class FakeSolver:
+        dof_q_per_env = 2
+
+        @staticmethod
+        def wrap2PI(_states):
+            return None
+
+    evaluator = object.__new__(TrainingRolloutEvaluator)
+    evaluator.neural_env = SimpleNamespace(solver_neural=FakeSolver())
+    target = torch.tensor([[[3.0, 4.0, 0.0, 0.0], [0.0, 0.0, 6.0, 8.0]]])
+
+    _, error_stats = evaluator.calculate_error_metrics(target, torch.zeros_like(target))
+
+    torch.testing.assert_close(error_stats["overall"]["q_error(L2)"], torch.tensor(2.5))
+    torch.testing.assert_close(error_stats["overall"]["qd_error(L2)"], torch.tensor(5.0))
+    torch.testing.assert_close(error_stats["step-wise"]["q_error(L2)"], torch.tensor([5.0, 0.0]))
+    torch.testing.assert_close(error_stats["step-wise"]["qd_error(L2)"], torch.tensor([0.0, 10.0]))
+    torch.testing.assert_close(error_stats["final"]["q_error(L2)"], torch.tensor(0.0))
+    torch.testing.assert_close(error_stats["final"]["qd_error(L2)"], torch.tensor(10.0))
+
+
 def _terrain_restore_evaluator(*, require_terrain_context: bool, terrain) -> TrainingRolloutEvaluator:
     evaluator = object.__new__(TrainingRolloutEvaluator)
     evaluator.require_terrain_context = require_terrain_context
