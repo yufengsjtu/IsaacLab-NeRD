@@ -73,7 +73,10 @@ def test_shared_per_body_lr_preset_only_changes_names_and_config():
 
     normalized = deepcopy(variant)
     normalized["workflow"]["base_name"] = author["workflow"]["base_name"]
+    normalized["resources"] = deepcopy(author["resources"])
     normalized["experiment"]["train_cfg"] = author["experiment"]["train_cfg"]
+    normalized["experiment"]["save_interval"] = author["experiment"]["save_interval"]
+    normalized["experiment"]["persist_periodic_checkpoints"] = True
     assert normalized == author
 
 

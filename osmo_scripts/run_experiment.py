@@ -491,6 +491,8 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
         train_args.append(f"presets={experiment['train_preset']}")
     if "eval_interval" in experiment:
         train_args += ["--eval-interval", str(experiment["eval_interval"])]
+    if "save_interval" in experiment:
+        train_args += ["--save-interval", str(experiment["save_interval"])]
     if wandb_args.enable_wandb:
         train_args.append("--enable-wandb")
         train_args += ["--wandb-project-name", wandb_args.wandb_project_name]
@@ -504,6 +506,8 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
             train_args += ["--wandb-entity", wandb_args.wandb_entity]
         if not wandb_args.wandb_save_checkpoints:
             train_args.append("--no-wandb-save-checkpoints")
+        if experiment.get("persist_periodic_checkpoints", False):
+            train_args.append("--wandb-save-periodic-checkpoints")
 
     num_gpus = int(experiment.get("num_gpus", 1))
     if num_gpus > 1:
@@ -700,7 +704,7 @@ def main():
         "--wandb-save-checkpoints",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Upload best checkpoints to the active W&B run.",
+        help="Upload selected checkpoints to the active W&B run.",
     )
     args = parser.parse_args()
 

@@ -627,6 +627,10 @@ class VanillaTrainer:
         if self.is_distributed:
             dist.barrier()
 
+        self.save_interval = cli_cfg.get("save_interval", 50)
+        self.log_interval = cli_cfg.get("log_interval", 1)
+        self.wandb_save_periodic_checkpoints = bool(cli_cfg.get("wandb_save_periodic_checkpoints", False))
+
         self.logger = Logger()
         if self.is_main_process:
             self.logger.init_tensorboard(self.summary_log_dir)
@@ -640,8 +644,6 @@ class VanillaTrainer:
                 system_stats_interval_seconds=self.profile_wandb_stats_interval_seconds,
             )
 
-        self.save_interval = cli_cfg.get("save_interval", 50)
-        self.log_interval = cli_cfg.get("log_interval", 1)
         if self.is_main_process:
             Path(self.model_log_dir, "saved_best_eval_model_epochs.txt").touch()
             for valid_dataset_name in self.valid_datasets:
@@ -693,6 +695,8 @@ class VanillaTrainer:
             "dataset_statistics_seconds_by_rank": getattr(self, "dataset_statistics_seconds_by_rank", []),
             "diagnostics_enabled": getattr(self, "diagnostics_enabled", False),
             "diagnostic_batches_per_epoch": getattr(self, "diagnostic_batches_per_epoch", 0),
+            "save_interval": getattr(self, "save_interval", None),
+            "wandb_save_periodic_checkpoints": getattr(self, "wandb_save_periodic_checkpoints", False),
             "model_num_parameters": num_params_torch_model(self.neural_model),
             "contact_encoder_type": contact_cfg.get("encoder_type"),
             "contact_body_latent_dim": contact_cfg.get("body_latent_dim"),
@@ -1720,8 +1724,11 @@ class VanillaTrainer:
             cfg=self.cfg,
             **training_state,
         )
-        if self.is_main_process and self.logger.wandb and filename and "best" in filename:
-            self.logger.log_checkpoint(checkpoint_path)
+        is_best_checkpoint = "best" in filename
+        is_periodic_checkpoint = filename.startswith("model_epoch")
+        upload_periodic = is_periodic_checkpoint and getattr(self, "wandb_save_periodic_checkpoints", False)
+        if self.is_main_process and self.logger.wandb and (is_best_checkpoint or upload_periodic):
+            self.logger.log_checkpoint(checkpoint_path, upload_now=upload_periodic)
 
 
 class SequenceModelTrainer(VanillaTrainer):

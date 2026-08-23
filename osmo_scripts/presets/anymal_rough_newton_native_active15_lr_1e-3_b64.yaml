@@ -4,8 +4,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 workflow:
-  base_name: anymal-c-rough-newton-native-contact-tokens
-  dataset_subdir: anymal-c-rough-newton-native-contact-tokens
+  base_name: anymal-c-rough-newton-native-active15-lr-1e-3-b64
+  dataset_subdir: anymal-c-rough-newton-native-raw15
 
 resources:
   num_gpu: 8
@@ -15,19 +15,22 @@ resources:
   platform: ovx-l40
 
 experiment:
-  env_name: Anymal-C-Rough-Native-ContactTokens
+  dataset_env_name: Anymal-C-Rough-Native-Raw15
+  dataset_contact_representation: raw15_tokens
+  env_name: Anymal-C-Rough-Native-Active15
   robot_name: Anymal-C
   data_gen_task: Isaac-Velocity-Rough-Anymal-C-Dataset-Gen-v0
   deployment_task: Isaac-Velocity-Rough-Anymal-C-v0
   train_task: Isaac-Velocity-Rough-Anymal-C-NeRD-v0
-  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native_contact_tokens.yaml
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native_body_routed_active15_lr_1e-3_b64.yaml
   train_preset: newton_mjwarp
   num_gpus: 8
   save_interval: 100
   persist_periodic_checkpoints: true
   contact_mode: newton_native
-  contact_representation: contact_tokens
+  contact_representation: active15_tokens
   num_contacts_per_env: 64
+  contact_filter: solver_active
   max_contact_tokens: 64
   require_terrain_context: true
   contact_packing_policy: body_round_robin_pair_atomic

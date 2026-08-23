@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 env:
-  env_name: Anymal-C-Rough-Native-Raw15
+  env_name: Anymal-C-Rough-Native-Active15
   num_envs: 512
   neural_solver_cfg:
     name: TransformerNeuralSolver
@@ -16,11 +16,12 @@ env:
     num_states_history: 10
     min_contact_event_threshold: 0.12
     contact_mode: newton_native
-    contact_representation: raw15_tokens
+    contact_representation: active15_tokens
+    contact_filter: solver_active
     # Flat slot width is unused in token mode; capacity is max_contact_tokens.
     num_contacts_per_env: 64
     max_contact_tokens: 64
-    # Raw15 packing preserves owner-body round-robin coverage before K truncation.
+    # Active15 packing preserves owner-body round-robin coverage before K truncation.
     contact_packing_policy: body_round_robin_pair_atomic
 
 algorithm:
@@ -28,8 +29,8 @@ algorithm:
   num_epochs: 1000
   num_iters_per_epoch: 5000
   sample_sequence_length: 10
-  batch_size: 512
-  num_valid_batches: 100
+  batch_size: 64
+  num_valid_batches: 800
   truncate_grad: True
   grad_norm: 1.0
   update_dataset_statistics: True
@@ -48,6 +49,7 @@ algorithm:
     betas: [0.9, 0.999]
 
   dataset:
+    contact_representation: raw15_tokens
     train_dataset_path: ./data/datasets/Anymal-C-Rough-Native-Raw15/dataset_train.hdf5
     valid_datasets:
       exp_trajectory: ./data/datasets/Anymal-C-Rough-Native-Raw15/dataset_valid.hdf5
@@ -79,7 +81,7 @@ inputs:
   ]
   contact_set:
     dim: 17
-    encoder_type: body_routed_raw15
+    encoder_type: body_routed_active15
     body_latent_dim: 64
     hidden_dim: 32
 

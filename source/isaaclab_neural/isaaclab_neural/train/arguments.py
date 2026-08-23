@@ -34,7 +34,13 @@ def get_parser() -> argparse.ArgumentParser:
         "--wandb-save-checkpoints",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Upload best checkpoints to the active W&B run.",
+        help="Upload selected checkpoints to the active W&B run.",
+    )
+    parser.add_argument(
+        "--wandb-save-periodic-checkpoints",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Upload periodic model_epoch checkpoints to the active W&B run immediately.",
     )
     parser.add_argument("--skip-check-log-override", action="store_true")
     parser.add_argument("--cfg-overrides", default="", type=str, help="Pairs of dotted config keys and values.")

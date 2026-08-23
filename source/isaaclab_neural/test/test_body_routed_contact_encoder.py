@@ -285,6 +285,8 @@ def test_body_routed_config_reuses_shared_token_data_and_training_contract() -> 
     shared_experiment = copy.deepcopy(shared_preset["experiment"])
     body_experiment.pop("train_cfg")
     shared_experiment.pop("train_cfg")
+    shared_experiment.pop("save_interval")
+    shared_experiment.pop("persist_periodic_checkpoints")
     assert body_experiment == shared_experiment
     assert Path(body_preset["experiment"]["train_cfg"]).name == "transformer_rough_native_body_routed.yaml"
 

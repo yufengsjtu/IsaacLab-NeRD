@@ -33,6 +33,9 @@ algorithm:
   truncate_grad: True
   grad_norm: 1.0
   update_dataset_statistics: True
+  diagnostics:
+    enabled: True
+    batches_per_epoch: 1
   loss:
     type: MSE
     beta: 0.0

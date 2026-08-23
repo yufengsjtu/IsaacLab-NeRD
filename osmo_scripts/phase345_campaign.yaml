@@ -1,0 +1,79 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+campaign:
+  name: phase345-native-contact
+  dataset_subdirs:
+    raw15: anymal-c-rough-newton-native-raw15-sampling-v2-20260821-0630
+    contact_tokens: anymal-c-rough-newton-native-contact-tokens-sampling-v2-20260821-0630
+  dataset_cache_mode: require
+  storage_backend: osmo_data
+  priority: NORMAL
+  wandb_entity: nvr-srl
+  wandb_project: isaaclab-nerd-rowan-contact-ablation
+  resources:
+    num_gpu: 8
+    num_cpu: 96
+    memory: 512Gi
+    storage: 512Gi
+    platform: ovx-l40
+  training:
+    num_epochs: 1000
+    num_iters_per_epoch: 5000
+    save_interval: 100
+    persist_periodic_checkpoints: true
+    early_stop_checkpoint_gate: verify_wandb_file_download
+
+rows:
+  - id: A-RAW-D64
+    phases: [3]
+    preset: anymal_rough_newton_native_raw15
+    dataset_family: raw15
+    seeds: [0, 1, 2]
+  - id: A-ACTIVE-D64
+    phases: [3, 4, 5]
+    preset: anymal_rough_newton_native_active15
+    dataset_family: raw15
+    seeds: [0, 1, 2]
+  - id: C-RAW
+    phases: [3]
+    preset: anymal_rough_newton_native_shared_per_body
+    dataset_family: contact_tokens
+    seeds: [0, 1, 2]
+  - id: C-ACTIVE
+    phases: [3]
+    preset: anymal_rough_newton_native_shared_per_body_active_filter
+    dataset_family: contact_tokens
+    seeds: [0, 1, 2]
+  - id: D-RAW
+    phases: [3]
+    preset: anymal_rough_newton_native_contact_tokens
+    dataset_family: contact_tokens
+    seeds: [0, 1, 2]
+  - id: D-ACTIVE
+    phases: [3]
+    preset: anymal_rough_newton_native_contact_tokens_active_filter
+    dataset_family: contact_tokens
+    seeds: [0, 1, 2]
+  - id: LR-EARLIER-8G-B512
+    phases: [4]
+    preset: anymal_rough_newton_native_active15_lr_1e-3
+    dataset_family: raw15
+    seeds: [0, 1, 2]
+  - id: LR-EARLIER-8G-B64
+    phases: [4]
+    preset: anymal_rough_newton_native_active15_lr_1e-3_b64
+    dataset_family: raw15
+    seeds: [0]
+  - id: A-ACTIVE-D16
+    phases: [5]
+    preset: anymal_rough_newton_native_active15_d16
+    dataset_family: raw15
+    seeds: [0, 1, 2]
+  - id: A-ACTIVE-D32
+    phases: [5]
+    preset: anymal_rough_newton_native_active15_d32
+    dataset_family: raw15
+    seeds: [0, 1, 2]

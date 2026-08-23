@@ -25,6 +25,7 @@ def _normalize_quality_config(config: dict) -> dict:
     algorithm["batch_size"] = 512
     algorithm["num_valid_batches"] = 100
     algorithm["dataset"]["max_capacity"] = 20_000_000
+    algorithm["diagnostics"] = {"enabled": True, "batches_per_epoch": 1}
     return normalized
 
 
@@ -35,6 +36,8 @@ def _normalize_quality_preset(preset: dict) -> dict:
     normalized["resources"] = deepcopy(standard["resources"])
     normalized["experiment"]["train_cfg"] = standard["experiment"]["train_cfg"]
     normalized["experiment"]["num_gpus"] = standard["experiment"]["num_gpus"]
+    normalized["experiment"]["save_interval"] = standard["experiment"]["save_interval"]
+    normalized["experiment"]["persist_periodic_checkpoints"] = True
     return normalized
 
 

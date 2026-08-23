@@ -374,9 +374,7 @@ def test_finalize_profile_separates_full_steps_from_sampled_phases():
     trainer.train_iterator_reset_steps = []
     trainer.profile_measurement_start_unix = 1.0
     trainer.time_report = TimeReport(record_samples=True)
-    trainer.time_report.add_timers(
-        ["train_total", "train_measurement_window", "train_step", "train_forward_loss"]
-    )
+    trainer.time_report.add_timers(["train_total", "train_measurement_window", "train_step", "train_forward_loss"])
     trainer.time_report.timers["train_total"].total_time = 1.0
     trainer.time_report.timers["train_measurement_window"].total_time = 0.8
     trainer.time_report.timers["train_step"].samples = [0.1, 0.2, 0.3, 0.4]

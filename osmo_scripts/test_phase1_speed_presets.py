@@ -27,7 +27,7 @@ def _normalize_speed_config(config: dict) -> dict:
     algorithm["batch_size"] = 512
     algorithm["num_valid_batches"] = 100
     algorithm.pop("profiling")
-    algorithm.pop("diagnostics")
+    algorithm["diagnostics"] = {"enabled": True, "batches_per_epoch": 1}
     algorithm["dataset"]["max_capacity"] = 20_000_000
     algorithm["dataset"]["valid_datasets"] = {
         "exp_trajectory": "./data/datasets/Anymal-C-Rough-Native-Raw15/dataset_valid.hdf5",
@@ -53,6 +53,8 @@ def _normalize_speed_preset(preset: dict) -> dict:
     normalized["experiment"]["train_cfg"] = standard["experiment"]["train_cfg"]
     normalized["experiment"]["num_gpus"] = standard["experiment"]["num_gpus"]
     normalized["experiment"].pop("eval_interval")
+    normalized["experiment"]["save_interval"] = standard["experiment"]["save_interval"]
+    normalized["experiment"]["persist_periodic_checkpoints"] = True
     return normalized
 
 

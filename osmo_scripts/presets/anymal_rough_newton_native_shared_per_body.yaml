@@ -13,7 +13,7 @@ resources:
   num_cpu: 96
   memory: 512Gi
   storage: 512Gi
-  platform: ovx-l40s
+  platform: ovx-l40
 
 experiment:
   env_name: Anymal-C-Rough-Native-ContactTokens
@@ -24,6 +24,8 @@ experiment:
   train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native_shared_per_body.yaml
   train_preset: newton_mjwarp
   num_gpus: 8
+  save_interval: 100
+  persist_periodic_checkpoints: true
   contact_mode: newton_native
   contact_representation: contact_tokens
   num_contacts_per_env: 64

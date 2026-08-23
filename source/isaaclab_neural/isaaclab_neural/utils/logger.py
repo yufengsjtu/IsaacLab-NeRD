@@ -81,13 +81,16 @@ class Logger:
         artifact.add_file(path)
         wandb.log_artifact(artifact)
 
-    def log_checkpoint(self, path: str) -> None:
+    def log_checkpoint(self, path: str, *, upload_now: bool = False) -> None:
         """Upload a checkpoint file to the active W&B run."""
         if not self.wandb or not self.save_checkpoints:
             return
         import wandb
 
-        wandb.save(path, base_path=os.path.dirname(path))
+        kwargs = {"base_path": os.path.dirname(path)}
+        if upload_now:
+            kwargs["policy"] = "now"
+        wandb.save(path, **kwargs)
 
     def flush(self) -> None:
         """Flush buffered logs."""
