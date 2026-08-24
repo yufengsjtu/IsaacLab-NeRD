@@ -1,0 +1,295 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Tests for RoPE Transformer incremental inference."""
+
+from collections import deque
+
+import pytest
+import torch
+
+from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
+from isaaclab_neural.models.model_transformer import GPT, GPTConfig
+from isaaclab_neural.models.models import ModelMixedInput
+from isaaclab_neural.solvers.transformer_neural_solver import TransformerNeuralSolver
+
+
+def _gpt(position_encoding: str = "rope") -> GPT:
+    torch.manual_seed(7)
+    return GPT(
+        GPTConfig(
+            block_size=8,
+            vocab_size=6,
+            n_layer=2,
+            n_head=2,
+            n_embd=16,
+            dropout=0.0,
+            bias=False,
+            position_encoding=position_encoding,
+        )
+    ).eval()
+
+
+def test_solver_history_stacks_directly_into_batch_time_layout():
+    solver = TransformerNeuralSolver.__new__(TransformerNeuralSolver)
+    solver.states_history = deque(
+        (
+            {"states": torch.tensor([[1.0], [2.0]]), "contact_token_overflow": torch.tensor([3, 4])},
+            {"states": torch.tensor([[5.0], [6.0]]), "contact_token_overflow": torch.tensor([7, 8])},
+        )
+    )
+    solver.process_neural_model_inputs = lambda inputs: inputs
+
+    inputs = solver.get_neural_model_inputs()
+
+    torch.testing.assert_close(inputs["states"], torch.tensor([[[1.0], [5.0]], [[2.0], [6.0]]]))
+    torch.testing.assert_close(inputs["contact_token_overflow"], torch.tensor([[3, 7], [4, 8]]))
+
+
+def _mixed_input_model(position_encoding: str = "rope") -> ModelMixedInput:
+    input_sample = {"observation": torch.zeros(2, 1, 6)}
+    input_cfg = {"low_dim": ["observation"]}
+    network_cfg = {
+        "normalize_input": False,
+        "normalize_output": False,
+        "encoder": {
+            "low_dim": {
+                "layer_sizes": [],
+                "activation": "relu",
+                "layernorm": False,
+            }
+        },
+        "transformer": {
+            "block_size": 8,
+            "n_layer": 2,
+            "n_head": 2,
+            "n_embd": 16,
+            "dropout": 0.0,
+            "bias": False,
+            "position_encoding": position_encoding,
+        },
+        "model": {
+            "mlp": {
+                "layer_sizes": [8],
+                "activation": "relu",
+                "layernorm": False,
+            }
+        },
+    }
+    return ModelMixedInput(input_sample, 4, input_cfg, network_cfg, device="cpu").eval()
+
+
+def _mixed_contact_model() -> ModelMixedInput:
+    input_sample = {
+        "observation": torch.zeros(2, 1, 6),
+        "contact_tokens": torch.zeros(2, 1, 4, CONTACT_TOKEN_DIM),
+    }
+    input_cfg = {
+        "low_dim": ["observation"],
+        "contact_set": {
+            "dim": CONTACT_TOKEN_DIM,
+            "encoder_type": "shared_per_body",
+            "body_latent_dim": 4,
+            "hidden_dim": 8,
+            "max_other_bodies": 4,
+        },
+    }
+    network_cfg = {
+        "normalize_input": False,
+        "normalize_output": False,
+        "encoder": {
+            "low_dim": {
+                "layer_sizes": [],
+                "activation": "relu",
+                "layernorm": False,
+            }
+        },
+        "transformer": {
+            "block_size": 8,
+            "n_layer": 2,
+            "n_head": 2,
+            "n_embd": 16,
+            "dropout": 0.0,
+            "bias": False,
+        },
+        "model": {
+            "mlp": {
+                "layer_sizes": [8],
+                "activation": "relu",
+                "layernorm": False,
+            }
+        },
+    }
+    return ModelMixedInput(
+        input_sample,
+        4,
+        input_cfg,
+        network_cfg,
+        device="cpu",
+        contact_mode="newton_native",
+        num_bodies=4,
+    ).eval()
+
+
+def test_default_position_encoding_preserves_legacy_state_dict():
+    legacy_model = _gpt("learned_absolute")
+    restored_model = _gpt("learned_absolute")
+
+    assert "transformer.wpe.weight" in legacy_model.state_dict()
+    restored_model.load_state_dict(legacy_model.state_dict(), strict=True)
+
+
+def test_rope_cached_forward_matches_full_prefix():
+    model = _gpt()
+    inputs = torch.randn(3, 6, 6)
+
+    with torch.inference_mode():
+        expected = model(inputs)
+        cache = None
+        predictions = []
+        for step in range(inputs.shape[1]):
+            prediction, cache = model.forward_cached(
+                inputs[:, step : step + 1],
+                cache,
+                max_cache_length=8,
+            )
+            predictions.append(prediction)
+
+    torch.testing.assert_close(torch.cat(predictions, dim=1), expected, atol=1e-6, rtol=1e-5)
+    assert cache.lengths.tolist() == [6, 6, 6]
+    assert cache.next_positions.tolist() == [6, 6, 6]
+
+
+def test_cache_eviction_and_partial_reset():
+    model = _gpt()
+    cache = model.init_kv_cache(batch_size=3, max_cache_length=3, device="cpu")
+
+    with torch.inference_mode():
+        for _ in range(5):
+            _, cache = model.forward_cached(torch.randn(3, 1, 6), cache)
+
+    assert cache.lengths.tolist() == [3, 3, 3]
+    assert cache.positions.tolist() == [[3, 4, 2], [3, 4, 2], [3, 4, 2]]
+
+    cache.reset([0, 2])
+
+    assert cache.lengths.tolist() == [0, 3, 0]
+    assert cache.next_positions.tolist() == [0, 5, 0]
+    assert not cache.valid_mask[0].any()
+    assert cache.valid_mask[1].all()
+    assert not cache.valid_mask[2].any()
+
+
+def test_mixed_input_exposes_separate_cached_interface():
+    model = _mixed_input_model()
+    inputs = {"observation": torch.randn(2, 5, 6)}
+
+    with torch.inference_mode():
+        expected = model(inputs)
+        cache = None
+        predictions = []
+        for step in range(5):
+            prediction, cache = model.forward_cached(
+                {"observation": inputs["observation"][:, step : step + 1]},
+                cache,
+                max_cache_length=8,
+            )
+            predictions.append(prediction)
+
+    torch.testing.assert_close(torch.cat(predictions, dim=1), expected, atol=1e-6, rtol=1e-5)
+
+
+def test_cached_interface_rejects_absolute_position_model():
+    model = _mixed_input_model("learned_absolute")
+
+    with pytest.raises(ValueError, match="position_encoding='rope'"):
+        with torch.inference_mode():
+            model.forward_cached({"observation": torch.randn(2, 1, 6)})
+
+
+def test_feature_cache_matches_legacy_sliding_window():
+    model = _mixed_input_model("learned_absolute")
+    inputs = torch.randn(2, 12, 6)
+    feature_cache = None
+
+    with torch.inference_mode():
+        for step in range(inputs.shape[1]):
+            window_start = max(0, step - 4)
+            window = {"observation": inputs[:, window_start : step + 1]}
+            expected = model(window, single_step=True)
+            actual, feature_cache = model.forward_feature_cached(window, feature_cache)
+            torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
+
+
+def test_feature_cache_encodes_only_latest_frame_after_initial_window():
+    model = _mixed_input_model("learned_absolute")
+    encoded_lengths = []
+
+    def record_sequence_length(_module, args, _output):
+        encoded_lengths.append(args[0].shape[1])
+
+    hook = model.encoders["low_dim"].register_forward_hook(record_sequence_length)
+    first_window = {"observation": torch.randn(2, 5, 6)}
+    second_window = {"observation": torch.randn(2, 5, 6)}
+
+    with torch.inference_mode():
+        _, feature_cache = model.forward_feature_cached(first_window)
+        model.forward_feature_cached(second_window, feature_cache)
+    hook.remove()
+
+    assert encoded_lengths == [5, 1]
+
+
+def test_feature_cache_rebuild_after_reset_matches_legacy_forward():
+    model = _mixed_input_model("learned_absolute")
+    initial_window = {"observation": torch.randn(2, 5, 6)}
+    reset_window = {"observation": torch.randn(2, 5, 6)}
+
+    with torch.inference_mode():
+        _, feature_cache = model.forward_feature_cached(initial_window)
+        expected = model(reset_window, single_step=True)
+        actual, rebuilt_cache = model.forward_feature_cached(reset_window, feature_cache=None)
+
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
+    assert rebuilt_cache.shape == feature_cache.shape
+
+
+def test_feature_cache_rebuilds_only_reset_batch_rows():
+    model = _mixed_input_model("learned_absolute")
+    initial_values = torch.randn(2, 5, 6)
+    next_values = torch.cat((initial_values[:, 1:], torch.randn(2, 1, 6)), dim=1)
+    next_values[0, :-1] = 0.0
+
+    with torch.inference_mode():
+        _, feature_cache = model.forward_feature_cached({"observation": initial_values})
+        expected = model({"observation": next_values}, single_step=True)
+        actual, _ = model.forward_feature_cached(
+            {"observation": next_values},
+            feature_cache,
+            rebuild_batch_indices=[0],
+        )
+
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
+
+
+def test_feature_cache_matches_shared_per_body_contact_encoder():
+    model = _mixed_contact_model()
+    observations = torch.randn(2, 12, 6)
+    contact_tokens = torch.randn(2, 12, 4, CONTACT_TOKEN_DIM)
+    contact_tokens[..., 0] = 1.0
+    contact_tokens[..., 1] = torch.arange(4)
+    contact_tokens[..., 2] = -1.0
+    feature_cache = None
+
+    with torch.inference_mode():
+        for step in range(observations.shape[1]):
+            window_start = max(0, step - 4)
+            window = {
+                "observation": observations[:, window_start : step + 1],
+                "contact_tokens": contact_tokens[:, window_start : step + 1],
+            }
+            expected = model(window, single_step=True)
+            actual, feature_cache = model.forward_feature_cached(window, feature_cache)
+            torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)

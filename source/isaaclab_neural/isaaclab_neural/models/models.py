@@ -112,6 +112,8 @@ class ModelMixedInput(nn.Module):
                 bias=network_cfg["transformer"]["bias"],
                 vocab_size=self.feature_dim,
                 dropout=network_cfg["transformer"]["dropout"],
+                position_encoding=network_cfg["transformer"].get("position_encoding", "learned_absolute"),
+                rope_base=network_cfg["transformer"].get("rope_base", 10000.0),
             )
             gptconf = GPTConfig(**model_args)
 
@@ -315,8 +317,8 @@ class ModelMixedInput(nn.Module):
         features = torch.cat(features, dim=-1)
         return features
 
-    def _extract_trunk_features(self, input_dict, inject_noise=False):
-        """Preprocess inputs and run the shared encoder and temporal trunk."""
+    def _prepare_inputs(self, input_dict, inject_noise=False):
+        """Normalize, augment, and mask model inputs."""
         if self.normalize_input:
             for obs_key in self.input_rms.keys():
                 if obs_key == "contact_tokens":
@@ -354,7 +356,19 @@ class ModelMixedInput(nn.Module):
             from isaaclab_neural.contacts.contact_set_encoder import mask_invalid_contact_tokens
 
             input_dict["contact_tokens"] = mask_invalid_contact_tokens(input_dict["contact_tokens"])
+        return input_dict
 
+    def _process_output(self, output):
+        """Apply configured output transforms."""
+        if self.output_tanh:
+            output = torch.tanh(output)
+        if self.normalize_output:
+            output = self.output_rms.normalize(output, un_norm=True)
+        return output
+
+    def _extract_trunk_features(self, input_dict, inject_noise=False):
+        """Preprocess inputs and run the shared encoder and temporal trunk."""
+        input_dict = self._prepare_inputs(input_dict, inject_noise)
         features = self.extract_input_features(input_dict)  # (B, T, feature_dim)
 
         if self.is_rnn:
@@ -368,14 +382,7 @@ class ModelMixedInput(nn.Module):
     def _decode_state(self, features, deterministic=False):
         """Decode the state prediction from shared trunk features."""
         output = self.model(features, deterministic=deterministic)
-
-        if self.output_tanh:
-            output = torch.tanh(output)
-
-        if self.normalize_output:
-            output = self.output_rms.normalize(output, un_norm=True)
-
-        return output
+        return self._process_output(output)
 
     def forward(
         self,
@@ -400,7 +407,6 @@ class ModelMixedInput(nn.Module):
             State tensor by default, or :class:`ModelMixedInputOutput` when
             ``return_aux`` is True.
         """
-
         if return_aux:
             return self.forward_with_aux(
                 input_dict,
@@ -447,6 +453,123 @@ class ModelMixedInput(nn.Module):
             state_prediction=state_prediction,
             auxiliary_predictions=auxiliary_predictions,
         )
+
+    def forward_feature_cached(
+        self,
+        input_dict,
+        feature_cache=None,
+        rebuild_batch_indices=None,
+        deterministic=False,
+    ):
+        """Run full-window Transformer inference while encoding only the newest frame.
+
+        This path preserves the existing Transformer and position-encoding
+        semantics. On the first call, or after a reset, the complete input
+        window is encoded. Subsequent calls append only the latest encoded
+        frame and retain the preceding encoded features.
+
+        Args:
+            input_dict: Dictionary of full-window input tensors shaped ``(B, T, ...)``.
+            feature_cache: Encoded feature window returned by the previous call.
+            rebuild_batch_indices: Optional batch rows whose complete windows
+                must be re-encoded after an environment reset.
+            deterministic: Whether to use deterministic output mode.
+
+        Returns:
+            A tuple containing the latest prediction shaped ``(B, 1, output_dim)``
+            and the updated encoded feature window.
+        """
+        if not self.is_transformer or self.is_rnn:
+            raise RuntimeError("forward_feature_cached() requires a Transformer model without an RNN.")
+        if self.training or torch.is_grad_enabled():
+            raise RuntimeError(
+                "forward_feature_cached() requires eval mode and torch.inference_mode() or torch.no_grad()."
+            )
+        if not input_dict:
+            raise ValueError("forward_feature_cached() requires at least one input tensor.")
+
+        first_input = next((value for value in input_dict.values() if isinstance(value, torch.Tensor)), None)
+        if first_input is None:
+            raise ValueError("forward_feature_cached() requires at least one tensor input.")
+        if first_input.ndim < 2:
+            raise ValueError("Feature-cache inputs must include batch and time dimensions.")
+        batch_size, history_length = first_input.shape[:2]
+        if history_length == 0:
+            raise ValueError("Feature-cache inputs must include at least one timestep.")
+
+        can_append = (
+            feature_cache is not None
+            and feature_cache.shape[0] == batch_size
+            and feature_cache.shape[2] == self.transformer_model.config.vocab_size
+            and feature_cache.shape[1] in {history_length - 1, history_length}
+        )
+        if can_append:
+            latest_inputs = {
+                key: value[:, -1:] if isinstance(value, torch.Tensor) else value for key, value in input_dict.items()
+            }
+            latest_inputs = self._prepare_inputs(latest_inputs, inject_noise=False)
+            latest_features = self.extract_input_features(latest_inputs)
+            if feature_cache.shape[1] == history_length:
+                feature_cache = torch.cat((feature_cache[:, 1:], latest_features), dim=1)
+            else:
+                feature_cache = torch.cat((feature_cache, latest_features), dim=1)
+
+            if rebuild_batch_indices is not None:
+                rebuild_batch_indices = torch.as_tensor(
+                    rebuild_batch_indices,
+                    device=feature_cache.device,
+                    dtype=torch.long,
+                ).reshape(-1)
+                if rebuild_batch_indices.numel() > 0:
+                    rebuild_inputs = {
+                        key: value.index_select(0, rebuild_batch_indices) if isinstance(value, torch.Tensor) else value
+                        for key, value in input_dict.items()
+                    }
+                    rebuild_inputs = self._prepare_inputs(rebuild_inputs, inject_noise=False)
+                    rebuilt_features = self.extract_input_features(rebuild_inputs)
+                    feature_cache[rebuild_batch_indices] = rebuilt_features
+        else:
+            prepared_inputs = self._prepare_inputs(dict(input_dict), inject_noise=False)
+            feature_cache = self.extract_input_features(prepared_inputs)
+
+        features = self.transformer_model(feature_cache)
+        output = self._process_output(self.model(features, deterministic=deterministic))
+        return output[:, -1:, :], feature_cache
+
+    def forward_cached(self, input_dict, cache=None, max_cache_length=None, deterministic=False):
+        """Run one incremental Transformer inference step.
+
+        Args:
+            input_dict: Dictionary of latest-timestep input tensors, each shaped ``(B, 1, input_dim)``.
+            cache: Cache returned by the previous call, or ``None`` to initialize one.
+            max_cache_length: Maximum number of timesteps retained when initializing a cache.
+            deterministic: Whether to use deterministic output mode.
+
+        Returns:
+            A tuple containing the prediction shaped ``(B, 1, output_dim)`` and updated KV cache.
+        """
+        if not self.is_transformer or self.is_rnn:
+            raise RuntimeError("forward_cached() requires a Transformer model without an RNN.")
+
+        input_dict = self._prepare_inputs(dict(input_dict), inject_noise=False)
+        features = self.extract_input_features(input_dict)
+        features, cache = self.transformer_model.forward_cached(features, cache, max_cache_length)
+        output = self._process_output(self.model(features, deterministic=deterministic))
+        return output, cache
+
+    def init_transformer_cache(self, batch_size, max_cache_length=None):
+        """Create an empty cache for :meth:`forward_cached`."""
+        if not self.is_transformer:
+            raise RuntimeError("Cannot create a Transformer cache for a non-Transformer model.")
+        return self.transformer_model.init_kv_cache(
+            batch_size,
+            max_cache_length,
+            device=self.device,
+        )
+
+    def reset_transformer_cache(self, cache, batch_indices=None):
+        """Reset all cache rows or only selected batch rows."""
+        cache.reset(batch_indices)
 
     def get_rnn_hidden_states(self):
         assert self.rnn is not None

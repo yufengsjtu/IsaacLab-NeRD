@@ -38,6 +38,8 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
+        if config.position_encoding == "rope" and (config.n_embd // config.n_head) % 2 != 0:
+            raise ValueError("RoPE requires an even attention head dimension.")
         # key, query, value projections for all heads, but in a batch
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         # output projection
@@ -48,6 +50,11 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
+        self.position_encoding = config.position_encoding
+        if self.position_encoding == "rope":
+            head_dim = config.n_embd // config.n_head
+            inv_freq = 1.0 / (config.rope_base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
+            self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
         if not self.flash:
@@ -60,7 +67,17 @@ class CausalSelfAttention(nn.Module):
                 ),
             )
 
-    def forward(self, x):
+    def _apply_rope(self, x, position_ids):
+        """Apply rotary position embeddings to query or key tensors."""
+        frequencies = position_ids.to(self.rope_inv_freq.dtype).unsqueeze(-1) * self.rope_inv_freq
+        cos = frequencies.cos().repeat_interleave(2, dim=-1).unsqueeze(1).to(x.dtype)
+        sin = frequencies.sin().repeat_interleave(2, dim=-1).unsqueeze(1).to(x.dtype)
+        x_even = x[..., 0::2]
+        x_odd = x[..., 1::2]
+        x_rotated = torch.stack((-x_odd, x_even), dim=-1).flatten(-2)
+        return x * cos + x_rotated * sin
+
+    def forward(self, x, position_ids=None, cache=None, cache_indices=None):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -69,16 +86,42 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
+        if self.position_encoding == "rope":
+            if position_ids is None:
+                position_ids = torch.arange(T, device=x.device).expand(B, -1)
+            q = self._apply_rope(q, position_ids)
+            k = self._apply_rope(k, position_ids)
+
+        if cache is not None:
+            if T != 1 or cache_indices is None:
+                raise ValueError("Cached attention requires one input timestep and cache indices.")
+            batch_indices = torch.arange(B, device=x.device)
+            cache[0][batch_indices, :, cache_indices, :] = k[:, :, 0, :]
+            cache[1][batch_indices, :, cache_indices, :] = v[:, :, 0, :]
+            k = cache[0]
+            v = cache[1]
+            valid_mask = cache[2][:, None, None, :]
+        else:
+            valid_mask = None
+
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True
+                q,
+                k,
+                v,
+                attn_mask=valid_mask,
+                dropout_p=self.dropout if self.training else 0,
+                is_causal=cache is None,
             )
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+            if cache is None:
+                att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+            else:
+                att = att.masked_fill(~valid_mask, float("-inf"))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -113,8 +156,8 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, position_ids=None, cache=None, cache_indices=None):
+        x = x + self.attn(self.ln_1(x), position_ids, cache, cache_indices)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -128,25 +171,82 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    position_encoding: str = "learned_absolute"
+    rope_base: float = 10000.0
 
 
 class GPT(nn.Module):
+    class KVCache:
+        """Preallocated per-layer key/value cache for incremental inference."""
+
+        def __init__(self, keys, values, positions, lengths, next_positions):
+            self.keys = keys
+            self.values = values
+            self.positions = positions
+            self.lengths = lengths
+            self.next_positions = next_positions
+
+        @property
+        def max_length(self):
+            """Maximum number of cached timesteps."""
+            return self.positions.shape[1]
+
+        @property
+        def valid_mask(self):
+            """Mask identifying populated cache entries."""
+            return self.positions >= 0
+
+        def reset(self, batch_indices=None):
+            """Reset all cache rows or only selected batch rows."""
+            if batch_indices is None:
+                self.positions.fill_(-1)
+                self.lengths.zero_()
+                self.next_positions.zero_()
+                for key, value in zip(self.keys, self.values):
+                    key.zero_()
+                    value.zero_()
+                return
+
+            batch_indices = torch.as_tensor(batch_indices, device=self.positions.device, dtype=torch.long)
+            self.positions[batch_indices] = -1
+            self.lengths[batch_indices] = 0
+            self.next_positions[batch_indices] = 0
+            for key, value in zip(self.keys, self.values):
+                key[batch_indices] = 0
+                value[batch_indices] = 0
+
+        def prepare_append(self):
+            """Reserve one cache entry per batch row and return its index and position."""
+            old_lengths = self.lengths.clone()
+            full_rows = old_lengths == self.max_length
+            cache_indices = torch.where(full_rows, self.next_positions.remainder(self.max_length), old_lengths)
+            position_ids = self.next_positions.clone()
+            batch_indices = torch.arange(self.positions.shape[0], device=self.positions.device)
+            self.positions[batch_indices, cache_indices] = position_ids
+            self.lengths.copy_(torch.clamp(old_lengths + 1, max=self.max_length))
+            self.next_positions += 1
+            return cache_indices, position_ids[:, None]
+
     def __init__(self, config):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
+        if config.position_encoding not in {"learned_absolute", "rope"}:
+            raise ValueError(
+                f"Unsupported position_encoding '{config.position_encoding}'. Expected 'learned_absolute' or 'rope'."
+            )
         self.config = config
 
-        self.transformer = nn.ModuleDict(
-            dict(
-                # wte = nn.Embedding(config.vocab_size, config.n_embd),
-                wte=nn.Linear(config.vocab_size, config.n_embd),
-                wpe=nn.Embedding(config.block_size, config.n_embd),
-                drop=nn.Dropout(config.dropout),
-                h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-                ln_f=LayerNorm(config.n_embd, bias=config.bias),
-            )
+        transformer_modules = dict(
+            # wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wte=nn.Linear(config.vocab_size, config.n_embd),
+            drop=nn.Dropout(config.dropout),
+            h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f=LayerNorm(config.n_embd, bias=config.bias),
         )
+        if config.position_encoding == "learned_absolute":
+            transformer_modules["wpe"] = nn.Embedding(config.block_size, config.n_embd)
+        self.transformer = nn.ModuleDict(transformer_modules)
         # self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.lm_head = nn.Linear(config.n_embd, config.n_embd, bias=False)
 
@@ -174,7 +274,7 @@ class GPT(nn.Module):
         params are actually used as weights in the final layer, so we include them.
         """
         n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
+        if non_embedding and "wpe" in self.transformer:
             n_params -= self.transformer.wpe.weight.numel()
         return n_params
 
@@ -192,18 +292,70 @@ class GPT(nn.Module):
         assert t <= self.config.block_size, (
             f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         )
-        pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
+        pos = torch.arange(0, t, dtype=torch.long, device=device).expand(b, -1)
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        if self.config.position_encoding == "learned_absolute":
+            pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (b, t, n_embd)
+            x = self.transformer.drop(tok_emb + pos_emb)
+        else:
+            x = self.transformer.drop(tok_emb)
         for block in self.transformer.h:
-            x = block(x)
+            x = block(x, position_ids=pos)
         x = self.transformer.ln_f(x)
 
         output_features = self.lm_head(x)
         return output_features
+
+    def init_kv_cache(self, batch_size, max_cache_length=None, *, device=None, dtype=None):
+        """Create an empty KV cache for incremental RoPE inference."""
+        if self.config.position_encoding != "rope":
+            raise ValueError("KV cache inference requires position_encoding='rope'.")
+        max_cache_length = max_cache_length or self.config.block_size
+        if max_cache_length <= 0:
+            raise ValueError("max_cache_length must be positive.")
+        device = device or next(self.parameters()).device
+        dtype = dtype or next(self.parameters()).dtype
+        head_dim = self.config.n_embd // self.config.n_head
+        cache_shape = (batch_size, self.config.n_head, max_cache_length, head_dim)
+        keys = [torch.zeros(cache_shape, device=device, dtype=dtype) for _ in range(self.config.n_layer)]
+        values = [torch.zeros(cache_shape, device=device, dtype=dtype) for _ in range(self.config.n_layer)]
+        positions = torch.full((batch_size, max_cache_length), -1, device=device, dtype=torch.long)
+        lengths = torch.zeros(batch_size, device=device, dtype=torch.long)
+        next_positions = torch.zeros(batch_size, device=device, dtype=torch.long)
+        return self.KVCache(keys, values, positions, lengths, next_positions)
+
+    def forward_cached(self, idx, cache=None, max_cache_length=None):
+        """Run one incremental inference step and update a RoPE KV cache."""
+        if self.config.position_encoding != "rope":
+            raise ValueError("KV cache inference requires position_encoding='rope'.")
+        if self.training or torch.is_grad_enabled():
+            raise RuntimeError("forward_cached() requires eval mode and torch.inference_mode() or torch.no_grad().")
+        if idx.ndim != 3 or idx.shape[1] != 1:
+            raise ValueError(f"forward_cached() expects shape (B, 1, C), got {tuple(idx.shape)}.")
+
+        batch_size = idx.shape[0]
+        if cache is None:
+            cache = self.init_kv_cache(
+                batch_size,
+                max_cache_length,
+                device=idx.device,
+                dtype=self.transformer.wte.weight.dtype,
+            )
+        elif cache.positions.shape[0] != batch_size:
+            raise ValueError(
+                f"Cache batch size {cache.positions.shape[0]} does not match input batch size {batch_size}."
+            )
+
+        cache_indices, position_ids = cache.prepare_append()
+        x = self.transformer.drop(self.transformer.wte(idx))
+        valid_mask = cache.valid_mask
+        for layer_index, block in enumerate(self.transformer.h):
+            layer_cache = (cache.keys[layer_index], cache.values[layer_index], valid_mask)
+            x = block(x, position_ids=position_ids, cache=layer_cache, cache_indices=cache_indices)
+        x = self.transformer.ln_f(x)
+        return self.lm_head(x), cache
 
         # if targets is not None:
         #     # if we are given some desired targets also calculate the loss
@@ -222,7 +374,8 @@ class GPT(nn.Module):
         # but want to use a smaller block size for some smaller, simpler model
         assert block_size <= self.config.block_size
         self.config.block_size = block_size
-        self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[:block_size])
+        if "wpe" in self.transformer:
+            self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[:block_size])
         for block in self.transformer.h:
             if hasattr(block.attn, "bias"):
                 block.attn.bias = block.attn.bias[:, :, :block_size, :block_size]
