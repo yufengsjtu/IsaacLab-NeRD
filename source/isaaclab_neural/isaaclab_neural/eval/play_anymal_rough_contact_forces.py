@@ -42,6 +42,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         default="Isaac-Velocity-Rough-Anymal-C-Play-v0",
         help="Ground-truth Newton rough-terrain task.",
     )
+    parser.add_argument(
+        "--action-mode",
+        choices=["policy", "random"],
+        default="policy",
+        help="Drive Anymal with an RSL-RL policy or uniformly sampled actions.",
+    )
     parser.add_argument("--policy-agent", type=str, default="rsl_rl_cfg_entry_point")
     parser.add_argument("--policy-checkpoint", type=str, default=None, help="RSL-RL policy checkpoint.")
     parser.add_argument("--nerd-checkpoint", type=str, default=None, help="Force-enabled NeRD checkpoint.")
@@ -299,6 +305,50 @@ def _build_policy(env, agent_cfg, checkpoint_path: str, device: str):
     return wrapped_env, policy
 
 
+class _ActionSource:
+    """Produce held policy-rate actions for policy or random validation."""
+
+    def __init__(self, env, adapter, agent_cfg, args: argparse.Namespace):
+        self.mode = args.action_mode
+        self.rollout_env = env
+        self.policy = None
+        self.observations = None
+        self.random_action_low = None
+        self.random_action_high = None
+        if self.mode == "policy":
+            policy_agent_cfg = _load_saved_agent_cfg(
+                args.policy_checkpoint,
+                agent_cfg,
+                device=args.device,
+                seed=args.seed,
+            )
+            if policy_agent_cfg is None:
+                raise ValueError(f"No RSL-RL agent config found for entry point: {args.policy_agent}")
+            self.rollout_env, self.policy = _build_policy(env, policy_agent_cfg, args.policy_checkpoint, args.device)
+            self.observations = self.rollout_env.get_observations()
+        else:
+            self.random_action_low, self.random_action_high = adapter.action_bounds()
+            print("[actions] using uniformly sampled random actions")
+
+    def sample(self, adapter) -> torch.Tensor:
+        """Return the next policy-rate action batch."""
+        if self.mode == "random":
+            return adapter.sample_action(self.random_action_low, self.random_action_high)
+        actions = self.policy(self.observations)
+        if self.rollout_env.clip_actions is not None:
+            actions = torch.clamp(actions, -self.rollout_env.clip_actions, self.rollout_env.clip_actions)
+        return actions
+
+    def update_observations(self) -> None:
+        """Refresh policy observations after one environment-rate step."""
+        if self.mode == "policy":
+            self.observations = self.rollout_env.get_observations()
+
+    def close(self) -> None:
+        """Close the underlying rollout environment."""
+        self.rollout_env.close()
+
+
 def _build_observer_solver_cfg(checkpoint_path: str):
     """Build the shadow NeRD solver config embedded in a checkpoint."""
     from isaaclab_neural.physics import NerdSolverCfg
@@ -370,8 +420,10 @@ class _ForceArrowMarkers:
 
 def run(env_cfg, agent_cfg, args: argparse.Namespace) -> None:
     """Run policy-controlled ground-truth Newton and shadow NeRD force inference."""
-    if args.policy_checkpoint is None or args.nerd_checkpoint is None:
-        raise ValueError("--policy-checkpoint and --nerd-checkpoint are required.")
+    if args.nerd_checkpoint is None:
+        raise ValueError("--nerd-checkpoint is required.")
+    if args.action_mode == "policy" and args.policy_checkpoint is None:
+        raise ValueError("--policy-checkpoint is required when --action-mode=policy.")
     if args.num_envs <= 0 or args.num_steps <= 0:
         raise ValueError("--num-envs and --num-steps must be positive.")
     if not 0 <= args.plot_env_id < args.num_envs:
@@ -428,15 +480,7 @@ def run(env_cfg, agent_cfg, args: argparse.Namespace) -> None:
         adapter.solver.eval()
         adapter.solver.reset()
 
-        policy_agent_cfg = _load_saved_agent_cfg(
-            args.policy_checkpoint,
-            agent_cfg,
-            device=args.device,
-            seed=args.seed,
-        )
-        if policy_agent_cfg is None:
-            raise ValueError(f"No RSL-RL agent config found for entry point: {args.policy_agent}")
-        wrapped_env, policy = _build_policy(env, policy_agent_cfg, args.policy_checkpoint, args.device)
+        action_source = _ActionSource(env, adapter, agent_cfg, args)
 
         body_names = adapter.body_net_contact_force_body_names
         if len(body_names) != 17:
@@ -457,7 +501,6 @@ def run(env_cfg, agent_cfg, args: argparse.Namespace) -> None:
 
         decimation = max(1, int(env.cfg.decimation))
         physics_dt = float(env.physics_dt)
-        observations = wrapped_env.get_observations()
         sensor_history: list[torch.Tensor] = []
         predicted_history: list[torch.Tensor] = []
         video_writer = None
@@ -472,9 +515,7 @@ def run(env_cfg, agent_cfg, args: argparse.Namespace) -> None:
         try:
             with torch.inference_mode():
                 for policy_step in range(args.num_steps):
-                    actions = policy(observations)
-                    if wrapped_env.clip_actions is not None:
-                        actions = torch.clamp(actions, -wrapped_env.clip_actions, wrapped_env.clip_actions)
+                    actions = action_source.sample(adapter)
                     env.action_manager.process_action(actions)
                     for _ in range(decimation):
                         env.action_manager.apply_action()
@@ -519,7 +560,7 @@ def run(env_cfg, agent_cfg, args: argparse.Namespace) -> None:
                         if frame is None:
                             raise RuntimeError("Video recording requested, but env.render() returned no RGB frame.")
                         video_writer.append_data(frame[..., :3])
-                    observations = wrapped_env.get_observations()
+                    action_source.update_observations()
                     if policy_step % 25 == 0 or policy_step == args.num_steps - 1:
                         print(
                             f"[step {policy_step:05d}] "
@@ -547,7 +588,7 @@ def run(env_cfg, agent_cfg, args: argparse.Namespace) -> None:
                     physics_dt,
                     args.force_plot_path,
                 )
-            wrapped_env.close()
+            action_source.close()
 
 
 def main() -> None:
@@ -560,7 +601,9 @@ def main() -> None:
     import isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c  # noqa: F401
     from isaaclab_tasks.utils.hydra import hydra_task_config
 
-    @hydra_task_config(args.task, args.policy_agent)
+    agent_entry_point = args.policy_agent if args.action_mode == "policy" else ""
+
+    @hydra_task_config(args.task, agent_entry_point)
     def hydra_main(env_cfg, agent_cfg) -> None:
         run(env_cfg, agent_cfg, args)
 

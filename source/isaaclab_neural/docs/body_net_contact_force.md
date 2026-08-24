@@ -95,5 +95,16 @@ the Newton-viewer rollout is recorded to
 `videos/contact_force_validation/contact_force_validation.mp4`; use
 `--video-path` and `--video-fps` to override the output.
 
+To validate under uniformly sampled actions without loading an RSL-RL policy:
+
+```bash
+PYTHONPATH=./source/isaaclab_neural ./isaaclab.sh -p \
+  -m isaaclab_neural.eval.play_anymal_rough_contact_forces \
+  --action-mode random \
+  --nerd-checkpoint ./data/trained_models/<run>/nn/final_model.pt \
+  --num-steps 500 \
+  --visualizer newton
+```
+
 Full contact-wrench prediction, including contact moments and torques, is
 deferred to Stage 2.

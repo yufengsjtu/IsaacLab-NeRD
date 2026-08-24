@@ -11,6 +11,7 @@ import math
 import pytest
 import torch
 from isaaclab_neural.eval.play_anymal_rough_contact_forces import (
+    _ActionSource,
     requested_newton_visualizer,
     rotate_body_forces_to_world,
     save_contact_force_plot,
@@ -18,11 +19,43 @@ from isaaclab_neural.eval.play_anymal_rough_contact_forces import (
 )
 
 
+class _FakeRandomActionAdapter:
+    def action_bounds(self):
+        return torch.full((3,), -0.5), torch.full((3,), 0.5)
+
+    def sample_action(self, low, high):
+        return torch.stack((low, high))
+
+
+class _FakeEnv:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
 def test_requested_newton_visualizer_handles_single_and_combined_backends():
     assert requested_newton_visualizer(argparse.Namespace(visualizer=["newton"]))
     assert requested_newton_visualizer(argparse.Namespace(visualizer="kit,newton"))
     assert not requested_newton_visualizer(argparse.Namespace(visualizer=["kit"]))
     assert not requested_newton_visualizer(argparse.Namespace(visualizer=None))
+
+
+def test_random_action_source_does_not_require_policy_checkpoint():
+    env = _FakeEnv()
+    adapter = _FakeRandomActionAdapter()
+    args = argparse.Namespace(action_mode="random")
+
+    source = _ActionSource(env, adapter, agent_cfg=None, args=args)
+
+    torch.testing.assert_close(
+        source.sample(adapter),
+        torch.tensor([[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]]),
+    )
+    source.update_observations()
+    source.close()
+    assert env.closed
 
 
 def test_rotate_body_forces_to_world_uses_root_orientation():
