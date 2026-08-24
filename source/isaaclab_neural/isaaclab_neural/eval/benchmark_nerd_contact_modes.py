@@ -60,6 +60,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="Single-mode run. Required unless --compare.",
     )
     parser.add_argument("--neural-model-path", type=str, default=None, help="Dynamics ckpt for NeRD single-mode.")
+    parser.add_argument(
+        "--use-feature-cache",
+        action="store_true",
+        default=False,
+        help="Cache encoded Transformer input frames while retaining full-window attention.",
+    )
     parser.add_argument("--neural-model-path-fg", type=str, default=None, help="FG ckpt for --compare.")
     parser.add_argument(
         "--neural-model-path-native",
@@ -287,6 +293,7 @@ def main(env_cfg, agent_cfg) -> None:
             args_cli.num_contacts_per_env = None
         assert nerd_cli is not None
         solver_cfg = nerd_cli.apply_neural_model_to_env_cfg(env_cfg, args_cli)
+        solver_cfg.use_feature_cache = args_cli.use_feature_cache
         launch_cfg = nerd_cli.build_launch_cfg(env_cfg)
 
     step_profile.reset()
@@ -325,6 +332,7 @@ def main(env_cfg, agent_cfg) -> None:
             "contact_mode": args_cli.contact_mode,
             "task": worker_task,
             "neural_model_path": args_cli.neural_model_path,
+            "use_feature_cache": args_cli.use_feature_cache,
             "num_envs": args_cli.num_envs,
             "warmup": args_cli.warmup,
             "steps": args_cli.steps,

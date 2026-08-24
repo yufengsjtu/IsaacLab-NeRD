@@ -55,6 +55,9 @@ class NerdSolverCfg(NewtonSolverCfg):
     num_states_history: int = 1
     """Number of historical states/actions passed to ``TransformerNeuralSolver`` models."""
 
+    use_feature_cache: bool = False
+    """Whether to cache encoded Transformer inputs during sequential inference."""
+
     reset_seq_length: int = 1
     """Step interval used by ``RNNNeuralSolver`` to reset recurrent hidden state."""
 

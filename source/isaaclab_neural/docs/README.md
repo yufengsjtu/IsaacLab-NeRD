@@ -11,3 +11,4 @@ For workflow details, see:
 - [Per-body net contact forces](body_net_contact_force.md) (Stage 1 labels, training, and smoke commands)
 - [Evaluation](eval.md) (dynamics smoke / policy-closed-loop eval)
 - [RL policy learning](rl.md) (flat Anymal-C locomotion on NeRD)
+- [KV-cache inference](kv_cache_inference.md) (RoPE incremental inference and benchmark)

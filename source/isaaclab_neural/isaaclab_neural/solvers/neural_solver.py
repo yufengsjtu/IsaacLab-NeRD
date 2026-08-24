@@ -345,7 +345,7 @@ class NeuralSolver(SolverBase):
     def _before_model_forward(self):
         pass
 
-    def _forward_neural_model(self, model_inputs):
+    def _model_forward(self, model_inputs):
         """Predict state and update any enabled diagnostic auxiliary caches."""
         if self.predicted_body_net_contact_forces_b is None:
             return self.neural_model.forward(model_inputs, single_step=True)
@@ -385,7 +385,7 @@ class NeuralSolver(SolverBase):
             model_inputs = self.get_neural_model_inputs()
             # compute the prediction using neural model, shape (num_envs, 1, dim)
             with step_profile.section("model_forward"):
-                prediction = self._forward_neural_model(model_inputs)
+                prediction = self._model_forward(model_inputs)
 
             # convert the prediction to next states
             cur_states = model_inputs["states"][:, -1, :]

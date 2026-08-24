@@ -22,13 +22,18 @@ from .neural_solver import NeuralSolver
 class TransformerNeuralSolver(NeuralSolver):
     """Neural solver variant that feeds a fixed history window to transformer models."""
 
-    def __init__(self, num_states_history: int = 1, **kwargs):
+    def __init__(self, num_states_history: int = 1, use_feature_cache: bool = False, **kwargs):
         self.num_states_history = num_states_history
+        self.use_feature_cache = use_feature_cache
+        self.feature_cache = None
+        self.feature_cache_rebuild_env_ids = None
         super().__init__(**kwargs)
         self.reset_states_history()
 
     def reset_states_history(self):
         self.states_history = deque(maxlen=self.num_states_history)
+        self.feature_cache = None
+        self.feature_cache_rebuild_env_ids = None
 
     def preload_states_history(self, history: Mapping[str, torch.Tensor]) -> None:
         """Replace solver history with validated raw dataset inputs.
@@ -93,6 +98,12 @@ class TransformerNeuralSolver(NeuralSolver):
         for history_entry in self.states_history:
             for value in history_entry.values():
                 value[env_ids] = 0.0
+        # Re-encode only modified rows from raw history on the next forward.
+        # This preserves exact behavior for normalized inputs and biased encoders.
+        if self.feature_cache_rebuild_env_ids is None:
+            self.feature_cache_rebuild_env_ids = env_ids
+        else:
+            self.feature_cache_rebuild_env_ids = torch.unique(torch.cat((self.feature_cache_rebuild_env_ids, env_ids)))
 
     def _normalize_env_ids(self, env_ids) -> torch.Tensor:
         """Return env ids as a 1-D tensor on the solver torch device."""
@@ -138,17 +149,31 @@ class TransformerNeuralSolver(NeuralSolver):
             }
             return {key: value.unsqueeze(1) for key, value in model_inputs.items()}
 
-        # assemble the model inputs in world frame
-        # default_collate stacks history as [T, B, ...]; transpose to [B, T, ...].
-        # Use transpose(0, 1) so 2-D scalars (e.g. contact_token_overflow) and
-        # 4-D token sets (contact_tokens) both work, not only flat 3-D fields.
-        model_inputs = torch.utils.data.default_collate(list(self.states_history))
-        for key, value in model_inputs.items():
+        # Stack directly into the model's [B, T, ...] layout. The previous
+        # default_collate + transpose + contiguous path materialized the full
+        # history twice on every simulation step.
+        history = tuple(self.states_history)
+        model_inputs = {}
+        for key in history[0]:
+            value = torch.stack(tuple(entry[key] for entry in history), dim=1)
             if value.ndim < 2:
                 raise ValueError(
                     f"History field {key!r} must have at least two dimensions after collate "
                     f"(got shape {tuple(value.shape)})."
                 )
-            model_inputs[key] = value.transpose(0, 1).contiguous()
+            model_inputs[key] = value
 
         return self.process_neural_model_inputs(model_inputs)
+
+    def _model_forward(self, model_inputs):
+        if not self.use_feature_cache:
+            return super()._model_forward(model_inputs)
+        if not hasattr(self.neural_model, "forward_feature_cached"):
+            raise RuntimeError("use_feature_cache requires a model that implements forward_feature_cached().")
+        prediction, self.feature_cache = self.neural_model.forward_feature_cached(
+            model_inputs,
+            self.feature_cache,
+            self.feature_cache_rebuild_env_ids,
+        )
+        self.feature_cache_rebuild_env_ids = None
+        return prediction
