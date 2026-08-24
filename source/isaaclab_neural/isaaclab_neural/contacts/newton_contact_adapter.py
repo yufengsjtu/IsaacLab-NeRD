@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import logging
+import os
 from typing import Literal
 
 import newton
@@ -18,8 +19,9 @@ from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_TOKEN_DIM,
     DEFAULT_MAX_CONTACT_TOKENS,
 )
+from isaaclab_neural.contacts.kernels import transform_native_contact_geometry
 from isaaclab_neural.contacts.packing import ContactPackingPolicy, get_contact_order
-from isaaclab_neural.utils import torch_utils
+from isaaclab_neural.utils import step_profile, torch_utils
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,10 @@ class NewtonContactAdapter:
         self._packed_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
         self._dropped_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
         self._truncated_frames_gpu = torch.zeros((), dtype=torch.long, device=self.device)
+        self._torch_view_cache: dict[int, tuple[object, torch.Tensor]] = {}
+        self.use_warp_geometry = self.device.type == "cuda" and os.environ.get("NERD_WARP_CONTACT_GEOMETRY", "1") != "0"
+        self._geometry_capacity = 0
+        self._geometry_buffers: dict[str, torch.Tensor] = {}
         self.contact_masks = torch.zeros(
             (self.num_envs, self.num_contacts_per_env),
             dtype=torch.bool,
@@ -194,6 +200,13 @@ class NewtonContactAdapter:
 
     def reset_buffers(self) -> None:
         """Clear all fixed-size contact buffers before packing a new frame."""
+        if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
+            self.contact_tokens.zero_()
+            self.contact_token_overflow.zero_()
+            if hasattr(self, "contact_token_body_ids"):
+                self.contact_token_body_ids.fill_(-1)
+            return
+
         self.contact_masks.zero_()
         self.contact_normals.zero_()
         self.contact_depths.zero_()
@@ -204,10 +217,6 @@ class NewtonContactAdapter:
         self.contact_thicknesses_1.zero_()
         self.contact_points_0.zero_()
         self.contact_points_1.zero_()
-        self.contact_tokens.zero_()
-        self.contact_token_overflow.zero_()
-        if hasattr(self, "contact_token_body_ids"):
-            self.contact_token_body_ids.fill_(-1)
 
     def update(
         self,
@@ -215,26 +224,29 @@ class NewtonContactAdapter:
         state: newton.State | None = None,
     ) -> None:
         """Pack Newton native contacts into fixed NeRD contact buffers."""
-        self.reset_buffers()
-
         contact_count = self._contact_count(contacts)
         self._contact_frames += 1
         if contact_count == 0:
+            self.reset_buffers()
             return
+        if self.contact_representation != CONTACT_REPRESENTATION_TOKENS:
+            self.reset_buffers()
 
-        raw = self._read_raw_contacts(contacts, contact_count, state)
+        with step_profile.section("adapter_read_raw"):
+            raw = self._read_raw_contacts(contacts, contact_count, state)
         if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
             assert self._token_encoder is not None
             if state is None:
                 raise ValueError("Contact token encoding requires the current Newton State.")
-            self.contact_tokens.copy_(self._token_encoder.encode(raw, state))
+            with step_profile.section("adapter_encode_tokens"):
+                self._token_encoder._encode_into(
+                    raw,
+                    state,
+                    self.contact_tokens,
+                    self.contact_token_overflow,
+                    self.contact_token_body_ids,
+                )
             self._token_encoder.record_frame()
-            overflow = self._token_encoder.last_overflow
-            if overflow is not None:
-                self.contact_token_overflow.copy_(overflow)
-            body_ids = self._token_encoder.last_body_ids
-            if body_ids is not None:
-                self.contact_token_body_ids.copy_(body_ids)
             valid_tokens = (self.contact_tokens[..., 0] > 0.5).sum()
             overflow_sum = self.contact_token_overflow.sum()
             self._raw_contacts_total += contact_count
@@ -242,7 +254,7 @@ class NewtonContactAdapter:
             dropped = overflow_sum.to(dtype=torch.long)
             self._dropped_contacts_gpu += dropped
             self._truncated_frames_gpu += (dropped > 0).to(dtype=torch.long)
-            if not self._truncation_warning_emitted and int(dropped.item()) > 0:
+            if self.device.type == "cpu" and not self._truncation_warning_emitted and int(dropped.item()) > 0:
                 logger.warning(
                     "Contact token packing dropped tokens because max_contact_tokens=%d. "
                     "Further truncation warnings are suppressed; inspect truncation_summary() for totals.",
@@ -298,7 +310,7 @@ class NewtonContactAdapter:
         self._dropped_contacts_gpu += dropped.to(dtype=torch.long)
         self._truncated_frames_gpu += (dropped > 0).to(dtype=torch.long)
 
-        if not self._truncation_warning_emitted and int(dropped.item()) > 0:
+        if self.device.type == "cpu" and not self._truncation_warning_emitted and int(dropped.item()) > 0:
             logger.warning(
                 "Newton-native contact packing dropped %d contacts because num_contacts_per_env=%d. "
                 "Further truncation warnings are suppressed; inspect truncation_summary() for totals.",
@@ -306,9 +318,6 @@ class NewtonContactAdapter:
                 self.num_contacts_per_env,
             )
             self._truncation_warning_emitted = True
-
-        if not bool(keep.any()):
-            return
 
         ordered_valid_idx = torch.nonzero(valid, as_tuple=False).squeeze(-1)
         keep_local = torch.nonzero(keep, as_tuple=False).squeeze(-1)
@@ -410,6 +419,12 @@ class NewtonContactAdapter:
         packed = self._packed_contacts_total + packed_gpu
         dropped = self._dropped_contacts_total + dropped_gpu
         truncated = self._truncated_frames + truncated_gpu
+        if dropped > 0 and not self._truncation_warning_emitted:
+            logger.warning(
+                "Native contact packing dropped inputs because the configured per-environment capacity was exceeded. "
+                "Further truncation warnings are suppressed; inspect truncation_summary() for totals."
+            )
+            self._truncation_warning_emitted = True
         summary = {
             "frames": self._contact_frames,
             "raw_contacts": self._raw_contacts_total,
@@ -426,7 +441,7 @@ class NewtonContactAdapter:
         count_array = contacts.rigid_contact_count
         if count_array is None:
             return 0
-        count = int(wp.to_torch(count_array)[0].item())  # type: ignore[arg-type]
+        count = int(self._warp_torch_view(count_array)[0].item())
         return min(count, int(contacts.rigid_contact_max))
 
     def _read_raw_contacts(
@@ -435,11 +450,11 @@ class NewtonContactAdapter:
         contact_count: int,
         state: newton.State | None,
     ) -> dict[str, torch.Tensor]:
-        shape0 = wp.to_torch(contacts.rigid_contact_shape0)[:contact_count].to(self.device)
-        shape1 = wp.to_torch(contacts.rigid_contact_shape1)[:contact_count].to(self.device)
-        point0 = wp.to_torch(contacts.rigid_contact_point0)[:contact_count].to(self.device)
-        point1 = wp.to_torch(contacts.rigid_contact_point1)[:contact_count].to(self.device)
-        normal = wp.to_torch(contacts.rigid_contact_normal)[:contact_count].to(self.device)
+        shape0 = self._warp_torch_view(contacts.rigid_contact_shape0)[:contact_count]
+        shape1 = self._warp_torch_view(contacts.rigid_contact_shape1)[:contact_count]
+        point0 = self._warp_torch_view(contacts.rigid_contact_point0)[:contact_count]
+        point1 = self._warp_torch_view(contacts.rigid_contact_point1)[:contact_count]
+        normal = self._warp_torch_view(contacts.rigid_contact_normal)[:contact_count]
 
         thickness0 = self._read_thickness(contacts, contact_count, side=0)
         thickness1 = self._read_thickness(contacts, contact_count, side=1)
@@ -477,7 +492,7 @@ class NewtonContactAdapter:
             )
         )
 
-        return {
+        raw = {
             "shape0": shape0,
             "shape1": shape1,
             "point0": point0,
@@ -491,6 +506,12 @@ class NewtonContactAdapter:
             "thickness0": thickness0,
             "thickness1": thickness1,
         }
+        if state is not None:
+            if state.body_q is not None:
+                raw["_body_q"] = self._warp_torch_view(state.body_q)
+            if state.body_qd is not None:
+                raw["_body_qd"] = self._warp_torch_view(state.body_qd)
+        return raw
 
     def _canonicalize_contact_sides(
         self,
@@ -597,14 +618,26 @@ class NewtonContactAdapter:
                 "Please pass contacts generated by Newton's collision pipeline."
             )
 
-        return wp.to_torch(margins)[:contact_count].to(self.device)
+        return self._warp_torch_view(margins)[:contact_count]
 
     def _read_optional_vec3(self, contacts: newton.Contacts, name: str, contact_count: int) -> torch.Tensor | None:
         """Return an optional Newton contact vec3 buffer, or ``None`` if absent."""
         values = getattr(contacts, name, None)
         if values is None:
             return None
-        return wp.to_torch(values)[:contact_count].to(self.device)
+        return self._warp_torch_view(values)[:contact_count]
+
+    def _warp_torch_view(self, array) -> torch.Tensor:
+        """Return a cached Torch view of a Warp array on the adapter device."""
+        key = id(array)
+        cached = self._torch_view_cache.get(key)
+        if cached is None or cached[0] is not array:
+            tensor = wp.to_torch(array)
+            if tensor.device != self.device:
+                tensor = tensor.to(self.device)
+            self._torch_view_cache[key] = (array, tensor)
+            return tensor
+        return cached[1]
 
     def _read_separation_and_world_points(
         self,
@@ -625,6 +658,19 @@ class NewtonContactAdapter:
                 "Pass the current Newton State to NewtonContactAdapter.update() "
                 "so world-space separation can be computed from point0/point1/normal."
             )
+        if getattr(self, "use_warp_geometry", False):
+            return self._read_separation_and_world_points_warp(
+                shape0,
+                shape1,
+                point0,
+                point1,
+                normal,
+                thickness0,
+                thickness1,
+                offset0,
+                offset1,
+                state,
+            )
 
         point0_world = self._points_to_world(shape0, point0, state)
         point1_world = self._points_to_world(shape1, point1, state)
@@ -636,6 +682,74 @@ class NewtonContactAdapter:
         surface_separation = normal_distance - thickness0 - thickness1
         return surface_separation, point0_world, point1_world, surface0_world, surface1_world
 
+    def _read_separation_and_world_points_warp(
+        self,
+        shape0: torch.Tensor,
+        shape1: torch.Tensor,
+        point0: torch.Tensor,
+        point1: torch.Tensor,
+        normal: torch.Tensor,
+        thickness0: torch.Tensor,
+        thickness1: torch.Tensor,
+        offset0: torch.Tensor | None,
+        offset1: torch.Tensor | None,
+        state: newton.State,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute world-space contact geometry with one fused Warp launch."""
+        if state.body_q is None:
+            raise ValueError("NewtonContactAdapter requires state.body_q.")
+        count = shape0.shape[0]
+        buffers = self._geometry_scratch(count)
+        dummy_offset0 = point0 if offset0 is None else offset0
+        dummy_offset1 = point1 if offset1 is None else offset1
+        wp.launch(
+            transform_native_contact_geometry,
+            dim=count,
+            inputs=[
+                wp.from_torch(shape0),
+                wp.from_torch(shape1),
+                wp.from_torch(point0, dtype=wp.vec3),
+                wp.from_torch(point1, dtype=wp.vec3),
+                wp.from_torch(normal, dtype=wp.vec3),
+                wp.from_torch(thickness0),
+                wp.from_torch(thickness1),
+                wp.from_torch(dummy_offset0, dtype=wp.vec3),
+                wp.from_torch(dummy_offset1, dtype=wp.vec3),
+                offset0 is not None,
+                wp.from_torch(self.shape_body_torch),
+                state.body_q,
+            ],
+            outputs=[
+                wp.from_torch(buffers["point0_world"], dtype=wp.vec3),
+                wp.from_torch(buffers["point1_world"], dtype=wp.vec3),
+                wp.from_torch(buffers["surface0_world"], dtype=wp.vec3),
+                wp.from_torch(buffers["surface1_world"], dtype=wp.vec3),
+                wp.from_torch(buffers["surface_separation"]),
+            ],
+            device=self.model.device,
+        )
+        return (
+            buffers["surface_separation"],
+            buffers["point0_world"],
+            buffers["point1_world"],
+            buffers["surface0_world"],
+            buffers["surface1_world"],
+        )
+
+    def _geometry_scratch(self, count: int) -> dict[str, torch.Tensor]:
+        """Return reusable world-space geometry buffers sized for ``count`` contacts."""
+        if count > self._geometry_capacity:
+            self._geometry_capacity = max(count, max(16, 2 * self._geometry_capacity))
+            with torch.inference_mode(False):
+                self._geometry_buffers = {
+                    "point0_world": torch.empty((self._geometry_capacity, 3), device=self.device),
+                    "point1_world": torch.empty((self._geometry_capacity, 3), device=self.device),
+                    "surface0_world": torch.empty((self._geometry_capacity, 3), device=self.device),
+                    "surface1_world": torch.empty((self._geometry_capacity, 3), device=self.device),
+                    "surface_separation": torch.empty(self._geometry_capacity, device=self.device),
+                }
+        return {name: value[:count] for name, value in self._geometry_buffers.items()}
+
     def _points_to_world(
         self,
         shapes: torch.Tensor,
@@ -644,20 +758,14 @@ class NewtonContactAdapter:
     ) -> torch.Tensor:
         if state.body_q is None:
             raise ValueError("NewtonContactAdapter requires state.body_q.")
-        body_q = wp.to_torch(state.body_q).to(self.device)
-        points_world = points.clone()
+        body_q = self._warp_torch_view(state.body_q)
 
         body_ids = self._shape_body_ids(shapes)
         dynamic_mask = body_ids >= 0
-        if dynamic_mask.any():
-            q = body_q[body_ids[dynamic_mask]]
-            points_world[dynamic_mask] = torch_utils.transform_point(
-                q[:, :3],
-                q[:, 3:7],
-                points[dynamic_mask],
-            )
-
-        return points_world
+        safe_body_ids = body_ids.clamp(min=0, max=body_q.shape[0] - 1)
+        q = body_q.index_select(0, safe_body_ids)
+        transformed = torch_utils.transform_point(q[:, :3], q[:, 3:7], points)
+        return torch.where(dynamic_mask.unsqueeze(-1), transformed, points)
 
     def _contact_env_id(self, shape0: int, shape1: int) -> int:
         env_id = self._shape_to_env_id(shape0)

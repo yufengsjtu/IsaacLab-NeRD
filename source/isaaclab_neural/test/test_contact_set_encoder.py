@@ -11,6 +11,9 @@ import pytest
 import torch
 from isaaclab_neural.contacts.contact_set_encoder import (
     ContactSetEncoder,
+    _DirectedContactRows,
+    _segment_exclusive_sum,
+    _segment_rank,
     transform_contact_tokens_to_body_frame,
 )
 from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
@@ -64,6 +67,75 @@ def test_contact_set_encoder_respects_capacity_and_validity():
     assert tokens[0, 0, 0] == 1.0
     assert (tokens[0, :, 0] >= 0.0).all()
     assert tokens[0, :, 0].sum() <= 4
+
+
+def test_encode_into_matches_allocating_interface():
+    encoder = _token_encoder()
+    state = SimpleNamespace(
+        body_q=torch.tensor(
+            [
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                [0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            ]
+        ),
+        body_qd=torch.zeros(2, 6),
+    )
+    raw = {
+        "shape0": torch.tensor([1]),
+        "shape1": torch.tensor([0]),
+        "point0_world": torch.tensor([[0.0, 0.0, 0.0]]),
+        "point1_world": torch.tensor([[0.0, 0.0, -0.01]]),
+        "normal": torch.tensor([[0.0, 0.0, 1.0]]),
+        "surface_separation": torch.tensor([-0.01]),
+    }
+    expected = encoder.encode(raw, state)
+    packed = torch.full_like(expected, float("nan"))
+    overflow = torch.full((1,), -1, dtype=torch.long)
+    body_ids = torch.full((1, 4), -2, dtype=torch.long)
+
+    encoder._encode_into(raw, state, packed, overflow, body_ids)
+
+    torch.testing.assert_close(packed, expected)
+    torch.testing.assert_close(overflow, torch.zeros_like(overflow))
+    assert int(body_ids[0, 0].item()) == 0
+    assert (body_ids[0, 1:] == -1).all()
+
+
+def test_vectorized_segment_helpers_match_reference():
+    keys = torch.tensor([3, 1, 3, 2, 1, 3], dtype=torch.long)
+    values = torch.tensor([2, 1, 4, 3, 2, 1], dtype=torch.long)
+    ramp = torch.zeros_like(keys)
+
+    rank = _segment_rank(keys, ramp)
+    exclusive = _segment_exclusive_sum(keys, values, ramp)
+
+    expected_rank = torch.tensor([0, 0, 1, 0, 1, 2], dtype=torch.long)
+    expected_exclusive = torch.tensor([0, 0, 2, 0, 1, 6], dtype=torch.long)
+    torch.testing.assert_close(rank, expected_rank)
+    torch.testing.assert_close(exclusive, expected_exclusive)
+
+
+def test_pair_atomic_capacity_never_keeps_only_one_side():
+    encoder = _token_encoder()
+    encoder.max_contact_tokens = 3
+    rows = _DirectedContactRows(
+        valid=torch.ones(4, dtype=torch.bool),
+        world_id=torch.zeros(4, dtype=torch.long),
+        body_id=torch.tensor([0, 0, 1, 1]),
+        other_body_id=torch.tensor([1, 1, 0, 0]),
+        other_dynamic=torch.ones(4, dtype=torch.bool),
+        point_world=torch.zeros(4, 3),
+        normal_world=torch.tensor([[0.0, 0.0, 1.0]]).expand(4, 3).clone(),
+        lever_world=torch.zeros(4, 3),
+        gap=torch.tensor([-0.2, -0.1, -0.2, -0.1]),
+        velocity_world=torch.zeros(4, 3),
+    )
+
+    packed, overflow, _ = encoder._pack_rows(rows)
+
+    assert int(packed[..., 0].sum().item()) == 2
+    assert int(overflow.sum().item()) == 2
+    torch.testing.assert_close(packed[0, :2, 13], torch.tensor([-0.2, -0.2]))
 
 
 def test_contact_token_moments_pin_identity_channels():

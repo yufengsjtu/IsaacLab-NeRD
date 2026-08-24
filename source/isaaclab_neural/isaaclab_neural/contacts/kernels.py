@@ -9,6 +9,65 @@ from newton._src.geometry.kernels import get_box_vertex
 
 
 @wp.kernel(enable_backward=False)
+def transform_native_contact_geometry(
+    shape0: wp.array(dtype=wp.int32),
+    shape1: wp.array(dtype=wp.int32),
+    point0: wp.array(dtype=wp.vec3),
+    point1: wp.array(dtype=wp.vec3),
+    normal: wp.array(dtype=wp.vec3),
+    thickness0: wp.array(dtype=float),
+    thickness1: wp.array(dtype=float),
+    offset0: wp.array(dtype=wp.vec3),
+    offset1: wp.array(dtype=wp.vec3),
+    has_offsets: bool,
+    shape_body: wp.array(dtype=wp.int64),
+    body_q: wp.array(dtype=wp.transform),
+    point0_world: wp.array(dtype=wp.vec3),
+    point1_world: wp.array(dtype=wp.vec3),
+    surface0_world: wp.array(dtype=wp.vec3),
+    surface1_world: wp.array(dtype=wp.vec3),
+    surface_separation: wp.array(dtype=float),
+):
+    """Transform native contact geometry into world-space surface features."""
+    contact_id = wp.tid()
+    shape_id0 = shape0[contact_id]
+    shape_id1 = shape1[contact_id]
+    body_id0 = wp.int64(-1)
+    body_id1 = wp.int64(-1)
+    if shape_id0 >= 0 and shape_id0 < shape_body.shape[0]:
+        body_id0 = shape_body[shape_id0]
+    if shape_id1 >= 0 and shape_id1 < shape_body.shape[0]:
+        body_id1 = shape_body[shape_id1]
+
+    local_point0 = point0[contact_id]
+    local_point1 = point1[contact_id]
+    local_surface0 = local_point0
+    local_surface1 = local_point1
+    if has_offsets:
+        local_surface0 = local_surface0 + offset0[contact_id]
+        local_surface1 = local_surface1 + offset1[contact_id]
+
+    world_point0 = local_point0
+    world_point1 = local_point1
+    world_surface0 = local_surface0
+    world_surface1 = local_surface1
+    if body_id0 >= 0:
+        world_point0 = wp.transform_point(body_q[body_id0], local_point0)
+        world_surface0 = wp.transform_point(body_q[body_id0], local_surface0)
+    if body_id1 >= 0:
+        world_point1 = wp.transform_point(body_q[body_id1], local_point1)
+        world_surface1 = wp.transform_point(body_q[body_id1], local_surface1)
+
+    point0_world[contact_id] = world_point0
+    point1_world[contact_id] = world_point1
+    surface0_world[contact_id] = world_surface0
+    surface1_world[contact_id] = world_surface1
+    surface_separation[contact_id] = (
+        wp.dot(normal[contact_id], world_surface1 - world_surface0) - thickness0[contact_id] - thickness1[contact_id]
+    )
+
+
+@wp.kernel(enable_backward=False)
 def generate_contact_points(
     shape_transform: wp.array(dtype=wp.transform),
     shape_body: wp.array(dtype=int),

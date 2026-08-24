@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import warp as wp
 from isaaclab_neural.contacts.newton_contact_adapter import NewtonContactAdapter
 from isaaclab_neural.contacts.packing import get_contact_order, resolve_contact_packing_policy
 
@@ -99,6 +100,61 @@ def test_surface_offset_moves_effective_contact_point():
     torch.testing.assert_close(surface0, torch.tensor([[0.0, 0.0, -0.1]]))
     torch.testing.assert_close(surface1, point1)
     torch.testing.assert_close(separation, torch.tensor([0.1]))
+
+
+def test_warp_geometry_matches_torch_reference():
+    adapter = NewtonContactAdapter.__new__(NewtonContactAdapter)
+    adapter.device = torch.device("cpu")
+    adapter.model = SimpleNamespace(device=wp.get_device("cpu"))
+    adapter.shape_body_torch = torch.tensor([-1, 0], dtype=torch.long)
+    adapter._torch_view_cache = {}
+    adapter._geometry_capacity = 0
+    adapter._geometry_buffers = {}
+    body_q = torch.tensor([[1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0]])
+    state = SimpleNamespace(body_q=wp.from_torch(body_q, dtype=wp.transform))
+    shape0 = torch.tensor([1], dtype=torch.int32)
+    shape1 = torch.tensor([0], dtype=torch.int32)
+    point0 = torch.tensor([[0.1, 0.2, 0.3]])
+    point1 = torch.tensor([[1.1, 2.2, 3.1]])
+    normal = torch.tensor([[0.0, 0.0, 1.0]])
+    thickness0 = torch.tensor([0.05])
+    thickness1 = torch.tensor([0.02])
+    offset0 = torch.tensor([[0.0, 0.0, -0.1]])
+    offset1 = torch.zeros(1, 3)
+
+    adapter.use_warp_geometry = False
+    expected = tuple(
+        value.clone()
+        for value in adapter._read_separation_and_world_points(
+            shape0,
+            shape1,
+            point0,
+            point1,
+            normal,
+            thickness0,
+            thickness1,
+            offset0,
+            offset1,
+            state,
+        )
+    )
+    adapter.use_warp_geometry = True
+    actual = adapter._read_separation_and_world_points(
+        shape0,
+        shape1,
+        point0,
+        point1,
+        normal,
+        thickness0,
+        thickness1,
+        offset0,
+        offset1,
+        state,
+    )
+    wp.synchronize_device(adapter.model.device)
+
+    for actual_value, expected_value in zip(actual, expected):
+        torch.testing.assert_close(actual_value, expected_value, atol=1.0e-6, rtol=1.0e-6)
 
 
 def test_body_round_robin_pair_atomic_is_rejected_for_flat_packing():

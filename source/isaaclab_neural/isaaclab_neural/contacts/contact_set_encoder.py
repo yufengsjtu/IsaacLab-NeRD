@@ -15,7 +15,6 @@ import warp as wp
 
 from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_TOKEN_DIM,
-    CONTACT_TOKEN_GAP_INDEX,
     CONTACT_TOKEN_GEOMETRY_SLICE,
     CONTACT_TOKEN_VALID_INDEX,
 )
@@ -47,19 +46,17 @@ class _DirectedContactRows:
 
 def _segment_rank(keys: torch.Tensor, ramp: torch.Tensor) -> torch.Tensor:
     """Return per-row rank within segments defined by ``keys``."""
+    del ramp
     order = torch.argsort(keys, stable=True)
     sorted_keys = keys.index_select(0, order)
-    rank_sorted = torch.zeros_like(sorted_keys)
     if sorted_keys.numel() == 0:
-        return rank_sorted
+        return sorted_keys
     changes = torch.ones_like(sorted_keys, dtype=torch.bool)
     changes[1:] = sorted_keys[1:] != sorted_keys[:-1]
-    segment_ids = torch.cumsum(changes.to(torch.long), dim=0) - 1
-    counts = torch.bincount(segment_ids, minlength=int(segment_ids.max().item()) + 1)
-    offsets = torch.zeros_like(counts)
-    if counts.numel() > 1:
-        offsets[1:] = torch.cumsum(counts[:-1], dim=0)
-    rank_sorted = torch.arange(sorted_keys.numel(), device=keys.device) - offsets.index_select(0, segment_ids)
+    positions = torch.arange(sorted_keys.numel(), device=keys.device)
+    segment_starts = torch.where(changes, positions, 0)
+    segment_starts = torch.cummax(segment_starts, dim=0).values
+    rank_sorted = positions - segment_starts
     rank = torch.empty_like(rank_sorted)
     rank.index_copy_(0, order, rank_sorted)
     return rank
@@ -73,16 +70,16 @@ def _segment_exclusive_sum(segment_ids: torch.Tensor, values: torch.Tensor, ramp
     order = torch.argsort(segment_ids, stable=True)
     sorted_ids = segment_ids.index_select(0, order)
     sorted_values = values.index_select(0, order)
-    exclusive = torch.zeros_like(sorted_values)
-    if sorted_values.numel() > 1:
-        same = sorted_ids[1:] == sorted_ids[:-1]
-        run_values = sorted_values.clone()
-        for index in range(1, sorted_values.numel()):
-            if same[index - 1]:
-                run_values[index] = run_values[index - 1] + sorted_values[index]
-            else:
-                run_values[index] = sorted_values[index]
-        exclusive[1:] = torch.where(same, run_values[:-1], 0.0)
+    changes = torch.ones_like(sorted_ids, dtype=torch.bool)
+    changes[1:] = sorted_ids[1:] != sorted_ids[:-1]
+    positions = torch.arange(sorted_ids.numel(), device=segment_ids.device)
+    segment_starts = positions[changes]
+    inclusive = torch.cumsum(sorted_values, dim=0)
+    segment_bases = torch.zeros_like(segment_starts, dtype=inclusive.dtype)
+    if segment_starts.numel() > 1:
+        segment_bases[1:] = inclusive.index_select(0, segment_starts[1:] - 1)
+    segment_index = torch.cumsum(changes.to(torch.long), dim=0) - 1
+    exclusive = inclusive - sorted_values - segment_bases.index_select(0, segment_index)
     result = torch.empty_like(exclusive)
     result.index_copy_(0, order, exclusive)
     return result
@@ -131,7 +128,10 @@ class ContactSetEncoder:
         self._overflow: torch.Tensor | None = None
         self._body_ids: torch.Tensor | None = None
         self._overflow_total = 0
+        self._overflow_total_gpu = torch.zeros((), dtype=torch.long, device=self.device)
         self._frames = 0
+        self._row_capacity = 0
+        self._row_buffers: dict[str, torch.Tensor] = {}
 
     @property
     def last_overflow(self) -> torch.Tensor | None:
@@ -146,6 +146,7 @@ class ContactSetEncoder:
     def reset_overflow_stats(self) -> None:
         """Reset cumulative overflow telemetry."""
         self._overflow_total = 0
+        self._overflow_total_gpu.zero_()
         self._frames = 0
 
     def record_frame(self) -> None:
@@ -156,7 +157,7 @@ class ContactSetEncoder:
         """Return cumulative token overflow statistics."""
         return {
             "frames": self._frames,
-            "overflow_tokens_total": self._overflow_total,
+            "overflow_tokens_total": self._overflow_total + int(self._overflow_total_gpu.item()),
             "overflow_frames": int((self._overflow > 0).sum().item()) if self._overflow is not None else 0,
         }
 
@@ -166,14 +167,35 @@ class ContactSetEncoder:
         state: newton.State,
     ) -> torch.Tensor:
         """Pack raw Newton contacts into ``[num_envs, max_contact_tokens, 17]`` tokens."""
-        rows = self._directed_rows(raw_contacts, state)
-        packed, overflow, body_ids = self._pack_rows(rows)
-        if self._overflow is None or self._overflow.device != packed.device:
-            self._overflow = torch.zeros(self.num_envs, dtype=torch.long, device=packed.device)
-        self._overflow.copy_(overflow)
-        self._body_ids = body_ids
-        self._overflow_total += int(overflow.sum().item())
+        packed = torch.zeros(
+            (self.num_envs, self.max_contact_tokens, CONTACT_TOKEN_DIM),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        overflow = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        body_ids = torch.full(
+            (self.num_envs, self.max_contact_tokens),
+            -1,
+            dtype=torch.long,
+            device=self.device,
+        )
+        self._encode_into(raw_contacts, state, packed, overflow, body_ids)
         return packed
+
+    def _encode_into(
+        self,
+        raw_contacts: dict[str, torch.Tensor],
+        state: newton.State,
+        packed: torch.Tensor,
+        overflow: torch.Tensor,
+        body_ids: torch.Tensor,
+    ) -> None:
+        """Pack contacts directly into caller-owned output buffers."""
+        rows = self._directed_rows(raw_contacts, state)
+        self._pack_rows(rows, packed, overflow, body_ids)
+        self._overflow = overflow
+        self._body_ids = body_ids
+        self._overflow_total_gpu += overflow.sum()
 
     def _build_body_slot_lookup(self) -> torch.Tensor:
         """Map global body ids to per-environment local primary-body slots."""
@@ -235,8 +257,8 @@ class ContactSetEncoder:
         normal01 = raw["normal"]
         gap = raw["surface_separation"]
 
-        body_q = _as_torch_array(state.body_q, self.device)
-        body_qd = _as_torch_array(state.body_qd, self.device)
+        body_q = raw["_body_q"] if "_body_q" in raw else _as_torch_array(state.body_q, self.device)
+        body_qd = raw["_body_qd"] if "_body_qd" in raw else _as_torch_array(state.body_qd, self.device)
 
         com0 = self._body_com_world(body_q, body0)
         com1 = self._body_com_world(body_q, body1)
@@ -256,56 +278,79 @@ class ContactSetEncoder:
         valid0 = dynamic0 & (self._body_slot(body0) >= 0) & (pair_world >= 0)
         valid1 = dynamic1 & (self._body_slot(body1) >= 0) & (pair_world >= 0)
 
-        rows0 = _DirectedContactRows(
-            valid=valid0,
-            world_id=pair_world,
-            body_id=body0,
-            other_body_id=body1,
-            other_dynamic=dynamic1,
-            point_world=point0,
-            normal_world=normal01,
-            lever_world=point0 - com0,
-            gap=gap,
-            velocity_world=vel0 - vel1,
-        )
-        rows1 = _DirectedContactRows(
-            valid=valid1,
-            world_id=pair_world,
-            body_id=body1,
-            other_body_id=body0,
-            other_dynamic=dynamic0,
-            point_world=point1,
-            normal_world=-normal01,
-            lever_world=point1 - com1,
-            gap=gap,
-            velocity_world=vel1 - vel0,
-        )
-        return self._concat_rows(rows0, rows1)
+        rows = self._directed_row_scratch(count)
+        first = slice(0, count)
+        second = slice(count, 2 * count)
+        for destination, first_value, second_value in (
+            (rows.valid, valid0, valid1),
+            (rows.world_id, pair_world, pair_world),
+            (rows.body_id, body0, body1),
+            (rows.other_body_id, body1, body0),
+            (rows.other_dynamic, dynamic1, dynamic0),
+            (rows.point_world, point0, point1),
+            (rows.normal_world, normal01, -normal01),
+            (rows.lever_world, point0 - com0, point1 - com1),
+            (rows.gap, gap, gap),
+            (rows.velocity_world, vel0 - vel1, vel1 - vel0),
+        ):
+            destination[first].copy_(first_value)
+            destination[second].copy_(second_value)
+        return rows
 
-    @staticmethod
-    def _concat_rows(first: _DirectedContactRows, second: _DirectedContactRows) -> _DirectedContactRows:
+    def _directed_row_scratch(self, contact_count: int) -> _DirectedContactRows:
+        """Return reusable buffers for two directed rows per contact."""
+        required = 2 * contact_count
+        if required > self._row_capacity:
+            self._row_capacity = max(required, max(16, 2 * self._row_capacity))
+            vector_shape = (self._row_capacity, 3)
+            with torch.inference_mode(False):
+                self._row_buffers = {
+                    "valid": torch.empty(self._row_capacity, dtype=torch.bool, device=self.device),
+                    "world_id": torch.empty(self._row_capacity, dtype=torch.long, device=self.device),
+                    "body_id": torch.empty(self._row_capacity, dtype=torch.long, device=self.device),
+                    "other_body_id": torch.empty(self._row_capacity, dtype=torch.long, device=self.device),
+                    "other_dynamic": torch.empty(self._row_capacity, dtype=torch.bool, device=self.device),
+                    "point_world": torch.empty(vector_shape, dtype=torch.float32, device=self.device),
+                    "normal_world": torch.empty(vector_shape, dtype=torch.float32, device=self.device),
+                    "lever_world": torch.empty(vector_shape, dtype=torch.float32, device=self.device),
+                    "gap": torch.empty(self._row_capacity, dtype=torch.float32, device=self.device),
+                    "velocity_world": torch.empty(vector_shape, dtype=torch.float32, device=self.device),
+                }
+        buffers = self._row_buffers
         return _DirectedContactRows(
-            valid=torch.cat((first.valid, second.valid)),
-            world_id=torch.cat((first.world_id, second.world_id)),
-            body_id=torch.cat((first.body_id, second.body_id)),
-            other_body_id=torch.cat((first.other_body_id, second.other_body_id)),
-            other_dynamic=torch.cat((first.other_dynamic, second.other_dynamic)),
-            point_world=torch.cat((first.point_world, second.point_world)),
-            normal_world=torch.cat((first.normal_world, second.normal_world)),
-            lever_world=torch.cat((first.lever_world, second.lever_world)),
-            gap=torch.cat((first.gap, second.gap)),
-            velocity_world=torch.cat((first.velocity_world, second.velocity_world)),
+            valid=buffers["valid"][:required],
+            world_id=buffers["world_id"][:required],
+            body_id=buffers["body_id"][:required],
+            other_body_id=buffers["other_body_id"][:required],
+            other_dynamic=buffers["other_dynamic"][:required],
+            point_world=buffers["point_world"][:required],
+            normal_world=buffers["normal_world"][:required],
+            lever_world=buffers["lever_world"][:required],
+            gap=buffers["gap"][:required],
+            velocity_world=buffers["velocity_world"][:required],
         )
 
-    def _pack_rows(self, rows: _DirectedContactRows) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _pack_rows(
+        self,
+        rows: _DirectedContactRows,
+        packed: torch.Tensor | None = None,
+        overflow: torch.Tensor | None = None,
+        packed_body_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         worlds = self.num_envs
         capacity = self.max_contact_tokens
         device = self.device
-        packed = torch.zeros((worlds, capacity, CONTACT_TOKEN_DIM), dtype=torch.float32, device=device)
-        overflow = torch.zeros(worlds, dtype=torch.long, device=device)
+        if packed is None:
+            packed = torch.zeros((worlds, capacity, CONTACT_TOKEN_DIM), dtype=torch.float32, device=device)
+        if overflow is None:
+            overflow = torch.zeros(worlds, dtype=torch.long, device=device)
+        if packed_body_ids is None:
+            packed_body_ids = torch.full((worlds, capacity), -1, dtype=torch.long, device=device)
         if rows.valid.numel() == 0:
-            body_ids = torch.full((worlds, capacity), -1, dtype=torch.long, device=device)
-            return packed, overflow, body_ids
+            packed.zero_()
+            overflow.zero_()
+            packed_body_ids.fill_(-1)
+            return packed, overflow, packed_body_ids
 
         pairs = rows.valid.shape[0] // 2
         if rows.valid.shape[0] % 2 != 0:
@@ -393,17 +438,16 @@ class ContactSetEncoder:
         )
         flat = candidates.new_zeros((dump_row + 1, CONTACT_TOKEN_DIM))
         flat.index_copy_(0, destination, candidates)
-        packed = flat[:dump_row].reshape(worlds, capacity, CONTACT_TOKEN_DIM)
+        packed.copy_(flat[:dump_row].reshape(worlds, capacity, CONTACT_TOKEN_DIM))
         flat_body_ids = torch.full((dump_row + 1,), -1, dtype=torch.long, device=device)
         flat_body_ids.index_copy_(0, destination, rows.body_id)
-        packed_body_ids = flat_body_ids[:dump_row].reshape(worlds, capacity)
+        packed_body_ids.copy_(flat_body_ids[:dump_row].reshape(worlds, capacity))
         packed[..., CONTACT_TOKEN_VALID_INDEX] = (packed[..., CONTACT_TOKEN_VALID_INDEX] > 0.5).to(torch.float32)
 
         dropped = rows.valid & ~keep_row
-        if dropped.any():
-            dropped_counts = torch.zeros(worlds + 1, dtype=torch.long, device=device)
-            dropped_counts.scatter_add_(0, world_row[dropped], torch.ones_like(world_row[dropped]))
-            overflow.copy_(dropped_counts[:worlds])
+        dropped_counts = torch.zeros(worlds + 1, dtype=torch.long, device=device)
+        dropped_counts.scatter_add_(0, world_row, dropped.to(dtype=torch.long))
+        overflow.copy_(dropped_counts[:worlds])
         return packed, overflow, packed_body_ids
 
     def _shape_body_ids(self, shapes: torch.Tensor) -> torch.Tensor:
@@ -476,42 +520,45 @@ def transform_contact_tokens_to_body_frame(
         contact_tokens = contact_tokens.unsqueeze(1)
         root_body_q = root_body_q.unsqueeze(1)
 
-    contact_tokens = contact_tokens.clone()
     batch, time, tokens, _ = contact_tokens.shape
     valid = contact_tokens[..., CONTACT_TOKEN_VALID_INDEX] > 0.5
     flat_tokens = contact_tokens.reshape(batch * time * tokens, CONTACT_TOKEN_DIM)
     flat_valid = valid.reshape(-1)
     flat_root = root_body_q.reshape(batch * time, 7).repeat_interleave(tokens, dim=0)
 
-    if flat_valid.any():
-        geometry = flat_tokens[flat_valid, CONTACT_TOKEN_GEOMETRY_SLICE].reshape(-1, 13)
-        points = geometry[:, :3]
-        normals = geometry[:, 3:6]
-        levers = geometry[:, 6:9]
-        gap = geometry[:, 9:10]
-        rel_vel = geometry[:, 10:13]
+    geometry = flat_tokens[:, CONTACT_TOKEN_GEOMETRY_SLICE].reshape(-1, 13)
+    points = geometry[:, :3]
+    normals = geometry[:, 3:6]
+    levers = geometry[:, 6:9]
+    gap = geometry[:, 9:10]
+    rel_vel = geometry[:, 10:13]
 
-        pos = flat_root[flat_valid, :3]
-        quat = flat_root[flat_valid, 3:7]
-        if translation_only:
-            points_body = points - pos
-            normals_body = normals
-            levers_body = levers
-            rel_vel_body = rel_vel
-        else:
-            points_body = torch_utils.transform_point_inverse(pos, quat, points)
-            normals_body = torch_utils.quat_rotate_inverse(quat, normals)
-            levers_body = torch_utils.quat_rotate_inverse(quat, levers)
-            rel_vel_body = torch_utils.quat_rotate_inverse(quat, rel_vel)
+    pos = flat_root[:, :3]
+    quat = flat_root[:, 3:7]
+    if translation_only:
+        points_body = points - pos
+        normals_body = normals
+        levers_body = levers
+        rel_vel_body = rel_vel
+    else:
+        points_body = torch_utils.transform_point_inverse(pos, quat, points)
+        normals_body = torch_utils.quat_rotate_inverse(quat, normals)
+        levers_body = torch_utils.quat_rotate_inverse(quat, levers)
+        rel_vel_body = torch_utils.quat_rotate_inverse(quat, rel_vel)
 
-        flat_tokens[flat_valid, 4:7] = points_body
-        flat_tokens[flat_valid, 7:10] = normals_body
-        flat_tokens[flat_valid, 10:13] = levers_body
-        flat_tokens[flat_valid, CONTACT_TOKEN_GAP_INDEX : CONTACT_TOKEN_GAP_INDEX + 1] = gap
-        flat_tokens[flat_valid, 14:17] = rel_vel_body
-
-    flat_tokens[~flat_valid] = 0.0
-    result = flat_tokens.reshape(batch, time, tokens, CONTACT_TOKEN_DIM)
+    transformed = torch.cat(
+        (
+            flat_tokens[:, :4],
+            points_body,
+            normals_body,
+            levers_body,
+            gap,
+            rel_vel_body,
+        ),
+        dim=-1,
+    )
+    transformed.mul_(flat_valid.unsqueeze(-1))
+    result = transformed.reshape(batch, time, tokens, CONTACT_TOKEN_DIM)
     if len(original_shape) == 2:
         return result.reshape(original_shape)
     if len(original_shape) == 3:
@@ -525,7 +572,6 @@ def contact_token_validity_mask(contact_tokens: torch.Tensor) -> torch.Tensor:
 
 
 def mask_invalid_contact_tokens(contact_tokens: torch.Tensor) -> torch.Tensor:
-    """Zero invalid token rows in-place semantics via clone."""
-    masked = contact_tokens.clone()
-    valid = contact_token_validity_mask(masked).unsqueeze(-1)
-    return torch.where(valid, masked, torch.zeros_like(masked))
+    """Return contact tokens with invalid rows zeroed."""
+    valid = contact_token_validity_mask(contact_tokens).unsqueeze(-1)
+    return torch.where(valid, contact_tokens, 0.0)
