@@ -12,9 +12,10 @@ import argparse
 import hashlib
 import json
 import os
-import tempfile
+import time
 from pathlib import Path, PurePosixPath
 
+DEFAULT_DOWNLOAD_MAX_ATTEMPTS = 5
 DEFAULT_SEGMENT_SIZE_BYTES = 1024**3
 
 
@@ -125,23 +126,94 @@ def upload_file(container: str, source: Path, object_name: str) -> None:
     print(f"Uploaded {source} to Swift {container}/{object_name}.")
 
 
-def download_object(container: str, object_name: str, destination: Path) -> None:
-    """Download one object to a local file."""
-    connection, _ = connect()
+def download_object(
+    container: str,
+    object_name: str,
+    destination: Path,
+    *,
+    max_attempts: int = DEFAULT_DOWNLOAD_MAX_ATTEMPTS,
+) -> None:
+    """Download one object to a local file with resumable retries."""
     object_name = _safe_object_name(object_name)
     destination = destination.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    _, body = connection.get_object(container, object_name, resp_chunk_size=1024 * 1024)
-    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=f".{destination.name}.", delete=False) as stream:
-        temporary_path = Path(stream.name)
-        try:
-            for chunk in body:
-                stream.write(chunk)
-        except BaseException:
-            temporary_path.unlink(missing_ok=True)
-            raise
-    temporary_path.replace(destination)
+    _download_object_with_resume(container, object_name, destination, max_attempts=max_attempts)
     print(f"Downloaded Swift {container}/{object_name} to {destination}.")
+
+
+def _download_object_with_resume(
+    container: str,
+    object_name: str,
+    destination: Path,
+    *,
+    max_attempts: int,
+) -> None:
+    """Download an object, retaining partial bytes between retry attempts."""
+    if max_attempts <= 0:
+        raise ValueError("max_attempts must be positive.")
+
+    connection, _ = connect()
+    object_headers = connection.head_object(container, object_name)
+    expected_size = int(object_headers["content-length"])
+    partial_path = destination.with_name(f".{destination.name}.part")
+    if destination.is_file() and destination.stat().st_size == expected_size:
+        return
+    destination.unlink(missing_ok=True)
+    if partial_path.is_file() and partial_path.stat().st_size > expected_size:
+        partial_path.unlink()
+
+    for attempt in range(1, max_attempts + 1):
+        offset = partial_path.stat().st_size if partial_path.is_file() else 0
+        if offset == expected_size:
+            partial_path.replace(destination)
+            return
+
+        try:
+            connection, _ = connect()
+            request_headers = {"Range": f"bytes={offset}-"} if offset else None
+            response_headers, body = connection.get_object(
+                container,
+                object_name,
+                resp_chunk_size=1024 * 1024,
+                headers=request_headers,
+            )
+            append = offset > 0
+            if append:
+                content_range = str(response_headers.get("content-range", ""))
+                if not content_range.startswith(f"bytes {offset}-"):
+                    print(
+                        f"Swift ignored the byte range for {container}/{object_name}; restarting this object.",
+                        flush=True,
+                    )
+                    append = False
+            with partial_path.open("ab" if append else "wb") as stream:
+                for chunk in body:
+                    stream.write(chunk)
+            downloaded_size = partial_path.stat().st_size
+            if downloaded_size != expected_size:
+                raise OSError(
+                    f"Downloaded {downloaded_size} of {expected_size} bytes for Swift {container}/{object_name}."
+                )
+        except Exception as exc:
+            if attempt == max_attempts:
+                raise RuntimeError(
+                    f"Failed to download Swift {container}/{object_name} after {max_attempts} attempts; "
+                    f"{partial_path.stat().st_size if partial_path.is_file() else 0} of "
+                    f"{expected_size} bytes retained."
+                ) from exc
+            delay_seconds = min(2 ** (attempt - 1), 30)
+            downloaded_size = partial_path.stat().st_size if partial_path.is_file() else 0
+            print(
+                f"Swift download attempt {attempt}/{max_attempts} failed for {container}/{object_name}: "
+                f"{type(exc).__name__}: {exc}. Retained {downloaded_size}/{expected_size} bytes; "
+                f"retrying in {delay_seconds}s.",
+                flush=True,
+            )
+            time.sleep(delay_seconds)
+            continue
+
+        partial_path.replace(destination)
+        return
 
 
 def download_prefix(
@@ -150,6 +222,7 @@ def download_prefix(
     output_dir: Path,
     *,
     model_filename: str | None = None,
+    max_attempts: int = DEFAULT_DOWNLOAD_MAX_ATTEMPTS,
 ) -> None:
     """Download objects under a prefix while preserving object paths.
 
@@ -159,6 +232,7 @@ def download_prefix(
         output_dir: Local destination directory.
         model_filename: When set, skip ``.pt`` files whose basename does not
             match this filename. Non-model files are always downloaded.
+        max_attempts: Maximum download attempts for each object.
     """
     connection, _ = connect()
     prefix = _safe_prefix(prefix)
@@ -188,10 +262,7 @@ def download_prefix(
         print(f"Downloading {index}/{len(selected_objects)}: {object_name}", flush=True)
         destination = _safe_destination(output_dir, object_name)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        _, body = connection.get_object(container, object_name, resp_chunk_size=1024 * 1024)
-        with destination.open("wb") as stream:
-            for chunk in body:
-                stream.write(chunk)
+        _download_object_with_resume(container, object_name, destination, max_attempts=max_attempts)
     print(f"Downloaded {len(selected_objects)} Swift object(s) from {container}/{prefix} to {output_dir}.")
 
 
@@ -377,7 +448,7 @@ def _cmd_upload_file(args: argparse.Namespace) -> None:
 
 
 def _cmd_download_object(args: argparse.Namespace) -> None:
-    download_object(args.container, args.object_name, Path(args.output))
+    download_object(args.container, args.object_name, Path(args.output), max_attempts=args.max_attempts)
 
 
 def _cmd_download_prefix(args: argparse.Namespace) -> None:
@@ -386,6 +457,7 @@ def _cmd_download_prefix(args: argparse.Namespace) -> None:
         args.prefix,
         Path(args.output_dir),
         model_filename=args.model_filename,
+        max_attempts=args.max_attempts,
     )
 
 
@@ -414,12 +486,14 @@ def main() -> None:
     download_object_parser.add_argument("--container", required=True)
     download_object_parser.add_argument("--object-name", required=True)
     download_object_parser.add_argument("--output", required=True)
+    download_object_parser.add_argument("--max-attempts", type=int, default=DEFAULT_DOWNLOAD_MAX_ATTEMPTS)
     download_object_parser.set_defaults(func=_cmd_download_object)
 
     download_prefix_parser = subparsers.add_parser("download-prefix", help="Download an object prefix.")
     download_prefix_parser.add_argument("--container", required=True)
     download_prefix_parser.add_argument("--prefix", required=True)
     download_prefix_parser.add_argument("--output-dir", required=True)
+    download_prefix_parser.add_argument("--max-attempts", type=int, default=DEFAULT_DOWNLOAD_MAX_ATTEMPTS)
     download_prefix_parser.add_argument(
         "--model-filename",
         help="Download non-model files plus only the .pt model with this basename.",

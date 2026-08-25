@@ -78,14 +78,20 @@ class FakeConnection:
         ]
         return {}, objects
 
-    def get_object(self, container: str, object_name: str, *, resp_chunk_size: int):
+    def get_object(self, container: str, object_name: str, *, resp_chunk_size: int, headers=None):
         assert resp_chunk_size > 0
         if manifest := self.manifests.get((container, object_name)):
             content = b"".join(
                 self.objects[tuple(segment["path"].strip("/").split("/", maxsplit=1))] for segment in manifest
             )
-            return {}, iter((content,))
-        return {}, iter((self.objects[(container, object_name)],))
+        else:
+            content = self.objects[(container, object_name)]
+        response_headers = {}
+        if headers and (range_header := headers.get("Range")):
+            offset = int(range_header.removeprefix("bytes=").removesuffix("-"))
+            response_headers["content-range"] = f"bytes {offset}-{len(content) - 1}/{len(content)}"
+            content = content[offset:]
+        return response_headers, iter((content,))
 
 
 class TestSwiftIO(unittest.TestCase):
@@ -183,6 +189,73 @@ class TestSwiftIO(unittest.TestCase):
                 b"0123",
             )
             self.assertEqual(destination.read_bytes(), source.read_bytes())
+
+    def test_download_resumes_partial_object_for_up_to_five_attempts(self):
+        class FlakyConnection(FakeConnection):
+            def __init__(self):
+                super().__init__()
+                self.download_attempts = 0
+                self.requested_ranges = []
+
+            def get_object(self, container: str, object_name: str, *, resp_chunk_size: int, headers=None):
+                self.download_attempts += 1
+                self.requested_ranges.append(headers.get("Range") if headers else None)
+                if self.download_attempts == 1:
+
+                    def interrupted_body():
+                        yield b"0123"
+                        raise ConnectionError("connection interrupted")
+
+                    return {}, interrupted_body()
+                return super().get_object(
+                    container,
+                    object_name,
+                    resp_chunk_size=resp_chunk_size,
+                    headers=headers,
+                )
+
+        connection = FlakyConnection()
+        connection.objects[("datasets", "cache/dataset.hdf5")] = b"0123456789"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "dataset.hdf5"
+            with (
+                mock.patch.object(swift_io, "connect", return_value=(connection, "https://auth")),
+                mock.patch.object(swift_io.time, "sleep"),
+            ):
+                swift_io.download_object("datasets", "cache/dataset.hdf5", destination)
+
+            self.assertEqual(destination.read_bytes(), b"0123456789")
+            self.assertEqual(connection.download_attempts, 2)
+            self.assertEqual(connection.requested_ranges, [None, "bytes=4-"])
+            self.assertFalse((destination.parent / ".dataset.hdf5.part").exists())
+
+    def test_download_stops_after_five_failed_attempts(self):
+        class FailingConnection(FakeConnection):
+            def __init__(self):
+                super().__init__()
+                self.download_attempts = 0
+
+            def get_object(self, container: str, object_name: str, *, resp_chunk_size: int, headers=None):
+                self.download_attempts += 1
+
+                def interrupted_body():
+                    raise ConnectionError("connection interrupted")
+                    yield
+
+                return {}, interrupted_body()
+
+        connection = FailingConnection()
+        connection.objects[("datasets", "cache/dataset.hdf5")] = b"dataset"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "dataset.hdf5"
+            with (
+                mock.patch.object(swift_io, "connect", return_value=(connection, "https://auth")),
+                mock.patch.object(swift_io.time, "sleep"),
+                self.assertRaisesRegex(RuntimeError, "after 5 attempts"),
+            ):
+                swift_io.download_object("datasets", "cache/dataset.hdf5", destination)
+
+        self.assertEqual(connection.download_attempts, 5)
 
     def test_segment_reader_can_seek_within_segment(self):
         stream = io.BytesIO(b"prefix-segment-suffix")
