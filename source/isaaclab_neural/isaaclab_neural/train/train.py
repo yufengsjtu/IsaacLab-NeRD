@@ -24,6 +24,7 @@ from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_FILTER_SOLVER_ACTIVE,
     CONTACT_REPRESENTATION_ACTIVE15,
     CONTACT_REPRESENTATION_RAW15,
+    CONTACT_REPRESENTATION_TOKENS,
     is_contact_token_representation,
 )
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
@@ -164,6 +165,14 @@ def validate_cfg(cfg) -> None:
         raise ValueError(f"Unsupported contact_filter: {contact_filter!r}.")
     if contact_filter != CONTACT_FILTER_NONE and not is_contact_token_representation(contact_representation):
         raise ValueError("contact_filter requires a contact-token representation.")
+    exclude_robot_self_collisions = bool(solver_cfg.get("exclude_robot_self_collisions", False))
+    if exclude_robot_self_collisions and (
+        contact_filter != CONTACT_FILTER_SOLVER_ACTIVE or contact_representation != CONTACT_REPRESENTATION_TOKENS
+    ):
+        raise ValueError(
+            "exclude_robot_self_collisions requires contact_filter='solver_active' "
+            "and contact_representation='contact_tokens'."
+        )
     dataset_representation = cfg["algorithm"]["dataset"].get("contact_representation", contact_representation)
     representations_match = dataset_representation == contact_representation
     active15_raw15_view = (

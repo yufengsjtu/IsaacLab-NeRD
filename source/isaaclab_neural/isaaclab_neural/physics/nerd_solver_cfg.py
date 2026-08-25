@@ -93,6 +93,9 @@ class NerdSolverCfg(NewtonSolverCfg):
     contact_filter: ContactFilter = "none"
     """Optional selection view applied to contact tokens before model preprocessing."""
 
+    exclude_robot_self_collisions: bool = False
+    """Whether to remove solver-active contacts between two bodies of the same robot."""
+
     max_contact_tokens: int = 64
     """Maximum padded contact tokens per environment for either token representation."""
 

@@ -1,0 +1,78 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+workflow:
+  base_name: anymal-c-rough-c-active-no-self
+  # Reuse canonical contact-token HDF5; only the training view removes robot self-collisions.
+  dataset_subdir: anymal-c-rough-newton-native-contact-tokens
+
+resources:
+  num_gpu: 8
+  num_cpu: 96
+  memory: 512Gi
+  storage: 512Gi
+  platform: ovx-l40
+
+experiment:
+  env_name: Anymal-C-Rough-Native-ContactTokens
+  robot_name: Anymal-C
+  data_gen_task: Isaac-Velocity-Rough-Anymal-C-Dataset-Gen-v0
+  deployment_task: Isaac-Velocity-Rough-Anymal-C-v0
+  train_task: Isaac-Velocity-Rough-Anymal-C-NeRD-v0
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native_shared_per_body_active_filter_no_self_collision.yaml
+  train_preset: newton_mjwarp
+  num_gpus: 8
+  save_interval: 100
+  persist_periodic_checkpoints: true
+  contact_mode: newton_native
+  contact_representation: contact_tokens
+  dataset_contact_representation: contact_tokens
+  contact_filter: solver_active
+  num_contacts_per_env: 64
+  max_contact_tokens: 64
+  require_terrain_context: true
+  contact_packing_policy: body_round_robin_pair_atomic
+  sample_mode: action
+  initial_states_source: env
+  randomize_pd_gains: true
+  train_transitions: 20000000
+  valid_transitions: 1000000
+  data_gen_num_envs: 1024
+  train_num_envs: 64
+  trajectory_length: 400
+  write_chunk_transitions: 819200
+  update_dataset_statistics: true
+  policy_checkpoint: ./pretrained/control_policy/anymal_c_rough_terrain/model_1499.pt
+  dataset_specs:
+    - filename: dataset_train.hdf5
+      seed: 0
+      split: train
+      task_kind: default
+      zero_actions: false
+      use_policy: false
+    - filename: dataset_valid.hdf5
+      seed: 10
+      split: valid
+      task_kind: default
+      zero_actions: false
+      use_policy: false
+    - filename: dataset_zero_action_valid.hdf5
+      seed: 20
+      split: valid
+      task_kind: default
+      zero_actions: true
+      use_policy: false
+    - filename: dataset_lstm_actuator_zero_action_valid.hdf5
+      seed: 30
+      split: valid
+      task_kind: deployment
+      zero_actions: true
+      use_policy: false
+    - filename: dataset_lstm_actuator_policy_valid.hdf5
+      seed: 40
+      split: valid
+      task_kind: deployment
+      zero_actions: false
+      use_policy: true

@@ -664,6 +664,7 @@ class VanillaTrainer:
             "robot_name": env_cfg.get("robot_name"),
             "num_envs": env_cfg.get("num_envs"),
             "contact_mode": solver_cfg.get("contact_mode"),
+            "exclude_robot_self_collisions": solver_cfg.get("exclude_robot_self_collisions", False),
             "num_contacts_per_env": solver_cfg.get("num_contacts_per_env"),
             "algorithm": algo_cfg.get("name"),
             "seed": self.seed,

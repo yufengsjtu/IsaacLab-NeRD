@@ -18,6 +18,9 @@ from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_REPRESENTATION_TOKENS,
 )
 from isaaclab_neural.contacts.tensor_utils import filter_solver_active_contact_tokens
+from isaaclab_neural.physics import NerdSolverCfg
+from isaaclab_neural.solvers.factory import _valid_solver_args
+from isaaclab_neural.solvers.transformer_neural_solver import TransformerNeuralSolver
 
 PACKAGE_ROOT = Path(__file__).parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
@@ -68,6 +71,70 @@ def test_contact_token_solver_active_filter_uses_aligned_sidecar() -> None:
 
     torch.testing.assert_close(filtered[..., 0, :], tokens[..., 0, :])
     torch.testing.assert_close(filtered[..., 1:, :], torch.zeros_like(filtered[..., 1:, :]))
+
+
+def test_contact_token_filter_can_exclude_only_active_robot_self_collisions() -> None:
+    tokens = torch.zeros(1, 1, 5, 17)
+    tokens[..., :, 0] = 1.0
+    tokens[..., :, 4] = torch.arange(1.0, 6.0)
+    # Robot self-collision: dynamic counterpart with a known robot body slot.
+    tokens[..., 0, 2] = 3.0
+    tokens[..., 0, 3] = 1.0
+    # Foreign dynamic contact: dynamic counterpart without a robot body slot.
+    tokens[..., 1, 2] = -1.0
+    tokens[..., 1, 3] = 1.0
+    # Static contact.
+    tokens[..., 2, 2] = -1.0
+    # Inactive robot self-collision.
+    tokens[..., 3, 2] = 4.0
+    tokens[..., 3, 3] = 1.0
+    # Invalid robot self-collision.
+    tokens[..., 4, 0] = 0.0
+    tokens[..., 4, 2] = 5.0
+    tokens[..., 4, 3] = 1.0
+    solver_active = torch.tensor([[[True, True, True, False, True]]])
+    original = tokens.clone()
+
+    baseline = filter_solver_active_contact_tokens(
+        tokens,
+        contact_representation=CONTACT_REPRESENTATION_TOKENS,
+        solver_active=solver_active,
+    )
+    filtered = filter_solver_active_contact_tokens(
+        tokens,
+        contact_representation=CONTACT_REPRESENTATION_TOKENS,
+        solver_active=solver_active,
+        exclude_robot_self_collisions=True,
+    )
+
+    torch.testing.assert_close(baseline[..., :3, :], tokens[..., :3, :])
+    torch.testing.assert_close(filtered[..., 0, :], torch.zeros_like(filtered[..., 0, :]))
+    torch.testing.assert_close(filtered[..., 1:3, :], tokens[..., 1:3, :])
+    torch.testing.assert_close(filtered[..., 3:, :], torch.zeros_like(filtered[..., 3:, :]))
+    torch.testing.assert_close(tokens, original)
+
+
+def test_self_collision_exclusion_requires_contact_token_schema() -> None:
+    with pytest.raises(ValueError, match="contact_tokens"):
+        filter_solver_active_contact_tokens(
+            _native15_tokens(),
+            contact_representation=CONTACT_REPRESENTATION_RAW15,
+            exclude_robot_self_collisions=True,
+        )
+
+
+def test_self_collision_exclusion_is_backward_compatible_and_factory_visible() -> None:
+    legacy_cfg = NerdSolverCfg()
+    experiment_cfg = NerdSolverCfg(
+        contact_mode="newton_native",
+        contact_representation=CONTACT_REPRESENTATION_TOKENS,
+        contact_filter="solver_active",
+        exclude_robot_self_collisions=True,
+    )
+
+    assert legacy_cfg.exclude_robot_self_collisions is False
+    assert experiment_cfg.to_dict()["exclude_robot_self_collisions"] is True
+    assert "exclude_robot_self_collisions" in _valid_solver_args(TransformerNeuralSolver)
 
 
 def test_contact_token_solver_active_filter_requires_bool_aligned_sidecar() -> None:

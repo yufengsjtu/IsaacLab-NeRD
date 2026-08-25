@@ -75,6 +75,7 @@ class NeuralSolver(SolverBase):
         contact_adapter: NewtonContactAdapter | None = None,
         contact_representation: str = "flat",
         contact_filter: str = CONTACT_FILTER_NONE,
+        exclude_robot_self_collisions: bool = False,
         max_contact_tokens: int = 0,
     ):
         """
@@ -170,7 +171,15 @@ class NeuralSolver(SolverBase):
             raise ValueError(f"Unsupported contact_filter: {contact_filter!r}.")
         if contact_filter != CONTACT_FILTER_NONE and not is_contact_token_representation(contact_representation):
             raise ValueError("contact_filter requires a contact-token representation.")
+        if exclude_robot_self_collisions and (
+            contact_filter != CONTACT_FILTER_SOLVER_ACTIVE or contact_representation != CONTACT_REPRESENTATION_TOKENS
+        ):
+            raise ValueError(
+                "exclude_robot_self_collisions requires contact_filter='solver_active' "
+                "and contact_representation='contact_tokens'."
+            )
         self.contact_filter = contact_filter
+        self.exclude_robot_self_collisions = bool(exclude_robot_self_collisions)
         self.max_contact_tokens = int(max_contact_tokens)
         self.contact_adapter = contact_adapter
         if self.contact_mode == "newton_native" and self.contact_adapter is None:
@@ -519,6 +528,7 @@ class NeuralSolver(SolverBase):
                 model_inputs["contact_tokens"],
                 contact_representation=self.contact_representation,
                 solver_active=solver_active,
+                exclude_robot_self_collisions=self.exclude_robot_self_collisions,
             )
 
         # convert frame

@@ -20,6 +20,8 @@ from isaaclab_neural.contacts.contact_set_schema import (
     ACTIVE15_OWNER_POINT_SLICE,
     CONTACT_REPRESENTATION_TOKENS,
     CONTACT_TOKEN_DIM,
+    CONTACT_TOKEN_OTHER_BODY_SLOT_INDEX,
+    CONTACT_TOKEN_OTHER_DYNAMIC_INDEX,
     CONTACT_TOKEN_VALID_INDEX,
     is_native15_contact_representation,
 )
@@ -124,6 +126,7 @@ def filter_solver_active_contact_tokens(
     *,
     contact_representation: str,
     solver_active: torch.Tensor | None = None,
+    exclude_robot_self_collisions: bool = False,
 ) -> torch.Tensor:
     """Return tokens selected by Newton's strict solver-active decision."""
     if contact_tokens.shape[-1] != CONTACT_TOKEN_DIM:
@@ -142,7 +145,14 @@ def filter_solver_active_contact_tokens(
                 f"got {tuple(solver_active.shape)} and {tuple(contact_tokens.shape)}."
             )
         active = solver_active
+        if exclude_robot_self_collisions:
+            robot_self_collision = (contact_tokens[..., CONTACT_TOKEN_OTHER_DYNAMIC_INDEX] > 0.5) & (
+                contact_tokens[..., CONTACT_TOKEN_OTHER_BODY_SLOT_INDEX] >= 0
+            )
+            active = active & ~robot_self_collision
     elif is_native15_contact_representation(contact_representation):
+        if exclude_robot_self_collisions:
+            raise ValueError("exclude_robot_self_collisions requires contact_representation='contact_tokens'.")
         owner_point = contact_tokens[..., ACTIVE15_OWNER_POINT_SLICE]
         other_point = contact_tokens[..., ACTIVE15_OTHER_POINT_SLICE]
         owner_normal = contact_tokens[..., ACTIVE15_OWNER_NORMAL_SLICE]
