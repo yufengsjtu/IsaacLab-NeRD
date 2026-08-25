@@ -206,6 +206,7 @@ class NeuralSolver(SolverBase):
         self.orientation_prediction_parameterization = orientation_prediction_parameterization
 
         self._init_prediction()
+        self._configure_auxiliary_prediction_cache()
 
     def _build_dof_types(self):
         # compute information about the joint dofs
@@ -276,6 +277,27 @@ class NeuralSolver(SolverBase):
 
     def set_neural_solver_model(self, neural_solver_model):
         self.neural_model = neural_solver_model
+        self.neural_model.to(self.torch_device)
+        self._configure_auxiliary_prediction_cache()
+
+    def _configure_auxiliary_prediction_cache(self):
+        """Create the online force cache only when the neural head is enabled."""
+        predicts_forces = bool(
+            self.neural_model is not None and getattr(self.neural_model, "predict_body_net_contact_forces", False)
+        )
+        if predicts_forces:
+            model_num_bodies = getattr(self.neural_model, "num_bodies", None)
+            if model_num_bodies != self.num_contact_bodies_per_env:
+                raise ValueError(
+                    "Neural model force-head body count does not match solver metadata: "
+                    f"model={model_num_bodies}, solver={self.num_contact_bodies_per_env}."
+                )
+            self.predicted_body_net_contact_forces_b = torch.zeros(
+                (self.num_envs, self.num_contact_bodies_per_env, 3),
+                device=self.torch_device,
+            )
+        else:
+            self.predicted_body_net_contact_forces_b = None
 
     def train(self):
         self.neural_model.train()
@@ -317,6 +339,16 @@ class NeuralSolver(SolverBase):
     def _before_model_forward(self):
         pass
 
+    def _forward_neural_model(self, model_inputs):
+        """Predict state and update any enabled diagnostic auxiliary caches."""
+        if self.predicted_body_net_contact_forces_b is None:
+            return self.neural_model.forward(model_inputs, single_step=True)
+
+        model_output = self.neural_model.forward_with_aux(model_inputs, single_step=True)
+        predicted_forces = model_output.auxiliary_predictions["body_net_contact_forces_b"]
+        self.predicted_body_net_contact_forces_b.copy_(predicted_forces[:, -1])
+        return model_output.state_prediction
+
     def step(
         self,
         state_in: State,
@@ -347,7 +379,7 @@ class NeuralSolver(SolverBase):
             model_inputs = self.get_neural_model_inputs()
             # compute the prediction using neural model, shape (num_envs, 1, dim)
             with step_profile.section("model_forward"):
-                prediction = self.neural_model.forward(model_inputs, single_step=True)
+                prediction = self._forward_neural_model(model_inputs)
 
             # convert the prediction to next states
             cur_states = model_inputs["states"][:, -1, :]

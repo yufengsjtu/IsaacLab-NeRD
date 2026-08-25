@@ -25,6 +25,7 @@ INTEGER_DATASET_KEYS = {
     "contact_token_world_ids",
 }
 DatasetLoadMode = Literal["eager", "lazy"]
+STRUCTURED_DATASET_KEYS = {"contact_tokens", "body_net_contact_forces_w"}
 
 
 def _decode_attr(value: Any) -> Any:
@@ -86,6 +87,36 @@ def validate_contact_token_metadata(data_group: h5py.Group) -> None:
         raise ValueError(f"Contact-token identity fields must use integer dtypes: {invalid_dtypes}.")
 
 
+def validate_body_net_contact_force_metadata(data_group: h5py.Group) -> None:
+    """Reject missing or ambiguous per-body net contact-force labels."""
+    force_key = "body_net_contact_forces_w"
+    schema = _decode_attr(data_group.attrs.get("body_net_contact_force_schema", ""))
+    if force_key not in data_group and not schema:
+        return
+    if force_key not in data_group:
+        raise ValueError(f"Dataset declares body net contact-force labels but is missing field {force_key!r}.")
+    expected_attrs = {
+        "body_net_contact_force_schema": "per_primary_body_v1",
+        "body_net_contact_force_frame": "world",
+        "body_net_contact_force_units": "N",
+        "body_net_contact_force_timing": "post_solve_t_to_t_plus_1",
+    }
+    mismatched = {
+        name: _decode_attr(data_group.attrs.get(name, ""))
+        for name, expected in expected_attrs.items()
+        if _decode_attr(data_group.attrs.get(name, "")) != expected
+    }
+    if mismatched:
+        raise ValueError(f"Body net contact-force dataset has invalid metadata: {mismatched}.")
+    forces = cast(h5py.Dataset, data_group[force_key])
+    num_primary_bodies = int(data_group.attrs.get("num_primary_bodies", -1))
+    if forces.ndim != 4 or forces.shape[-1] != 3 or forces.shape[-2] != num_primary_bodies:
+        raise ValueError(
+            "Body net contact-force labels must have shape "
+            f"[trajectories, steps, {num_primary_bodies}, 3], got {forces.shape}."
+        )
+
+
 def _read_hdf5_metadata(
     hdf5_dataset_path: str | Path,
     *,
@@ -97,6 +128,7 @@ def _read_hdf5_metadata(
     with h5py.File(dataset_path, "r", swmr=True, libver="latest") as dataset_file:
         data_group = cast(h5py.Group, dataset_file["data"])
         validate_contact_token_metadata(data_group)
+        validate_body_net_contact_force_metadata(data_group)
         mode = _decode_attr(data_group.attrs["mode"])
         if mode not in DATASET_MODES:
             raise ValueError(f"Unsupported dataset mode: {mode!r}. Expected one of {DATASET_MODES}.")
@@ -228,6 +260,7 @@ class BatchTransitionDataset:
         self.device = device
         self.traj_lengths: np.ndarray | None = None
         self.dataset: dict[str, torch.Tensor] = {}
+        self.data_keys: list[str] = []
         self.dataset_length = 0
 
         self.load_dataset(hdf5_dataset_path)
@@ -239,6 +272,7 @@ class BatchTransitionDataset:
         with h5py.File(dataset_path, "r", swmr=True, libver="latest") as dataset_file:
             data_group = cast(h5py.Group, dataset_file["data"])
             validate_contact_token_metadata(data_group)
+            validate_body_net_contact_force_metadata(data_group)
             mode = _decode_attr(data_group.attrs["mode"])
             if mode not in DATASET_MODES:
                 raise ValueError(f"Unsupported dataset mode: {mode!r}. Expected one of {DATASET_MODES}.")
@@ -246,6 +280,7 @@ class BatchTransitionDataset:
             total_transitions = int(cast(Any, data_group.attrs["total_transitions"]))
             self.dataset_length = min(self.max_capacity, total_transitions) // self.batch_size
             self.dataset = {}
+            self.data_keys = [key for key in data_group.keys() if key != "traj_lengths"]
 
             if mode == "trajectory":
                 self.traj_lengths = None
@@ -257,12 +292,12 @@ class BatchTransitionDataset:
 
                 data = _read_dataset_array(data_group, key)
                 usable = self.dataset_length * self.batch_size
-                if key == "contact_tokens" and data.ndim >= 4:
-                    # Preserve ``[..., K, 17]`` for set encoding.
-                    token_shape = data.shape[-2:]
-                    flat = data.reshape(-1, *token_shape)[:usable]
+                if key in STRUCTURED_DATASET_KEYS and data.ndim >= 4:
+                    # Preserve set/body axes for structured contact fields.
+                    tail_shape = data.shape[-2:]
+                    flat = data.reshape(-1, *tail_shape)[:usable]
                     self.dataset[key] = _torch_tensor(
-                        flat.reshape(self.dataset_length, self.batch_size, *token_shape),
+                        flat.reshape(self.dataset_length, self.batch_size, *tail_shape),
                         device=self.device,
                     )
                 else:
@@ -340,7 +375,7 @@ class LazyBatchTransitionDataset:
                 flat_start,
                 flat_start + self.batch_size,
                 self.num_transitions_per_trajectory,
-                preserve_tail_shape=key == "contact_tokens",
+                preserve_tail_shape=key in STRUCTURED_DATASET_KEYS,
             )
         else:
             rows = [
@@ -349,7 +384,7 @@ class LazyBatchTransitionDataset:
                     int(batch_index) * self.batch_size + batch_slot,
                     int(batch_index) * self.batch_size + batch_slot + 1,
                     self.num_transitions_per_trajectory,
-                    preserve_tail_shape=key == "contact_tokens",
+                    preserve_tail_shape=key in STRUCTURED_DATASET_KEYS,
                 )[0]
                 for batch_slot, batch_index in enumerate(batch_indices)
             ]
@@ -414,6 +449,7 @@ class TrajectoryDataset(Dataset):
         self.world_size = world_size
         self.is_rank_sharded = world_size > 1
         self.dataset: dict[str, np.ndarray] = {}
+        self.data_keys: list[str] = []
         self.trajectory_context: dict[str, np.ndarray] = {}
         self.traj_lengths: np.ndarray = np.array([], dtype="int32")
         self.global_trajectory_indices = np.array([], dtype=np.int64)
@@ -429,6 +465,7 @@ class TrajectoryDataset(Dataset):
         with h5py.File(_resolve_dataset_path(hdf5_dataset_path), "r", swmr=True, libver="latest") as dataset_file:
             data_group = cast(h5py.Group, dataset_file["data"])
             validate_contact_token_metadata(data_group)
+            validate_body_net_contact_force_metadata(data_group)
             mode = _decode_attr(data_group.attrs["mode"])
             if mode != "trajectory":
                 raise ValueError(f"TrajectoryDataset requires dataset mode 'trajectory', got {mode!r}.")
@@ -448,6 +485,7 @@ class TrajectoryDataset(Dataset):
             trajectory_selection = slice(self.rank, num_trajectories, self.world_size)
 
             self.dataset = {}
+            self.data_keys = [key for key in data_group.keys() if key != "traj_lengths"]
             self.trajectory_context = {}
             traj_lengths = None
             for key in data_group.keys():
@@ -456,8 +494,8 @@ class TrajectoryDataset(Dataset):
                     continue
 
                 data = _read_dataset_array(data_group, key, trajectory_selection)
-                # Keep contact token set axes ``[..., K, 17]``; flatten only rank-3 fields.
-                if key == "contact_tokens" and data.ndim >= 4:
+                # Keep structured contact set/body axes; flatten only ordinary rank-3 fields.
+                if key in STRUCTURED_DATASET_KEYS and data.ndim >= 4:
                     self.dataset[key] = data
                 else:
                     self.dataset[key] = data.reshape(data.shape[0], data.shape[1], -1)

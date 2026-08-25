@@ -163,7 +163,12 @@ def main(env_cfg, agent_cfg=None) -> None:
             env = gym.make(args_cli.task, cfg=env_cfg, device=args_cli.device).unwrapped
             env.reset()
         terrain_context = build_terrain_context(env_cfg, args_cli.seed)
-        adapter = DataGenerationAdapter(env, solver_cfg)
+        adapter = DataGenerationAdapter(
+            env,
+            solver_cfg,
+            record_body_net_contact_forces=args_cli.record_body_net_contact_forces,
+        )
+        body_net_contact_force_body_names = adapter.body_net_contact_force_body_names or None
         sampler_cls, sampler_kwargs = _sampler_spec(
             args_cli.task,
             env_name,
@@ -247,6 +252,7 @@ def main(env_cfg, agent_cfg=None) -> None:
                     rollouts,
                     env_name,
                     terrain_context=terrain_context,
+                    body_net_contact_force_body_names=body_net_contact_force_body_names,
                 )
                 written_transitions = rollouts["states"].shape[0] * rollouts["states"].shape[1]
                 total_transitions += written_transitions
@@ -264,6 +270,7 @@ def main(env_cfg, agent_cfg=None) -> None:
                 rollouts,
                 env_name,
                 terrain_context=terrain_context,
+                body_net_contact_force_body_names=body_net_contact_force_body_names,
             )
         truncation_summary = adapter.contact_truncation_summary()
         if truncation_summary is not None:

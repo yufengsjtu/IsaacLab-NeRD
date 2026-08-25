@@ -83,6 +83,11 @@ class ActionTrajectorySampler:
                 dtype=torch.long,
                 device=self.data_device,
             )
+            if getattr(self.adapter, "body_net_contact_force_recorder", None) is not None:
+                buffers["body_net_contact_forces_w"] = torch.empty(
+                    (num_envs, trajectory_length, self.adapter.num_primary_bodies, 3),
+                    device=self.data_device,
+                )
         else:
             buffers["contacts"] = {
                 "contact_masks": torch.empty(
@@ -187,6 +192,11 @@ class ActionTrajectorySampler:
         inputs = self.adapter.raw_neural_inputs()
         self._copy_input(buffers["next_states"][:, step], inputs["states"])
         self._copy_input(buffers["joint_f"][:, step], inputs["joint_f"])
+        if "body_net_contact_forces_w" in buffers:
+            self._copy_input(
+                buffers["body_net_contact_forces_w"][:, step],
+                self.adapter.body_net_contact_forces_w(),
+            )
         if "actions" in buffers:
             buffers["actions"][:, step].copy_(action.to(self.data_device))
 

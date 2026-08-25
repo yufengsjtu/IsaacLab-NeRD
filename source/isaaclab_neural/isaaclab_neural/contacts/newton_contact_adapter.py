@@ -82,6 +82,22 @@ class NewtonContactAdapter:
         if not torch.all(primary_counts == primary_counts[0]):
             raise ValueError("NewtonContactAdapter requires the same primary body count in every environment.")
         self.num_primary_bodies_per_env = int(primary_counts[0].item())
+        self.primary_body_ids_by_world = torch.stack(
+            [
+                torch.nonzero(
+                    self.primary_body_mask
+                    & (
+                        self.body_world_torch == world_id
+                        if self.body_world_torch is not None
+                        else (
+                            torch.arange(int(model.body_count), device=self.device) // self.bodies_per_env == world_id
+                        )
+                    ),
+                    as_tuple=False,
+                ).reshape(-1)
+                for world_id in range(self.num_envs)
+            ]
+        )
         body_local_ids = np.empty(int(model.body_count), dtype=np.int64)
         if self.body_world is None:
             body_local_ids[:] = np.arange(int(model.body_count)) % self.bodies_per_env
@@ -173,6 +189,7 @@ class NewtonContactAdapter:
                 num_envs=self.num_envs,
                 max_contact_tokens=self.max_contact_tokens,
                 device=self.device,
+                primary_body_ids_by_world=self.primary_body_ids_by_world,
             )
 
     def reset_buffers(self) -> None:

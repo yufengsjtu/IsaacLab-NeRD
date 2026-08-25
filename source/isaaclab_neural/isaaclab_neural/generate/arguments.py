@@ -83,6 +83,14 @@ def get_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_CONTACT_TOKENS,
         help="Directed contact token capacity when --contact-representation=contact_tokens.",
     )
+    parser.add_argument(
+        "--record-body-net-contact-forces",
+        action="store_true",
+        help=(
+            "Record post-solve resultant linear contact forces for every primary robot body, "
+            "including normal and tangential/friction components."
+        ),
+    )
     parser.add_argument("--states-frame", choices=["world", "body", "body_translation_only"], default="body")
     parser.add_argument("--anchor-frame-step", choices=["first", "last", "every"], default="every")
     parser.add_argument("--states-embedding-type", choices=["identical", "sinusoidal"], default="identical")

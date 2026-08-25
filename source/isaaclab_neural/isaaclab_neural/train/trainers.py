@@ -36,12 +36,19 @@ from isaaclab_neural.data import (
 )
 from isaaclab_neural.eval.training_evaluator import TrainingRolloutEvaluator
 from isaaclab_neural.models.models import ModelMixedInput
+from isaaclab_neural.utils import torch_utils
 from isaaclab_neural.utils.checkpoint import reconstruct_model_from_checkpoint, save_checkpoint
 from isaaclab_neural.utils.logger import Logger
 from isaaclab_neural.utils.python_utils import format_dict, print_info, print_ok, print_warning, set_random_seed
 from isaaclab_neural.utils.running_mean_std import RunningMeanStd
 from isaaclab_neural.utils.time_report import TimeProfiler, TimeReport
 from isaaclab_neural.utils.torch_utils import grad_norm, num_params_torch_model
+
+BODY_FORCE_LABEL_KEY = "body_net_contact_forces_w"
+BODY_FORCE_TARGET_KEY = "body_net_contact_forces_b"
+# A body is considered in active contact when its target net-force magnitude
+# exceeds this value [N]. Recipes may override it under algorithm.loss.
+DEFAULT_ACTIVE_CONTACT_FORCE_THRESHOLD_N = 1.0
 
 NON_MODEL_DATA_KEYS = {
     "contact_token_body_ids",
@@ -55,6 +62,72 @@ NON_MODEL_DATA_KEYS = {
     "terrain_type",
     "env_origin",
 }
+
+
+def transform_body_net_contact_forces_to_current_root_frame(
+    forces_w: torch.Tensor,
+    root_body_q: torch.Tensor,
+) -> torch.Tensor:
+    """Rotate world-frame per-body resultant forces into the current root-body axes.
+
+    Args:
+        forces_w: Resultant linear contact forces [N], including normal and
+            tangential/friction components but excluding contact moments and
+            torques. Shape is ``[B, T, num_bodies, 3]``.
+        root_body_q: Current root poses, shape ``[B, T, 7]``, with quaternion
+            convention matching the solver's body-frame preprocessing.
+
+    Returns:
+        Forces in current root-body axes [N], shape ``[B, T, num_bodies, 3]``.
+    """
+    if forces_w.ndim != 4 or forces_w.shape[-1] != 3:
+        raise ValueError(f"{BODY_FORCE_LABEL_KEY} must have shape [B, T, num_bodies, 3], got {tuple(forces_w.shape)}.")
+    if root_body_q.shape != (*forces_w.shape[:2], 7):
+        raise ValueError(
+            f"root_body_q must have shape [B, T, 7] matching force labels, got {tuple(root_body_q.shape)}."
+        )
+    body_frame_quat = root_body_q[..., 3:7].unsqueeze(-2).expand(*forces_w.shape[:-1], 4)
+    return torch_utils.quat_rotate_inverse(
+        body_frame_quat.reshape(-1, 4),
+        forces_w.reshape(-1, 3),
+    ).view_as(forces_w)
+
+
+@torch.no_grad()
+def body_net_contact_force_metrics(
+    prediction_b: torch.Tensor,
+    target_b: torch.Tensor,
+    active_contact_threshold_n: float = DEFAULT_ACTIVE_CONTACT_FORCE_THRESHOLD_N,
+) -> dict[str, float]:
+    """Compute physical-unit metrics for per-body resultant-force predictions.
+
+    Inputs are linear contact forces [N] containing normal and
+    tangential/friction components, with no contact moments or torques.
+    """
+    error_norm_sq = (prediction_b - target_b).square().sum(dim=-1)
+    per_body_rmse = error_norm_sq.mean(dim=(0, 1)).sqrt()
+    active_mask = target_b.norm(dim=-1) > active_contact_threshold_n
+    active_rmse = error_norm_sq[active_mask].mean().sqrt() if active_mask.any() else error_norm_sq.new_zeros(())
+    support_error = (prediction_b.sum(dim=-2) - target_b.sum(dim=-2)).square().sum(dim=-1)
+    all_body_rmse = error_norm_sq.mean().sqrt()
+    metrics = {
+        "body_force_RMSE_N": float(all_body_rmse.cpu()),
+        # Rotation preserves vector error norms, so this is also the error after
+        # reconstructing the ContactSensor world-frame output.
+        "body_force_contact_sensor_reconstruction_RMSE_N": float(all_body_rmse.cpu()),
+        "body_force_active_RMSE_N": float(active_rmse.cpu()),
+        "body_force_per_body_RMSE_mean_N": float(per_body_rmse.mean().cpu()),
+        "body_force_per_body_RMSE_max_N": float(per_body_rmse.max().cpu()),
+        "body_force_support_consistency_RMSE_N": float(support_error.mean().sqrt().cpu()),
+        "body_force_active_fraction": float(active_mask.float().mean().cpu()),
+    }
+    metrics.update(
+        {
+            f"body_force_RMSE_body_{body_index:02d}_N": float(value.cpu())
+            for body_index, value in enumerate(per_body_rmse)
+        }
+    )
+    return metrics
 
 
 def _resolve_auto_bool(value: bool | str | None, *, automatic: bool) -> bool:
@@ -190,6 +263,24 @@ class VanillaTrainer:
             print("# Model Parameters = ", num_params_torch_model(self.neural_model))
         self.neural_solver.set_neural_solver_model(self.neural_model)
 
+        force_head_cfg = cfg["network"].get("body_net_contact_force_head", {})
+        self.force_head_enabled = bool(getattr(self.neural_model, "predict_body_net_contact_forces", False))
+        force_loss_cfg = algo_cfg.get("loss", {}).get("body_net_contact_force", {})
+        self.force_loss_weight = float(force_loss_cfg.get("weight", force_head_cfg.get("loss_weight", 1.0)))
+        self.active_contact_force_threshold_n = float(
+            force_loss_cfg.get(
+                "active_contact_threshold_n",
+                force_head_cfg.get(
+                    "active_contact_threshold_n",
+                    DEFAULT_ACTIVE_CONTACT_FORCE_THRESHOLD_N,
+                ),
+            )
+        )
+        if self.force_loss_weight < 0.0:
+            raise ValueError("Body net contact-force loss weight must be non-negative.")
+        if self.active_contact_force_threshold_n < 0.0:
+            raise ValueError("Active-contact force threshold [N] must be non-negative.")
+
         self.batch_size = int(algo_cfg["batch_size"])
         self.num_valid_batches = int(algo_cfg.get("num_valid_batches", 50))
         dataset_cfg = algo_cfg["dataset"]
@@ -232,6 +323,7 @@ class VanillaTrainer:
         self.collate_fn = None
         self.train_dataset_rank_sharded = False
         self.get_datasets(algo_cfg["dataset"].get("train_dataset_path"), algo_cfg["dataset"].get("valid_datasets"))
+        self._validate_force_label_datasets()
 
         if cli_cfg["train"]:
             self.num_epochs = int(algo_cfg["num_epochs"])
@@ -240,16 +332,23 @@ class VanillaTrainer:
             self.best_valid_losses = {}
             self.best_eval_error = np.inf
 
+            force_rms_missing = (
+                self.force_head_enabled and getattr(self.neural_model, "body_net_contact_force_rms", None) is None
+            )
+            checkpoint_loss_weights_missing = self._checkpoint is not None and "loss_weights" not in self._checkpoint
             if (
                 algo_cfg.get("update_dataset_statistics", True)
                 or self._checkpoint is None
-                or not hasattr(self.neural_model, "input_rms")
-                or not hasattr(self.neural_model, "output_rms")
-                or not hasattr(self, "loss_weights")
+                or getattr(self.neural_model, "input_rms", None) is None
+                or getattr(self.neural_model, "output_rms", None) is None
+                or force_rms_missing
+                or checkpoint_loss_weights_missing
             ):
                 self.compute_or_sync_dataset_statistics(self.train_dataset)
                 self.neural_model_unwrapped.set_input_rms(self.dataset_rms)
                 self.neural_model_unwrapped.set_output_rms(self.dataset_rms["prediction_target"])
+                if self.force_head_enabled:
+                    self.neural_model_unwrapped.set_body_net_contact_force_rms(self.dataset_rms[BODY_FORCE_TARGET_KEY])
                 self.loss_weights = (
                     1.0 / torch.sqrt(self.dataset_rms["relative_states"].var + 1e-5)
                     if algo_cfg.get("weighted_loss", True)
@@ -257,6 +356,7 @@ class VanillaTrainer:
                 )
             else:
                 print_info("Using dataset statistics from checkpoint...")
+                self.loss_weights = self._checkpoint["loss_weights"].to(self.device)
 
             self._wrap_distributed_model()
             self._init_optimizer(algo_cfg)
@@ -404,6 +504,8 @@ class VanillaTrainer:
         network_cfg = self.cfg.get("network", {})
         transformer_cfg = network_cfg.get("transformer", {})
         model_cfg = network_cfg.get("model", {})
+        force_head_cfg = network_cfg.get("body_net_contact_force_head", {})
+        force_loss_cfg = algo_cfg.get("loss", {}).get("body_net_contact_force", {})
         return {
             "env_name": env_cfg.get("env_name"),
             "robot_name": env_cfg.get("robot_name"),
@@ -427,6 +529,29 @@ class VanillaTrainer:
             "transformer_n_head": transformer_cfg.get("n_head"),
             "transformer_n_embd": transformer_cfg.get("n_embd"),
             "model_mlp_layer_sizes": model_cfg.get("mlp", {}).get("layer_sizes"),
+            "body_net_contact_force_head_enabled": getattr(
+                self,
+                "force_head_enabled",
+                bool(force_head_cfg.get("enabled", False)),
+            ),
+            "body_net_contact_force_loss_weight": getattr(
+                self,
+                "force_loss_weight",
+                float(force_loss_cfg.get("weight", force_head_cfg.get("loss_weight", 1.0))),
+            ),
+            "body_net_contact_force_active_threshold_n": getattr(
+                self,
+                "active_contact_force_threshold_n",
+                float(
+                    force_loss_cfg.get(
+                        "active_contact_threshold_n",
+                        force_head_cfg.get(
+                            "active_contact_threshold_n",
+                            DEFAULT_ACTIVE_CONTACT_FORCE_THRESHOLD_N,
+                        ),
+                    )
+                ),
+            ),
         }
 
     def _init_evaluator(self, algo_cfg: dict[str, Any], cli_cfg: dict[str, Any]) -> None:
@@ -520,6 +645,22 @@ class VanillaTrainer:
                 )
         self.batch_size = 1
         self.collate_fn = collate_fn_BatchTransitionDataset
+
+    def _validate_force_label_datasets(self) -> None:
+        """Require force labels in every dataset when the auxiliary head is enabled."""
+        if not self.force_head_enabled:
+            return
+        datasets = {"train": self.train_dataset, **self.valid_datasets}
+        missing = [
+            name
+            for name, dataset in datasets.items()
+            if dataset is not None and BODY_FORCE_LABEL_KEY not in getattr(dataset, "data_keys", ())
+        ]
+        if missing:
+            raise ValueError(
+                f"Enabled body_net_contact_force_head requires {BODY_FORCE_LABEL_KEY!r} labels; "
+                f"missing from datasets: {missing}."
+            )
 
     def _make_dataloader(
         self,
@@ -662,6 +803,8 @@ class VanillaTrainer:
     def preprocess_data_batch(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         for key in NON_MODEL_DATA_KEYS.intersection(data):
             data.pop(key)
+        if not self.force_head_enabled:
+            data.pop(BODY_FORCE_LABEL_KEY, None)
         for key, value in data.items():
             data[key] = value.to(self.device, non_blocking=self.non_blocking_data_transfer)
         if "contact_masks" in data:
@@ -672,6 +815,20 @@ class VanillaTrainer:
                 data["contact_thicknesses_0"],
                 data["contact_thicknesses_1"],
             )
+        if self.force_head_enabled:
+            if BODY_FORCE_LABEL_KEY not in data:
+                raise ValueError(f"Enabled body_net_contact_force_head requires {BODY_FORCE_LABEL_KEY!r} labels.")
+            force_target = transform_body_net_contact_forces_to_current_root_frame(
+                data.pop(BODY_FORCE_LABEL_KEY),
+                data["root_body_q"],
+            )
+            expected_num_bodies = self.neural_model_unwrapped.num_bodies
+            if force_target.shape[-2] != expected_num_bodies:
+                raise ValueError(
+                    f"{BODY_FORCE_LABEL_KEY} contains {force_target.shape[-2]} bodies, "
+                    f"but the model force head expects {expected_num_bodies}."
+                )
+            data[BODY_FORCE_TARGET_KEY] = force_target
         self.neural_solver.process_neural_model_inputs(data)
         data["prediction_target"] = self.neural_solver.convert_next_states_to_prediction(
             states=data["states"],
@@ -684,8 +841,25 @@ class VanillaTrainer:
         if self.neural_model_unwrapped.is_rnn:
             self.neural_model_unwrapped.init_rnn(self.batch_size)
         prediction_target = data["prediction_target"]
-        prediction = self._forward_model(data, train)
+        model_output = self._forward_model(data, train, return_aux=self.force_head_enabled)
+        if self.force_head_enabled:
+            prediction = model_output.state_prediction
+        else:
+            prediction = model_output
         loss = self.loss_func(prediction * self.loss_weights, prediction_target * self.loss_weights)
+        force_prediction = None
+        force_target = None
+        force_loss = None
+        if self.force_head_enabled:
+            force_prediction = model_output.auxiliary_predictions[BODY_FORCE_TARGET_KEY]
+            force_target = data[BODY_FORCE_TARGET_KEY]
+            force_rms = self.neural_model_unwrapped.body_net_contact_force_rms
+            if force_rms is None:
+                raise RuntimeError("Force-head training requires body net contact-force RMS statistics.")
+            normalized_prediction = force_rms.normalize(force_prediction)
+            normalized_target = force_rms.normalize(force_target)
+            force_loss = torch.nn.functional.mse_loss(normalized_prediction, normalized_target)
+            loss = loss + self.force_loss_weight * force_loss
 
         with torch.no_grad():
             predicted_next_states = self.neural_solver.convert_prediction_to_next_states(
@@ -715,6 +889,15 @@ class VanillaTrainer:
                 .cpu()
                 .item(),
             }
+            if force_prediction is not None and force_target is not None and force_loss is not None:
+                loss_itemized["body_force_normalized_MSE"] = float(force_loss.detach().cpu())
+                loss_itemized.update(
+                    body_net_contact_force_metrics(
+                        force_prediction,
+                        force_target,
+                        self.active_contact_force_threshold_n,
+                    )
+                )
         return loss, loss_itemized
 
     def one_epoch(

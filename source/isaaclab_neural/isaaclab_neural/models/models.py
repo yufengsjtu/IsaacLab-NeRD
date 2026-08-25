@@ -7,6 +7,8 @@
 #
 # Licensed under the NVIDIA Source Code License [see LICENSE.md for details].
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 
@@ -21,6 +23,17 @@ from isaaclab_neural.models.contact_set_model import ContactSetEncoderBlock
 from isaaclab_neural.models.model_kan import KAN
 from isaaclab_neural.models.model_transformer import GPT, GPTConfig
 from isaaclab_neural.models.shared_per_body_contact_encoder import SharedPerBodyContactEncoder
+
+
+@dataclass
+class ModelMixedInputOutput:
+    """Structured state and auxiliary predictions from :class:`ModelMixedInput`."""
+
+    state_prediction: torch.Tensor
+    """Predicted state transition, shape ``[B, T, state_prediction_dim]``."""
+
+    auxiliary_predictions: dict[str, torch.Tensor]
+    """Auxiliary predictions keyed by target name."""
 
 
 class MLPDeterministic(nn.Module):
@@ -130,6 +143,21 @@ class ModelMixedInput(nn.Module):
 
         if self.model is None:
             self.model = MLPDeterministic((self.feature_dim,), output_dim, network_cfg["model"], device=device)
+
+        force_head_cfg = network_cfg.get("body_net_contact_force_head", {})
+        self.predict_body_net_contact_forces = bool(force_head_cfg.get("enabled", False))
+        self.body_net_contact_force_rms = None
+        self.num_bodies = int(num_bodies) if num_bodies is not None else None
+        if self.predict_body_net_contact_forces:
+            if self.num_bodies is None:
+                raise ValueError("body_net_contact_force_head requires num_bodies.")
+            head_network_cfg = force_head_cfg.get("model", network_cfg["model"])
+            self.body_net_contact_force_head = MLPDeterministic(
+                (self.feature_dim,),
+                self.num_bodies * 3,
+                head_network_cfg,
+                device=device,
+            )
 
         self.output_tanh = network_cfg.get("output_tanh", False)
 
@@ -248,6 +276,14 @@ class ModelMixedInput(nn.Module):
     def set_output_rms(self, output_rms):
         self.output_rms = output_rms
 
+    def set_body_net_contact_force_rms(self, force_rms):
+        """Set RMS statistics for per-body resultant linear contact forces [N].
+
+        These forces include normal and tangential/friction components and
+        exclude contact moments and torques.
+        """
+        self.body_net_contact_force_rms = force_rms
+
     def get_rms_info(self):
         """Return RMS keys and shapes for checkpoint reconstruction."""
         info = {}
@@ -255,6 +291,8 @@ class ModelMixedInput(nn.Module):
             info["input_rms"] = {k: tuple(v.mean.shape) for k, v in self.input_rms.items()}
         if self.output_rms is not None:
             info["output_rms"] = tuple(self.output_rms.mean.shape)
+        if self.body_net_contact_force_rms is not None:
+            info["body_net_contact_force_rms"] = tuple(self.body_net_contact_force_rms.mean.shape)
         return info
 
     def extract_input_features(self, input_dict):  # input can be in shape (B, input_dim) or (B, T, input_dim)
@@ -277,21 +315,8 @@ class ModelMixedInput(nn.Module):
         features = torch.cat(features, dim=-1)
         return features
 
-    def forward(self, input_dict, single_step=False, deterministic=False, inject_noise=False):
-        """
-        Forward pass through the model.
-
-        Args:
-            input_dict: Dictionary of input tensors, each shape (B, T, input_dim)
-            single_step: If True, returns only the last timestep prediction (B, 1, output_dim)
-                        If False, returns all timesteps (B, T, output_dim)
-            deterministic: Whether to use deterministic mode (unused in current implementation)
-            inject_noise: If True, adds Gaussian noise to inputs for data augmentation
-
-        Returns:
-            Tensor of shape (B, 1, output_dim) if single_step=True, else (B, T, output_dim)
-        """
-
+    def _extract_trunk_features(self, input_dict, inject_noise=False):
+        """Preprocess inputs and run the shared encoder and temporal trunk."""
         if self.normalize_input:
             for obs_key in self.input_rms.keys():
                 if obs_key == "contact_tokens":
@@ -338,6 +363,10 @@ class ModelMixedInput(nn.Module):
         if self.is_transformer:
             features = self.transformer_model(features)  # (B, T, transform_embed_dim)
 
+        return features
+
+    def _decode_state(self, features, deterministic=False):
+        """Decode the state prediction from shared trunk features."""
         output = self.model(features, deterministic=deterministic)
 
         if self.output_tanh:
@@ -346,10 +375,78 @@ class ModelMixedInput(nn.Module):
         if self.normalize_output:
             output = self.output_rms.normalize(output, un_norm=True)
 
+        return output
+
+    def forward(
+        self,
+        input_dict,
+        single_step=False,
+        deterministic=False,
+        inject_noise=False,
+        return_aux=False,
+    ):
+        """
+        Forward pass through the model.
+
+        Args:
+            input_dict: Dictionary of input tensors, each shape (B, T, input_dim)
+            single_step: If True, returns only the last timestep prediction (B, 1, output_dim)
+                        If False, returns all timesteps (B, T, output_dim)
+            deterministic: Whether to use deterministic mode (unused in current implementation)
+            inject_noise: If True, adds Gaussian noise to inputs for data augmentation
+            return_aux: If True, returns state and enabled auxiliary predictions.
+
+        Returns:
+            State tensor by default, or :class:`ModelMixedInputOutput` when
+            ``return_aux`` is True.
+        """
+
+        if return_aux:
+            return self.forward_with_aux(
+                input_dict,
+                single_step=single_step,
+                deterministic=deterministic,
+                inject_noise=inject_noise,
+            )
+
+        features = self._extract_trunk_features(input_dict, inject_noise=inject_noise)
+        output = self._decode_state(features, deterministic=deterministic)
+
         if single_step:
             output = output[:, -1:, :]
 
         return output
+
+    def forward_with_aux(self, input_dict, single_step=False, deterministic=False, inject_noise=False):
+        """Return state and enabled auxiliary predictions from one trunk pass."""
+        features = self._extract_trunk_features(input_dict, inject_noise=inject_noise)
+        state_prediction = self._decode_state(features, deterministic=deterministic)
+        auxiliary_predictions = {}
+        if self.predict_body_net_contact_forces:
+            force_prediction = self.body_net_contact_force_head(
+                features,
+                deterministic=deterministic,
+            )
+            force_prediction = force_prediction.unflatten(-1, (self.num_bodies, 3))
+            if self.normalize_output:
+                if self.body_net_contact_force_rms is None:
+                    raise RuntimeError("Normalized force-head output requires body net contact-force RMS statistics.")
+                force_prediction = self.body_net_contact_force_rms.normalize(
+                    force_prediction,
+                    un_norm=True,
+                )
+            auxiliary_predictions["body_net_contact_forces_b"] = force_prediction
+
+        if single_step:
+            state_prediction = state_prediction[:, -1:, :]
+            auxiliary_predictions = {
+                name: prediction[:, -1:, ...] for name, prediction in auxiliary_predictions.items()
+            }
+
+        return ModelMixedInputOutput(
+            state_prediction=state_prediction,
+            auxiliary_predictions=auxiliary_predictions,
+        )
 
     def get_rnn_hidden_states(self):
         assert self.rnn is not None
@@ -366,7 +463,11 @@ class ModelMixedInput(nn.Module):
             encoder.to(device)
         if self.rnn is not None:
             self.rnn.to(device)
+        if self.transformer_model is not None:
+            self.transformer_model.to(device)
         self.model.to(device)
+        if self.predict_body_net_contact_forces:
+            self.body_net_contact_force_head.to(device)
 
     def init_rnn(self, batch_size):
         if self.is_rnn:

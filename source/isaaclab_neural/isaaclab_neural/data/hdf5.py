@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,6 +28,7 @@ def write_rollouts_to_hdf5(
     rollouts: Mapping,
     env_name: str,
     terrain_context: Mapping[str, Any] | None = None,
+    body_net_contact_force_body_names: Sequence[str] | None = None,
 ) -> None:
     """Serialize rollout tensors to a NeRD HDF5 trajectory dataset.
 
@@ -37,6 +38,7 @@ def write_rollouts_to_hdf5(
             ``joint_f``, and a nested ``contacts`` dictionary.
         env_name: Environment name stored in dataset metadata.
         terrain_context: Optional deterministic terrain provenance.
+        body_net_contact_force_body_names: Primary body names in force-label slot order.
     """
     dataset_path = Path(dataset_path).expanduser()
     dataset_path.parent.mkdir(parents=True, exist_ok=True)
@@ -60,6 +62,7 @@ def write_rollouts_to_hdf5(
         data_group.attrs["env"] = env_name
         data_group.attrs["mode"] = "trajectory"
         _update_metadata(data_group)
+        _write_body_net_contact_force_body_names(data_group, body_net_contact_force_body_names)
 
 
 def append_rollouts_to_hdf5(
@@ -67,6 +70,7 @@ def append_rollouts_to_hdf5(
     rollouts: Mapping,
     env_name: str,
     terrain_context: Mapping[str, Any] | None = None,
+    body_net_contact_force_body_names: Sequence[str] | None = None,
 ) -> None:
     """Append rollout tensors to a NeRD HDF5 trajectory dataset.
 
@@ -104,11 +108,13 @@ def append_rollouts_to_hdf5(
             data_group.attrs["env"] = env_name
             data_group.attrs["mode"] = "trajectory"
         else:
+            _validate_body_net_contact_force_body_names(data_group, body_net_contact_force_body_names)
             trajectory_group = (
                 cast(h5py.Group, dataset_file["context"]["trajectories"]) if "context" in dataset_file else None
             )
             _append_arrays_atomically(data_group, arrays, trajectory_group, trajectory_context)
         _update_metadata(data_group)
+        _write_body_net_contact_force_body_names(data_group, body_net_contact_force_body_names)
 
 
 def _flatten_rollouts(rollouts: Mapping) -> dict[str, Any]:
@@ -224,6 +230,19 @@ def _validate_rollout_arrays(arrays: Mapping[str, Any]) -> None:
         if name in arrays and not np.issubdtype(arrays[name].dtype, np.integer):
             raise ValueError(f"Rollout field {name!r} must use an integer dtype, got {arrays[name].dtype}.")
 
+    force_key = "body_net_contact_forces_w"
+    if force_key in arrays:
+        if "contact_tokens" not in arrays:
+            raise ValueError(f"Rollout field {force_key!r} is only supported with contact_tokens.")
+        forces = arrays[force_key]
+        if forces.ndim != 4 or forces.shape[-1] != 3 or forces.shape[-2] <= 0:
+            raise ValueError(
+                f"Rollout field {force_key!r} must have shape "
+                f"[trajectories, steps, num_primary_bodies, 3], got {forces.shape}."
+            )
+        if not np.issubdtype(forces.dtype, np.floating):
+            raise ValueError(f"Rollout field {force_key!r} must use a floating dtype, got {forces.dtype}.")
+
     states = arrays["states"]
     if states.ndim < 3:
         raise ValueError(f"states must have shape [trajectories, steps, features], got {states.shape}.")
@@ -260,6 +279,20 @@ def _validate_append_target(
                 "Cannot append contact tokens unless contact_token_frame='world_v1' and "
                 "contact_identity_schema='world_owner_v1'."
             )
+    if "body_net_contact_forces_w" in arrays:
+        expected_attrs = {
+            "body_net_contact_force_schema": "per_primary_body_v1",
+            "body_net_contact_force_frame": "world",
+            "body_net_contact_force_units": "N",
+            "body_net_contact_force_timing": "post_solve_t_to_t_plus_1",
+        }
+        mismatched = {
+            name: data_group.attrs.get(name)
+            for name, expected in expected_attrs.items()
+            if data_group.attrs.get(name) != expected
+        }
+        if mismatched:
+            raise ValueError(f"Cannot append body net contact-force labels with incompatible metadata: {mismatched}.")
     if set(data_group.keys()) != set(arrays):
         missing = sorted(set(data_group.keys()) - set(arrays))
         extra = sorted(set(arrays) - set(data_group.keys()))
@@ -386,6 +419,53 @@ def _append_arrays_atomically(
         raise
 
 
+def _decode_body_names(value: Any) -> tuple[str, ...]:
+    """Decode an HDF5 string-array attribute into body names."""
+    return tuple(item.decode() if isinstance(item, bytes) else str(item) for item in np.asarray(value).reshape(-1))
+
+
+def _validate_body_net_contact_force_body_names(
+    data_group: h5py.Group,
+    body_names: Sequence[str] | None,
+) -> None:
+    """Require appended force-label chunks to retain the existing body-slot order."""
+    attr_name = "body_net_contact_force_body_names"
+    if body_names is None or attr_name not in data_group.attrs:
+        return
+    existing = _decode_body_names(data_group.attrs[attr_name])
+    requested = tuple(str(name) for name in body_names)
+    if existing != requested:
+        raise ValueError(
+            "Cannot append body net contact-force labels with a different body-name order: "
+            f"existing={existing}, requested={requested}."
+        )
+
+
+def _write_body_net_contact_force_body_names(
+    data_group: h5py.Group,
+    body_names: Sequence[str] | None,
+) -> None:
+    """Write primary body names in the same slot order as force labels."""
+    if body_names is None:
+        return
+    force_key = "body_net_contact_forces_w"
+    if force_key not in data_group:
+        raise ValueError("Body net contact-force body names require body_net_contact_forces_w labels.")
+    names = tuple(str(name) for name in body_names)
+    expected_count = cast(h5py.Dataset, data_group[force_key]).shape[-2]
+    if len(names) != expected_count:
+        raise ValueError(
+            "Body net contact-force body-name count must match the force-label body axis: "
+            f"names={len(names)}, labels={expected_count}."
+        )
+    if len(set(names)) != len(names):
+        raise ValueError(f"Body net contact-force body names must be unique, got {names}.")
+    data_group.attrs["body_net_contact_force_body_names"] = np.asarray(
+        names,
+        dtype=h5py.string_dtype(encoding="utf-8"),
+    )
+
+
 def _update_metadata(data_group: h5py.Group) -> None:
     """Update aggregate metadata from successfully written datasets."""
     states = cast(h5py.Dataset, data_group["states"])
@@ -406,6 +486,13 @@ def _update_metadata(data_group: h5py.Group) -> None:
         data_group.attrs["contact_token_frame"] = "world_v1"
         if "num_contacts_per_env" not in data_group.attrs:
             data_group.attrs["num_contacts_per_env"] = tokens.shape[-2]
+    if "body_net_contact_forces_w" in data_group:
+        forces = cast(h5py.Dataset, data_group["body_net_contact_forces_w"])
+        data_group.attrs["body_net_contact_force_schema"] = "per_primary_body_v1"
+        data_group.attrs["body_net_contact_force_frame"] = "world"
+        data_group.attrs["body_net_contact_force_units"] = "N"
+        data_group.attrs["body_net_contact_force_timing"] = "post_solve_t_to_t_plus_1"
+        data_group.attrs["num_primary_bodies"] = forces.shape[-2]
     data_group.attrs["joint_f_dim"] = cast(h5py.Dataset, data_group["joint_f"]).shape[-1]
     if "actions" in data_group:
         data_group.attrs["action_dim"] = cast(h5py.Dataset, data_group["actions"]).shape[-1]
