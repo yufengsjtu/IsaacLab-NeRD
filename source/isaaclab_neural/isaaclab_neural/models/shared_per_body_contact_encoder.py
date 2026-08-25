@@ -37,6 +37,7 @@ class SharedPerBodyContactEncoder(nn.Module):
         body_latent_dim: int = 16,
         hidden_dim: int = 64,
         max_other_bodies: int = 32,
+        use_other_body_embeddings: bool = True,
         device: str | torch.device | None = None,
     ) -> None:
         """Initialize the shared per-body contact encoder.
@@ -46,6 +47,7 @@ class SharedPerBodyContactEncoder(nn.Module):
             body_latent_dim: Output feature count for each primary body.
             hidden_dim: Hidden feature count in the shared per-contact MLP.
             max_other_bodies: Number of known other-body identity embeddings.
+            use_other_body_embeddings: Whether to add other-side identity embeddings.
             device: Device on which to create module parameters.
         """
         super().__init__()
@@ -61,6 +63,7 @@ class SharedPerBodyContactEncoder(nn.Module):
         self.num_bodies = num_bodies
         self.body_latent_dim = body_latent_dim
         self.out_features = num_bodies * body_latent_dim
+        self.use_other_body_embeddings = bool(use_other_body_embeddings)
 
         geometry_dim = CONTACT_TOKEN_DIM - CONTACT_TOKEN_GEOMETRY_SLICE.start
         self.contact_encoder = nn.Sequential(
@@ -129,4 +132,5 @@ class SharedPerBodyContactEncoder(nn.Module):
             self.other_foreign_embed.expand_as(known_other_embed),
             self.other_static_embed.expand_as(known_other_embed),
         )
-        return encoded + torch.where(other_is_known.unsqueeze(-1), known_other_embed, unknown_other_embed)
+        selected_other_embed = torch.where(other_is_known.unsqueeze(-1), known_other_embed, unknown_other_embed)
+        return encoded + selected_other_embed * float(self.use_other_body_embeddings)

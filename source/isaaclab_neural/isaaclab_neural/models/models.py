@@ -217,6 +217,7 @@ class ModelMixedInput(nn.Module):
                     body_latent_dim=int(contact_cfg.get("body_latent_dim", 16)),
                     hidden_dim=int(contact_cfg.get("hidden_dim", 64)),
                     max_other_bodies=int(contact_cfg.get("max_other_bodies", 32)),
+                    use_other_body_embeddings=bool(contact_cfg.get("use_other_body_embeddings", True)),
                     device=device,
                 )
             elif encoder_type == "body_routed":
@@ -262,6 +263,8 @@ class ModelMixedInput(nn.Module):
                     num_bodies=int(resolved_num_bodies),
                     body_latent_dim=int(contact_cfg.get("body_latent_dim", 64)),
                     hidden_dim=int(contact_cfg.get("hidden_dim", 32)),
+                    pooling=str(contact_cfg.get("pooling", "sum")),
+                    use_count_projection=bool(contact_cfg.get("use_count_projection", False)),
                     device=device,
                 )
             else:

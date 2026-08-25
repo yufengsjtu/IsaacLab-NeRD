@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
+from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM, CONTACT_TOKEN_GEOMETRY_SLICE
 from isaaclab_neural.models.contact_set_model import ContactSetEncoderBlock
 from isaaclab_neural.models.models import ModelMixedInput
 from isaaclab_neural.models.shared_per_body_contact_encoder import SharedPerBodyContactEncoder
@@ -118,6 +118,7 @@ def test_mixed_input_constructs_and_flattens_shared_per_body_encoder():
             "num_bodies": 3,
             "body_latent_dim": 8,
             "hidden_dim": 16,
+            "use_other_body_embeddings": False,
         },
     }
 
@@ -131,12 +132,14 @@ def test_mixed_input_constructs_and_flattens_shared_per_body_encoder():
     features = model.extract_input_features(input_sample)
 
     assert isinstance(model.encoders["contact_set"], SharedPerBodyContactEncoder)
+    assert model.encoders["contact_set"].use_other_body_embeddings is False
     assert model.feature_dim == 28
     assert features.shape == (2, 3, 28)
     assert torch.count_nonzero(features[0, 0, -8:]) > 0
 
 
-def test_shared_per_body_checkpoint_round_trip_preserves_forward_output(tmp_path):
+@pytest.mark.parametrize("use_other_body_embeddings", (True, False))
+def test_shared_per_body_checkpoint_round_trip_preserves_forward_output(tmp_path, use_other_body_embeddings: bool):
     torch.manual_seed(0)
     input_sample = _model_input_sample()
     input_cfg = {
@@ -147,6 +150,7 @@ def test_shared_per_body_checkpoint_round_trip_preserves_forward_output(tmp_path
             "num_bodies": 3,
             "body_latent_dim": 8,
             "hidden_dim": 16,
+            "use_other_body_embeddings": use_other_body_embeddings,
         },
     }
     network_cfg = _mixed_input_network_cfg()
@@ -168,6 +172,7 @@ def test_shared_per_body_checkpoint_round_trip_preserves_forward_output(tmp_path
     actual = reconstructed({key: value.clone() for key, value in input_sample.items()})
 
     assert isinstance(reconstructed.encoders["contact_set"], SharedPerBodyContactEncoder)
+    assert reconstructed.encoders["contact_set"].use_other_body_embeddings is use_other_body_embeddings
     torch.testing.assert_close(actual, expected)
 
 
@@ -357,6 +362,55 @@ def test_shared_per_body_encoder_preserves_contact_count_information():
     two_contacts[0, 1] = one_contact[0, 0]
 
     assert not torch.allclose(encoder(one_contact), encoder(two_contacts))
+
+
+def test_shared_per_body_encoder_defaults_to_other_body_embeddings():
+    torch.manual_seed(0)
+    default = SharedPerBodyContactEncoder(num_bodies=2, body_latent_dim=8, hidden_dim=16)
+    torch.manual_seed(0)
+    explicit = SharedPerBodyContactEncoder(
+        num_bodies=2,
+        body_latent_dim=8,
+        hidden_dim=16,
+        use_other_body_embeddings=True,
+    )
+
+    assert default.use_other_body_embeddings is True
+    assert default.state_dict().keys() == explicit.state_dict().keys()
+    for name, value in default.state_dict().items():
+        torch.testing.assert_close(value, explicit.state_dict()[name])
+
+
+def test_shared_per_body_encoder_can_disable_other_body_embeddings():
+    torch.manual_seed(0)
+    encoder = SharedPerBodyContactEncoder(
+        num_bodies=2,
+        body_latent_dim=8,
+        hidden_dim=16,
+        use_other_body_embeddings=False,
+    )
+    tokens = torch.zeros(1, 3, CONTACT_TOKEN_DIM)
+    tokens[0, 0] = _token(body_slot=0, point_x=0.1, other_body_slot=1)
+    tokens[0, 1] = _token(body_slot=0, point_x=0.1, other_body_slot=-1)
+    tokens[0, 1, 3] = 1.0
+    tokens[0, 2] = _token(body_slot=0, point_x=0.2, other_body_slot=-1)
+
+    encoded = encoder._encode_contacts(tokens)
+    expected = encoder.contact_encoder(tokens[..., CONTACT_TOKEN_GEOMETRY_SLICE])
+
+    torch.testing.assert_close(encoded, expected)
+    torch.testing.assert_close(encoded[:, 0], encoded[:, 1])
+
+    encoder(tokens).sum().backward()
+    assert encoder.other_body_embed.weight.grad is not None
+    assert encoder.other_static_embed.grad is not None
+    assert encoder.other_foreign_embed.grad is not None
+    torch.testing.assert_close(
+        encoder.other_body_embed.weight.grad,
+        torch.zeros_like(encoder.other_body_embed.weight.grad),
+    )
+    torch.testing.assert_close(encoder.other_static_embed.grad, torch.zeros_like(encoder.other_static_embed.grad))
+    torch.testing.assert_close(encoder.other_foreign_embed.grad, torch.zeros_like(encoder.other_foreign_embed.grad))
 
 
 def test_shared_per_body_encoder_has_finite_forward_and_backward():

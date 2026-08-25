@@ -21,7 +21,7 @@ from isaaclab_neural.contacts.contact_set_schema import (
 
 
 class BodyRoutedActive15Encoder(nn.Module):
-    r"""Apply shared phi, owner-body sum pooling, then shared rho."""
+    r"""Apply shared phi, configurable owner-body pooling, then shared rho."""
 
     def __init__(
         self,
@@ -29,11 +29,17 @@ class BodyRoutedActive15Encoder(nn.Module):
         num_bodies: int,
         body_latent_dim: int = 64,
         hidden_dim: int = 32,
+        pooling: str = "sum",
+        use_count_projection: bool = False,
         device: str | torch.device | None = None,
     ) -> None:
         super().__init__()
         if num_bodies <= 0 or body_latent_dim <= 0 or hidden_dim <= 0:
             raise ValueError("num_bodies, body_latent_dim, and hidden_dim must be positive.")
+        if pooling not in {"sum", "mean"}:
+            raise ValueError("pooling must be either 'sum' or 'mean'.")
+        self.pooling = pooling
+        self.use_count_projection = bool(use_count_projection)
         self.num_bodies = int(num_bodies)
         self.body_latent_dim = int(body_latent_dim)
         self.out_features = self.num_bodies * self.body_latent_dim
@@ -43,6 +49,16 @@ class BodyRoutedActive15Encoder(nn.Module):
             nn.Linear(hidden_dim, body_latent_dim, device=device),
         )
         self.rho = nn.Linear(body_latent_dim, body_latent_dim, device=device)
+        if self.use_count_projection:
+            resolved_device = torch.device(device) if device is not None else torch.empty(0).device
+            rng_devices = []
+            if resolved_device.type == "cuda":
+                rng_devices = [resolved_device]
+            # Keep downstream model initialization paired with the no-count baseline.
+            with torch.random.fork_rng(devices=rng_devices):
+                self.count_proj = nn.Linear(1, body_latent_dim, device=device)
+        else:
+            self.count_proj = None
 
     def forward(self, contact_tokens: torch.Tensor) -> torch.Tensor:
         """Return owner-body latents with the leading input dimensions preserved."""
@@ -72,6 +88,10 @@ class BodyRoutedActive15Encoder(nn.Module):
         counts = encoded.new_zeros((num_sets * self.num_bodies, 1))
         counts.index_add_(0, segment_ids.reshape(-1), weights.reshape(-1, 1))
 
+        if self.pooling == "mean":
+            pooled = pooled / counts.clamp_min(1.0)
         latents = self.rho(pooled)
+        if self.count_proj is not None:
+            latents = latents + self.count_proj(torch.log1p(counts))
         latents = torch.where(counts > 0, latents, torch.zeros_like(latents))
         return latents.reshape(*leading, self.num_bodies, self.body_latent_dim)

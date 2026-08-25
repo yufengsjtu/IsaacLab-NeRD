@@ -188,6 +188,9 @@ def test_active15_packing_is_body_round_robin_and_reports_overflow() -> None:
 def test_active15_model_matches_explicit_sum_and_contract() -> None:
     torch.manual_seed(0)
     encoder = BodyRoutedActive15Encoder(num_bodies=3)
+    assert encoder.pooling == "sum"
+    assert encoder.use_count_projection is False
+    assert encoder.count_proj is None
     tokens = torch.zeros(2, 4, ACTIVE15_TOKEN_DIM)
     tokens[0, 0] = _active_token(0, 0.1)
     tokens[0, 1] = _active_token(2, 0.2)
@@ -202,6 +205,85 @@ def test_active15_model_matches_explicit_sum_and_contract() -> None:
     assert sum(parameter.numel() for parameter in encoder.parameters()) == 6784
     assert encoder.phi[0].in_features == ACTIVE15_FEATURE_DIM
     assert encoder.out_features == 3 * 64
+
+
+@pytest.mark.parametrize(
+    ("pooling", "use_count_projection"),
+    (
+        ("mean", False),
+        ("sum", True),
+        ("mean", True),
+    ),
+)
+def test_active15_model_pooling_ablation_matches_explicit_formula(
+    pooling: str,
+    use_count_projection: bool,
+) -> None:
+    torch.manual_seed(0)
+    encoder = BodyRoutedActive15Encoder(
+        num_bodies=3,
+        pooling=pooling,
+        use_count_projection=use_count_projection,
+    )
+    tokens = torch.zeros(1, 4, ACTIVE15_TOKEN_DIM)
+    tokens[0, 0] = _active_token(0, 0.1)
+    tokens[0, 1] = _active_token(2, 0.2)
+    tokens[0, 2] = _active_token(0, 0.3)
+
+    encoded = encoder.phi(tokens[..., 2:])
+    expected = torch.zeros(1, 3, 64)
+    body_zero = encoded[0, 0] + encoded[0, 2]
+    if pooling == "mean":
+        body_zero = body_zero / 2.0
+    expected[0, 0] = encoder.rho(body_zero)
+    expected[0, 2] = encoder.rho(encoded[0, 1])
+    if use_count_projection:
+        counts = torch.tensor([[[2.0], [0.0], [1.0]]])
+        expected = expected + encoder.count_proj(torch.log1p(counts))
+        expected[:, 1] = 0.0
+
+    torch.testing.assert_close(encoder(tokens), expected)
+
+
+def test_active15_model_rejects_unknown_pooling() -> None:
+    with pytest.raises(ValueError, match="pooling"):
+        BodyRoutedActive15Encoder(num_bodies=3, pooling="max")
+
+
+def test_count_projection_preserves_common_model_initialization() -> None:
+    sample = {
+        "states_embedding": torch.zeros(1, 10, 37),
+        "joint_f": torch.zeros(1, 10, 18),
+        "gravity_dir": torch.zeros(1, 10, 3),
+        "contact_tokens": torch.zeros(1, 10, 64, ACTIVE15_TOKEN_DIM),
+    }
+    baseline_cfg = yaml.safe_load((CFG_DIR / "transformer_rough_native_body_routed_active15.yaml").read_text())
+    count_cfg = yaml.safe_load((CFG_DIR / "transformer_rough_native_body_routed_active15_sum_count.yaml").read_text())
+
+    def build_model(cfg: dict) -> ModelMixedInput:
+        return ModelMixedInput(
+            input_sample=sample,
+            output_dim=37,
+            input_cfg=cfg["inputs"],
+            network_cfg=cfg["network"],
+            contact_mode="newton_native",
+            contact_representation=CONTACT_REPRESENTATION_ACTIVE15,
+            num_bodies=17,
+            device="cpu",
+        )
+
+    torch.manual_seed(11)
+    baseline = build_model(baseline_cfg)
+    torch.manual_seed(11)
+    count_variant = build_model(count_cfg)
+
+    baseline_state = baseline.state_dict()
+    count_state = count_variant.state_dict()
+    extra_keys = set(count_state) - set(baseline_state)
+    assert extra_keys
+    assert all("count_proj" in key for key in extra_keys)
+    for key, value in baseline_state.items():
+        torch.testing.assert_close(value, count_state[key])
 
 
 def test_active15_model_shapes_permutation_empty_and_gradients() -> None:
@@ -258,6 +340,8 @@ def test_mixed_input_builds_and_flattens_active15_encoder() -> None:
             "num_bodies": 17,
             "body_latent_dim": 64,
             "hidden_dim": 32,
+            "pooling": "mean",
+            "use_count_projection": True,
         },
     }
     network_cfg = {
@@ -277,6 +361,8 @@ def test_mixed_input_builds_and_flattens_active15_encoder() -> None:
     features = model.extract_input_features(sample)
 
     assert isinstance(model.encoders["contact_set"], BodyRoutedActive15Encoder)
+    assert model.encoders["contact_set"].pooling == "mean"
+    assert model.encoders["contact_set"].use_count_projection is True
     assert model.feature_dim == 58 + 17 * 64
     assert features.shape == (2, 3, 1146)
 
@@ -425,9 +511,22 @@ def test_active15_latent_dim_variants(
     assert sum(parameter.numel() for parameter in model.parameters()) == model_parameters
 
 
-def test_active15_production_config_forward_backward_and_checkpoint(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("config_name", "pooling", "use_count_projection", "model_parameters"),
+    (
+        ("transformer_rough_native_body_routed_active15.yaml", "sum", False, 11_255_845),
+        ("transformer_rough_native_body_routed_active15_mean_count.yaml", "mean", True, 11_255_973),
+    ),
+)
+def test_active15_production_config_forward_backward_and_checkpoint(
+    config_name: str,
+    pooling: str,
+    use_count_projection: bool,
+    model_parameters: int,
+    tmp_path: Path,
+) -> None:
     torch.manual_seed(7)
-    cfg = yaml.safe_load((CFG_DIR / "transformer_rough_native_body_routed_active15.yaml").read_text())
+    cfg = yaml.safe_load((CFG_DIR / config_name).read_text())
     sample = {
         "states_embedding": torch.randn(1, 10, 37),
         "joint_f": torch.randn(1, 10, 18),
@@ -487,7 +586,9 @@ def test_active15_production_config_forward_backward_and_checkpoint(tmp_path: Pa
     for handle in handles:
         handle.remove()
 
-    assert sum(parameter.numel() for parameter in model.parameters()) == 11_255_845
+    assert sum(parameter.numel() for parameter in model.parameters()) == model_parameters
+    assert model.contact_set_encoder.pooling == pooling
+    assert model.contact_set_encoder.use_count_projection is use_count_projection
     assert captured["body_latents"] == (1, 10, 17, 64)
     assert captured["transformer_input"] == (1, 10, 1146)
     assert captured["transformer_output"] == (1, 10, 384)
@@ -519,6 +620,8 @@ def test_active15_production_config_forward_backward_and_checkpoint(tmp_path: Pa
         num_contact_bodies_per_env=17,
     )
     reconstructed = reconstruct_model_from_checkpoint(checkpoint, solver, device="cpu")
+    assert reconstructed.contact_set_encoder.pooling == pooling
+    assert reconstructed.contact_set_encoder.use_count_projection is use_count_projection
     with torch.no_grad():
         expected = model({key: value.clone() for key, value in sample.items()})
         actual = reconstructed({key: value.clone() for key, value in sample.items()})
