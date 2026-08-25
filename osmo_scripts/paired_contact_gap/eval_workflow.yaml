@@ -1,0 +1,52 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+workflow:
+  name: "{{ workflow_name }}"
+  resources:
+    default:
+      cpu: 12
+      gpu: 1
+      memory: 96Gi
+      storage: 64Gi
+      platform: ovx-l40
+
+  tasks:
+  - name: evaluate-e99-checkpoints
+    image: nvcr.io/nvidia/isaac-lab:3.0.0-beta2
+    environment:
+      ACCEPT_EULA: "Y"
+      OMNI_KIT_ALLOW_ROOT: "1"
+      PRIVACY_CONSENT: "Y"
+      PAIRED_EVAL_MODE: evaluate
+      PAIRED_EVAL_CODE_DIR: /osmo/data/input/0
+      PAIRED_EVAL_DATASET_DIR: /osmo/data/input/1
+      PAIRED_EVAL_CHECKPOINT_DIR: /osmo/data/input/2
+      PAIRED_EVAL_DESIGN: "{{ design }}"
+      PAIRED_EVAL_DATASET_KEY: "{{ dataset_key }}"
+      PAIRED_EVAL_OUTPUT_PARENT_URL: "{{ output_parent_url }}"
+      PAIRED_EVAL_ARTIFACT_NAME: "{{ artifact_name }}"
+    command:
+    - /bin/bash
+    args:
+    - /tmp/paired-eval-entrypoint.sh
+    inputs:
+    - url: "{{ code_url }}"
+    - url: "{{ dataset_url }}"
+    - url: "{{ checkpoint_url }}"
+    files:
+    - path: /tmp/paired-eval-entrypoint.sh
+      localpath: "{{ entrypoint_localpath }}"
+
+default-values:
+  workflow_name: rowan-cgap-e99-eval
+  code_url: ""
+  dataset_url: ""
+  checkpoint_url: ""
+  design: a_active
+  dataset_key: raw15
+  output_parent_url: ""
+  artifact_name: paired-eval-result
+  entrypoint_localpath: ./entrypoint.sh
