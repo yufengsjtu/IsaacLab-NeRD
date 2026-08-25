@@ -1,0 +1,50 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+workflow:
+  name: "{{ workflow_name }}"
+  resources:
+    default:
+      cpu: 16
+      gpu: 0
+      memory: 64Gi
+      storage: 64Gi
+      platform: ovx-l40
+
+  tasks:
+  - name: analyze-tail-self-collisions
+    image: nvcr.io/nvidia/isaac-lab:3.0.0-beta2
+    environment:
+      ACCEPT_EULA: "Y"
+      OMNI_KIT_ALLOW_ROOT: "1"
+      PRIVACY_CONSENT: "Y"
+      TAIL_CODE_DIR: /osmo/data/input/0
+      TAIL_DATASET_DIR: /osmo/data/input/1
+      TAIL_A_METRICS_DIR: /osmo/data/input/2
+      TAIL_C_METRICS_DIR: /osmo/data/input/3
+      TAIL_OUTPUT_PARENT_URL: "{{ output_parent_url }}"
+      TAIL_ARTIFACT_NAME: "{{ artifact_name }}"
+    command:
+    - /bin/bash
+    args:
+    - /tmp/tail-contact-entrypoint.sh
+    inputs:
+    - url: "{{ code_url }}"
+    - url: "{{ dataset_url }}"
+    - url: "{{ a_metrics_url }}"
+    - url: "{{ c_metrics_url }}"
+    files:
+    - path: /tmp/tail-contact-entrypoint.sh
+      localpath: "{{ entrypoint_localpath }}"
+
+default-values:
+  workflow_name: rowan-cgap-tail-self
+  code_url: ""
+  dataset_url: ""
+  a_metrics_url: ""
+  c_metrics_url: ""
+  output_parent_url: ""
+  artifact_name: cgap-tail-self
+  entrypoint_localpath: ./tail_contact_entrypoint.sh
