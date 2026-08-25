@@ -38,6 +38,29 @@ network:
     enabled: True
 ```
 
+The force head is a global MLP over the temporal trunk feature. It jointly
+predicts all 17 three-dimensional body forces as a 51-dimensional vector,
+which is reshaped to `[17, 3]`. The force target is normalized with its own
+running statistics and trained with normalized MSE.
+
+## Negative ablations
+
+Two alternative objectives and decoders were evaluated on the same 10M
+rough-terrain dataset and were not retained:
+
+- Active/inactive balanced force loss did not improve policy-trajectory force
+  metrics over normalized MSE.
+- A shared per-body force decoder conditioned on each body's contact latent and
+  a learned body embedding did not outperform the global decoder. At epoch 359,
+  its policy-trajectory force RMSE was `13.59 N` (`32.91 N` on active bodies),
+  compared with `12.63 N` (`31.31 N` active) for the global decoder. Its
+  zero-action RMSE was `11.25 N` (`20.45 N` active), compared with `9.80 N`
+  (`17.55 N` active) for the global decoder. The experimental OSMO workflow was
+  `anymal-c-rough-shared-per-body-contact-force-formal-20260824-051930-1`.
+
+The retained configuration is therefore the global force decoder with
+normalized MSE.
+
 ## Smoke commands
 
 Run the complete rough Anymal smoke flow locally:

@@ -63,3 +63,14 @@
   addition, and a second full pre-commit run passed without modifications.
 - All Stage 1 implementation and validation tasks are complete.
 - No commit was created and no formal OSMO workflow was submitted.
+
+## 2026-08-25
+
+- Rejected active/inactive balanced force loss after formal OSMO training did
+  not improve policy-trajectory force metrics over normalized MSE.
+- Rejected the shared per-body force decoder after the formal OSMO ablation
+  `anymal-c-rough-shared-per-body-contact-force-formal-20260824-051930-1`.
+  At epoch 359, policy-trajectory RMSE was `13.59 N` (`32.91 N` active)
+  versus `12.63 N` (`31.31 N` active) for the global decoder. Zero-action
+  RMSE was `11.25 N` (`20.45 N` active) versus `9.80 N` (`17.55 N` active).
+- Retained the global force decoder and normalized MSE objective.

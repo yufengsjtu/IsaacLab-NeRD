@@ -60,6 +60,8 @@ def test_force_variants_preserve_shared_per_body_contract() -> None:
         assert solver_cfg["num_states_history"] == 10
         assert contact_cfg["encoder_type"] == "shared_per_body"
         assert force_cfg["enabled"] is True
+        assert "decoder_type" not in force_cfg
+        assert "body_embedding_dim" not in force_cfg
         assert force_cfg["model"]["mlp"]["layer_sizes"] == [64]
         assert force_loss_cfg == {"weight": 0.1, "active_contact_threshold_n": 1.0}
         assert cfg["algorithm"]["dataset"]["max_capacity"] == capacity
