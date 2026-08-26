@@ -174,7 +174,8 @@ def test_osmo_workflows_and_entrypoint_freeze_the_sampling_contract() -> None:
         assert "osmo_scripts/start.sh" not in workflow
         assert "run_experiment.py" not in workflow
         assert "WANDB_API_KEY: wandb_api_key" in workflow
-        assert "/osmo/run/workspace/code/IsaacLab-NeRD.tar.gz" in workflow
+        assert "/osmo/run/workspace/code/IsaacLab-NeRD.tar.gz.base64" in workflow
+        assert "SAMPLING_EVAL_CODE_SHA256" in workflow
     assert a_workflow.count("    - url:") == 0
     assert d_workflow.count("    - url:") == 1
     assert "model_epoch199.pt" not in entrypoint
@@ -186,6 +187,8 @@ def test_osmo_workflows_and_entrypoint_freeze_the_sampling_contract() -> None:
     assert "sampling_strategy_eval.run_eval" in entrypoint
     assert "isaaclab_neural.train.train" not in entrypoint
     assert "sampling_strategy_eval.download_checkpoints" in entrypoint
+    assert "base64 --decode" in entrypoint
+    assert "sha256sum --check" in entrypoint
     assert "SAMPLING_EVAL_ANALYSIS_JSON_BEGIN" in entrypoint
     assert "RESULTS_ACKNOWLEDGED" in entrypoint
     assert "osmo data upload" not in entrypoint

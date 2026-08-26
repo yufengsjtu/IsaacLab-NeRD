@@ -22,6 +22,7 @@ workflow:
       PRIVACY_CONSENT: "Y"
       SAMPLING_EVAL_ENCODER: a
       SAMPLING_EVAL_CODE_DIR: /osmo/run/workspace/code
+      SAMPLING_EVAL_CODE_SHA256: "{{ code_archive_sha256 }}"
       SAMPLING_EVAL_CHECKPOINT_ROOT: /osmo/run/workspace/checkpoints
       SAMPLING_EVAL_RESULT_ROOT: /osmo/run/workspace/results
       SAMPLING_EVAL_OLD_DATASET_ROOT: /mnt/amlfs-04/home/jiex/data/datasets/isaaclab-nerd-rowan-active15/Anymal-C-Rough-Native-Active15
@@ -38,10 +39,11 @@ workflow:
     files:
     - path: /tmp/sampling-eval-entrypoint.sh
       localpath: "{{ entrypoint_localpath }}"
-    - path: /osmo/run/workspace/code/IsaacLab-NeRD.tar.gz
-      localpath: "{{ code_archive_localpath }}"
+    - path: /osmo/run/workspace/code/IsaacLab-NeRD.tar.gz.base64
+      localpath: "{{ code_archive_base64_localpath }}"
 
 default-values:
   workflow_name: rowan-sampling-eval-a-e199
-  code_archive_localpath: ""
+  code_archive_base64_localpath: ""
+  code_archive_sha256: ""
   entrypoint_localpath: ./entrypoint.sh

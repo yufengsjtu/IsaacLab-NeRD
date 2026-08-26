@@ -8,6 +8,7 @@ ENCODER="${SAMPLING_EVAL_ENCODER:?SAMPLING_EVAL_ENCODER is required}"
 OLD_DATASET_ROOT="${SAMPLING_EVAL_OLD_DATASET_ROOT:?SAMPLING_EVAL_OLD_DATASET_ROOT is required}"
 NEW_DATASET_ROOT="${SAMPLING_EVAL_NEW_DATASET_ROOT:?SAMPLING_EVAL_NEW_DATASET_ROOT is required}"
 CODE_INPUT_DIR="${SAMPLING_EVAL_CODE_DIR:-/osmo/run/workspace/code}"
+CODE_SHA256="${SAMPLING_EVAL_CODE_SHA256:?SAMPLING_EVAL_CODE_SHA256 is required}"
 CHECKPOINT_ROOT="${SAMPLING_EVAL_CHECKPOINT_ROOT:-/osmo/run/workspace/checkpoints}"
 RESULT_ROOT="${SAMPLING_EVAL_RESULT_ROOT:-/osmo/run/workspace/results}"
 PROJECT_ROOT=/root/code/IsaacLab-NeRD
@@ -24,14 +25,17 @@ install_python_shims() {
 }
 
 extract_code() {
-    local archive archive_count
+    local archive encoded_archive
 
-    archive_count="$(find "$CODE_INPUT_DIR" -type f \( -name '*.tar.gz' -o -name '*.tgz' \) -print | wc -l)"
-    if [[ "$archive_count" -ne 1 ]]; then
-        echo "[FATAL] Expected exactly one immutable code archive, found $archive_count." >&2
+    archive=/tmp/sampling-eval-code/IsaacLab-NeRD.tar.gz
+    encoded_archive="$CODE_INPUT_DIR/IsaacLab-NeRD.tar.gz.base64"
+    if [[ ! -f "$encoded_archive" ]]; then
+        echo "[FATAL] Base64 code archive is missing: $encoded_archive." >&2
         exit 1
     fi
-    archive="$(find "$CODE_INPUT_DIR" -type f \( -name '*.tar.gz' -o -name '*.tgz' \) -print | head -n 1)"
+    mkdir -p "$(dirname "$archive")"
+    base64 --decode "$encoded_archive" > "$archive"
+    printf '%s  %s\n' "$CODE_SHA256" "$archive" | sha256sum --check -
     mkdir -p "$(dirname "$PROJECT_ROOT")"
     tar -xzf "$archive" -C "$(dirname "$PROJECT_ROOT")"
     if [[ ! -f "$PROJECT_ROOT/isaaclab.sh" ]]; then

@@ -11,7 +11,7 @@ four regimes. The policy regime additionally runs 1,024 deterministic 10-step
 rollouts. The primary comparison is always old/new checkpoints on the same
 suite; own-distribution scores alone are descriptive.
 
-The jobs embed a minimal immutable code archive in each OSMO workflow.
+The jobs embed a Base64-encoded minimal immutable code archive in each OSMO workflow.
 They download the exact fixed-Epoch-199 files from the W&B run IDs frozen in
 the checked-in checkpoint manifests, then enforce size, SHA-256, checkpoint,
 model, and training-contract validation. Final Markdown and JSON analyses are
