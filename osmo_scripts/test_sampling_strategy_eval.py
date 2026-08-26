@@ -196,6 +196,24 @@ def test_osmo_workflows_and_entrypoint_freeze_the_sampling_contract() -> None:
     assert "RESULTS_DOWNLOADED" not in entrypoint
 
 
+def test_osmo_data_workflows_mount_both_sampling_generations() -> None:
+    a_workflow = (EVAL_DIR / "eval_a_osmo_data_workflow.yaml").read_text()
+    d_workflow = (EVAL_DIR / "eval_d_osmo_data_workflow.yaml").read_text()
+
+    for workflow in (a_workflow, d_workflow):
+        assert workflow.count("    - url:") == 2
+        assert "gpu: 1" in workflow
+        assert "storage: 512Gi" in workflow
+        assert "/mnt/amlfs" not in workflow
+        assert "/osmo/data/input/0/" in workflow
+        assert "/osmo/data/input/1/" in workflow
+        assert 'old_dataset_url: ""' in workflow
+        assert 'new_dataset_url: ""' in workflow
+    assert "Anymal-C-Rough-Native-Active15" in a_workflow
+    assert "Anymal-C-Rough-Native-Raw15" in a_workflow
+    assert d_workflow.count("Anymal-C-Rough-Native-ContactTokens") == 2
+
+
 def test_dataset_manifests_freeze_eight_suites_per_encoder() -> None:
     for encoder in ("a", "d"):
         manifest = json.loads((EVAL_DIR / f"dataset_manifest_{encoder}.json").read_text())

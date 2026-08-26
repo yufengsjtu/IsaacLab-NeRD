@@ -1,0 +1,54 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+workflow:
+  name: "{{ workflow_name }}"
+  resources:
+    default:
+      cpu: 12
+      gpu: 1
+      memory: 96Gi
+      storage: 512Gi
+      platform: ovx-l40
+
+  tasks:
+  - name: sampling-eval-a
+    image: nvcr.io/nvidia/isaac-lab:3.0.0-beta2
+    environment:
+      ACCEPT_EULA: "Y"
+      OMNI_KIT_ALLOW_ROOT: "1"
+      PRIVACY_CONSENT: "Y"
+      SAMPLING_EVAL_ENCODER: a
+      SAMPLING_EVAL_CODE_DIR: /tmp/sampling-eval-code-input
+      SAMPLING_EVAL_CODE_SHA256: "{{ code_archive_sha256 }}"
+      SAMPLING_EVAL_CHECKPOINT_ROOT: /osmo/run/workspace/checkpoints
+      SAMPLING_EVAL_RESULT_ROOT: /osmo/run/workspace/results
+      SAMPLING_EVAL_OLD_DATASET_ROOT: /osmo/data/input/0/Anymal-C-Rough-Native-Active15
+      SAMPLING_EVAL_NEW_DATASET_ROOT: /osmo/data/input/1/Anymal-C-Rough-Native-Raw15
+      WANDB_ENTITY: nvr-srl
+      WANDB_PROJECT: isaaclab-nerd-rowan-contact-ablation
+    command:
+    - /bin/bash
+    args:
+    - /tmp/sampling-eval-entrypoint.sh
+    credentials:
+      wandb:
+        WANDB_API_KEY: wandb_api_key
+    inputs:
+    - url: "{{ old_dataset_url }}"
+    - url: "{{ new_dataset_url }}"
+    files:
+    - path: /tmp/sampling-eval-entrypoint.sh
+      localpath: "{{ entrypoint_localpath }}"
+    - path: /tmp/sampling-eval-code-input/IsaacLab-NeRD.tar.gz.base64
+      localpath: "{{ code_archive_base64_localpath }}"
+
+default-values:
+  workflow_name: rowan-sampling-eval-a-e199-osmo-data
+  old_dataset_url: ""
+  new_dataset_url: ""
+  code_archive_base64_localpath: ""
+  code_archive_sha256: ""
+  entrypoint_localpath: ./entrypoint.sh
