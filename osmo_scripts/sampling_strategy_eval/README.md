@@ -11,12 +11,11 @@ four regimes. The policy regime additionally runs 1,024 deterministic 10-step
 rollouts. The primary comparison is always old/new checkpoints on the same
 suite; own-distribution scores alone are descriptive.
 
-The jobs wait for immutable code and checkpoint rsync payloads under
-`/osmo/run/workspace/code` and `/osmo/run/workspace/checkpoints`. They remain
-alive after writing `/osmo/run/workspace/results/DONE`. The orchestrator
-downloads results with `osmo workflow rsync` and then uploads a
-`RESULTS_DOWNLOADED` sentinel so the task can exit without relying on Swift
-code or output quota.
+The jobs receive a minimal immutable code archive as their first OSMO input.
+They download the exact fixed-Epoch-199 files from the W&B run IDs frozen in
+the checked-in checkpoint manifests, then enforce size, SHA-256, checkpoint,
+model, and training-contract validation. Final result trees are written to a
+campaign-specific OSMO DATA output prefix before the tasks exit.
 
 Encoder A and D are executable now. Encoder C is intentionally absent: the old
 C run has no recoverable fixed Epoch-199 checkpoint, so substituting a

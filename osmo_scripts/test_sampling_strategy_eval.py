@@ -173,8 +173,10 @@ def test_osmo_workflows_and_entrypoint_freeze_the_sampling_contract() -> None:
         assert "/tmp/sampling-eval-entrypoint.sh" in workflow
         assert "osmo_scripts/start.sh" not in workflow
         assert "run_experiment.py" not in workflow
-    assert a_workflow.count("    - url:") == 0
-    assert d_workflow.count("    - url:") == 1
+        assert "WANDB_API_KEY: wandb_api_key" in workflow
+        assert 'SAMPLING_EVAL_RESULT_URL: "{{ result_url }}"' in workflow
+    assert a_workflow.count("    - url:") == 1
+    assert d_workflow.count("    - url:") == 2
     assert "model_epoch199.pt" not in entrypoint
     assert "--max-windows 51200" in entrypoint
     assert '--rollout-count "$rollout_count"' in entrypoint
@@ -183,8 +185,10 @@ def test_osmo_workflows_and_entrypoint_freeze_the_sampling_contract() -> None:
     assert "--rollout-seed 20260826" in entrypoint
     assert "sampling_strategy_eval.run_eval" in entrypoint
     assert "isaaclab_neural.train.train" not in entrypoint
-    assert "RESULTS_DOWNLOADED" in entrypoint
-    assert "/osmo/run/workspace/code" in entrypoint
+    assert "sampling_strategy_eval.download_checkpoints" in entrypoint
+    assert 'osmo data upload "$RESULT_URL" "$RESULT_ROOT"' in entrypoint
+    assert "RESULTS_DOWNLOADED" not in entrypoint
+    assert "/osmo/data/input/0" in entrypoint
 
 
 def test_dataset_manifests_freeze_eight_suites_per_encoder() -> None:

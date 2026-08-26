@@ -7,10 +7,13 @@ set -x
 ENCODER="${SAMPLING_EVAL_ENCODER:?SAMPLING_EVAL_ENCODER is required}"
 OLD_DATASET_ROOT="${SAMPLING_EVAL_OLD_DATASET_ROOT:?SAMPLING_EVAL_OLD_DATASET_ROOT is required}"
 NEW_DATASET_ROOT="${SAMPLING_EVAL_NEW_DATASET_ROOT:?SAMPLING_EVAL_NEW_DATASET_ROOT is required}"
-CODE_INPUT_DIR="${SAMPLING_EVAL_CODE_DIR:-/osmo/run/workspace/code}"
+CODE_INPUT_DIR="${SAMPLING_EVAL_CODE_DIR:-/osmo/data/input/0}"
 CHECKPOINT_ROOT="${SAMPLING_EVAL_CHECKPOINT_ROOT:-/osmo/run/workspace/checkpoints}"
 RESULT_ROOT="${SAMPLING_EVAL_RESULT_ROOT:-/osmo/run/workspace/results}"
+RESULT_URL="${SAMPLING_EVAL_RESULT_URL:?SAMPLING_EVAL_RESULT_URL is required}"
 PROJECT_ROOT=/root/code/IsaacLab-NeRD
+WANDB_ENTITY="${WANDB_ENTITY:?WANDB_ENTITY is required}"
+WANDB_PROJECT="${WANDB_PROJECT:?WANDB_PROJECT is required}"
 
 install_python_shims() {
     if [[ -x /isaac-sim/python.sh ]]; then
@@ -36,32 +39,6 @@ extract_code() {
         echo "[FATAL] Extracted archive does not contain IsaacLab-NeRD." >&2
         exit 1
     fi
-}
-
-wait_for_code() {
-    local waited=0
-
-    while [[ ! -f "$CODE_INPUT_DIR/READY" ]]; do
-        if (( waited >= 21600 )); then
-            echo "[FATAL] Timed out waiting six hours for code rsync." >&2
-            exit 1
-        fi
-        sleep 15
-        waited=$((waited + 15))
-    done
-}
-
-wait_for_checkpoints() {
-    local waited=0
-
-    while [[ ! -f "$CHECKPOINT_ROOT/READY" ]]; do
-        if (( waited >= 21600 )); then
-            echo "[FATAL] Timed out waiting six hours for checkpoint rsync." >&2
-            exit 1
-        fi
-        sleep 15
-        waited=$((waited + 15))
-    done
 }
 
 dataset_filename() {
@@ -137,18 +114,18 @@ analyze_results() {
         --bootstrap-seed 20260826
 }
 
-wait_for_result_download() {
-    touch "$RESULT_ROOT/DONE"
-    while [[ ! -f "$RESULT_ROOT/RESULTS_DOWNLOADED" ]]; do
-        sleep 15
-    done
+persist_results() {
+    osmo data upload "$RESULT_URL" "$RESULT_ROOT"
 }
 
 install_python_shims
-wait_for_code
 extract_code
 python3 -m pip install --no-cache-dir -e "$PROJECT_ROOT/source/isaaclab_neural" --no-deps
-wait_for_checkpoints
+python3 -m osmo_scripts.sampling_strategy_eval.download_checkpoints \
+    --source-manifest "$PROJECT_ROOT/osmo_scripts/sampling_strategy_eval/checkpoint_manifest_${ENCODER}.json" \
+    --output-root "$CHECKPOINT_ROOT" \
+    --entity "$WANDB_ENTITY" \
+    --project "$WANDB_PROJECT"
 mkdir -p "$RESULT_ROOT"
 cd "$PROJECT_ROOT"
 for sampling in old new; do
@@ -161,4 +138,4 @@ for sampling in old new; do
     done
 done
 analyze_results
-wait_for_result_download
+persist_results

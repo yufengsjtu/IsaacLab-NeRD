@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "encoder": "d",
+  "checkpoint_epoch": 199,
+  "checkpoints": [
+    {"group": "old", "seed": 0, "wandb_run_id": "02lqvb1g", "path": "old_d/seed0/model_epoch199.pt", "size_bytes": 192720057, "sha256": "13cad3413fce73feb27b2fd5708b2aad3ea2f2c198f36d255d4358aff466a965"},
+    {"group": "old", "seed": 1, "wandb_run_id": "5hs03ts6", "path": "old_d/seed1/model_epoch199.pt", "size_bytes": 192720057, "sha256": "38aec6169bfd4f6ed8ddf166acd7526df9c0896d2f9a1ab39d00a4414613afc8"},
+    {"group": "old", "seed": 2, "wandb_run_id": "5xpjj81f", "path": "old_d/seed2/model_epoch199.pt", "size_bytes": 192720057, "sha256": "9cb621d66a1f9807c0aab10b66cd5884fc2beb75830358cf32f2668d62617d70"},
+    {"group": "new", "seed": 0, "wandb_run_id": "h2icq26n", "path": "new_d/seed0/model_epoch199.pt", "size_bytes": 192720057, "sha256": "6d3ac325733fdc1a7530a09b21df803f82e23fab3adc1cf0bf9db990a4d29e22"},
+    {"group": "new", "seed": 1, "wandb_run_id": "8ggjggdl", "path": "new_d/seed1/model_epoch199.pt", "size_bytes": 192720057, "sha256": "49c32029d054e442fe6ad2fbf4380e47bc2aaf16828521246f411c4f22fecfd0"},
+    {"group": "new", "seed": 2, "wandb_run_id": "o70ddgwt", "path": "new_d/seed2/model_epoch199.pt", "size_bytes": 192720057, "sha256": "7479483060133817e93d703b033e79e83361f9a88bae12215165f31a27c1265d"}
+  ]
+}
