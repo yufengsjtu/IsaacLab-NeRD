@@ -1,0 +1,39 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+workflow:
+  name: "{{ workflow_name }}"
+  resources:
+    default:
+      cpu: 12
+      gpu: 1
+      memory: 96Gi
+      storage: 128Gi
+      platform: ovx-l40
+
+  tasks:
+  - name: sampling-eval-a
+    image: nvcr.io/nvidia/isaac-lab:3.0.0-beta2
+    environment:
+      ACCEPT_EULA: "Y"
+      OMNI_KIT_ALLOW_ROOT: "1"
+      PRIVACY_CONSENT: "Y"
+      SAMPLING_EVAL_ENCODER: a
+      SAMPLING_EVAL_CODE_DIR: /osmo/run/workspace/code
+      SAMPLING_EVAL_CHECKPOINT_ROOT: /osmo/run/workspace/checkpoints
+      SAMPLING_EVAL_RESULT_ROOT: /osmo/run/workspace/results
+      SAMPLING_EVAL_OLD_DATASET_ROOT: /mnt/amlfs-04/home/jiex/data/datasets/isaaclab-nerd-rowan-active15/Anymal-C-Rough-Native-Active15
+      SAMPLING_EVAL_NEW_DATASET_ROOT: /mnt/amlfs-04/home/jiex/data/datasets/isaaclab-nerd-rowan-native-sampling-v2-20260821-0630/Anymal-C-Rough-Native-Raw15
+    command:
+    - /bin/bash
+    args:
+    - /tmp/sampling-eval-entrypoint.sh
+    files:
+    - path: /tmp/sampling-eval-entrypoint.sh
+      localpath: "{{ entrypoint_localpath }}"
+
+default-values:
+  workflow_name: rowan-sampling-eval-a-e199
+  entrypoint_localpath: ./entrypoint.sh

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "encoder": "d",
+  "suites": [
+    {"suite_id": "old_exp_trajectory", "sampling_strategy": "old", "regime": "exp_trajectory", "contact_representation": "contact_tokens", "filename": "dataset_valid.hdf5", "size_bytes": null, "sha256": null},
+    {"suite_id": "old_zero_action_trajectory", "sampling_strategy": "old", "regime": "zero_action_trajectory", "contact_representation": "contact_tokens", "filename": "dataset_zero_action_valid.hdf5", "size_bytes": null, "sha256": null},
+    {"suite_id": "old_lstm_actuator_zero_action_trajectory", "sampling_strategy": "old", "regime": "lstm_actuator_zero_action_trajectory", "contact_representation": "contact_tokens", "filename": "dataset_lstm_actuator_zero_action_valid.hdf5", "size_bytes": null, "sha256": null},
+    {"suite_id": "old_lstm_actuator_policy_trajectory", "sampling_strategy": "old", "regime": "lstm_actuator_policy_trajectory", "contact_representation": "contact_tokens", "filename": "dataset_lstm_actuator_policy_valid.hdf5", "size_bytes": null, "sha256": null},
+    {"suite_id": "new_exp_trajectory", "sampling_strategy": "new", "regime": "exp_trajectory", "contact_representation": "contact_tokens", "filename": "dataset_valid.hdf5", "size_bytes": 7632572264, "sha256": "774ba1ca51fe2cab81a4d426c7217f1f1c42e7e99d3da044ddab36d0c31e0eb2"},
+    {"suite_id": "new_zero_action_trajectory", "sampling_strategy": "new", "regime": "zero_action_trajectory", "contact_representation": "contact_tokens", "filename": "dataset_zero_action_valid.hdf5", "size_bytes": 7632572264, "sha256": "4404cdc2783b46759c878249a7af208a41fdc7799216faeef16ac84bc4b0d6bd"},
+    {"suite_id": "new_lstm_actuator_zero_action_trajectory", "sampling_strategy": "new", "regime": "lstm_actuator_zero_action_trajectory", "contact_representation": "contact_tokens", "filename": "dataset_lstm_actuator_zero_action_valid.hdf5", "size_bytes": 7632572264, "sha256": "99d65b00e542dfaa0e17009f50533df41587c4990efe5587d7ccae02da24a7dd"},
+    {"suite_id": "new_lstm_actuator_policy_trajectory", "sampling_strategy": "new", "regime": "lstm_actuator_policy_trajectory", "contact_representation": "contact_tokens", "filename": "dataset_lstm_actuator_policy_valid.hdf5", "size_bytes": 7632572264, "sha256": "1f0fc12afc9e87affe86f210cfbfdc87e4dd61901401be14e4655858180ecee7"}
+  ]
+}

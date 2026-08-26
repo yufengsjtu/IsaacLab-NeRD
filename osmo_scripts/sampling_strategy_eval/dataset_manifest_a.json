@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "encoder": "a",
+  "suites": [
+    {"suite_id": "old_exp_trajectory", "sampling_strategy": "old", "regime": "exp_trajectory", "contact_representation": "active15_tokens", "filename": "dataset_valid.hdf5", "size_bytes": 7553841232, "sha256": "257212f523412080cc1997003a8d527963712e93734b2ac10f67dab5e52a11e5"},
+    {"suite_id": "old_zero_action_trajectory", "sampling_strategy": "old", "regime": "zero_action_trajectory", "contact_representation": "active15_tokens", "filename": "dataset_zero_action_valid.hdf5", "size_bytes": 7553841232, "sha256": "106b1c9e821dc468564a1c3ab4e6d12caddcb3bcbdfb79b8824b4f769382bb11"},
+    {"suite_id": "old_lstm_actuator_zero_action_trajectory", "sampling_strategy": "old", "regime": "lstm_actuator_zero_action_trajectory", "contact_representation": "active15_tokens", "filename": "dataset_lstm_actuator_zero_action_valid.hdf5", "size_bytes": 7553841232, "sha256": "105aa218fdaa3478ed39d795cb49a6a76434a21c102661873aebf9efb1bc308c"},
+    {"suite_id": "old_lstm_actuator_policy_trajectory", "sampling_strategy": "old", "regime": "lstm_actuator_policy_trajectory", "contact_representation": "active15_tokens", "filename": "dataset_lstm_actuator_policy_valid.hdf5", "size_bytes": 7553841232, "sha256": "641e68726e2831263eb15f15228ed0a070122925a69644dc28b7c56dee5c94cf"},
+    {"suite_id": "new_exp_trajectory", "sampling_strategy": "new", "regime": "exp_trajectory", "contact_representation": "raw15_tokens", "filename": "dataset_valid.hdf5", "size_bytes": 7553841224, "sha256": "585ab05f14f05ca8a8900eac1161b2bbd9cd65daf0f7a7a41ee03f1390b7bb27"},
+    {"suite_id": "new_zero_action_trajectory", "sampling_strategy": "new", "regime": "zero_action_trajectory", "contact_representation": "raw15_tokens", "filename": "dataset_zero_action_valid.hdf5", "size_bytes": 7553841224, "sha256": "ac3184a7801409f7e2f9597215b176b8a8cb01ebfc922294f0ca6a768cdcf688"},
+    {"suite_id": "new_lstm_actuator_zero_action_trajectory", "sampling_strategy": "new", "regime": "lstm_actuator_zero_action_trajectory", "contact_representation": "raw15_tokens", "filename": "dataset_lstm_actuator_zero_action_valid.hdf5", "size_bytes": 7553841224, "sha256": "49ae396a5b59337cb3291fdb6a2f5f1decb1b8db6b747806c1cb1cabc95a13cd"},
+    {"suite_id": "new_lstm_actuator_policy_trajectory", "sampling_strategy": "new", "regime": "lstm_actuator_policy_trajectory", "contact_representation": "raw15_tokens", "filename": "dataset_lstm_actuator_policy_valid.hdf5", "size_bytes": 7553841224, "sha256": "c01a853a436128d3d9116cecda9dea7594b519b964c4c911bc32a278e0cc3d79"}
+  ]
+}
