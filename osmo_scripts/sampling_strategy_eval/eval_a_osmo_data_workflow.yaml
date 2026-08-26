@@ -24,6 +24,7 @@ workflow:
       SAMPLING_EVAL_CODE_DIR: /tmp/sampling-eval-code-input
       SAMPLING_EVAL_CODE_SHA256: "{{ code_archive_sha256 }}"
       SAMPLING_EVAL_CHECKPOINT_ROOT: /osmo/run/workspace/checkpoints
+      SAMPLING_EVAL_CHECKPOINT_INPUT_ROOT: /osmo/data/input/2
       SAMPLING_EVAL_RESULT_ROOT: /osmo/run/workspace/results
       SAMPLING_EVAL_OLD_DATASET_ROOT: /osmo/data/input/0/Anymal-C-Rough-Native-Active15
       SAMPLING_EVAL_NEW_DATASET_ROOT: /osmo/data/input/1/Anymal-C-Rough-Native-Raw15
@@ -39,6 +40,7 @@ workflow:
     inputs:
     - url: "{{ old_dataset_url }}"
     - url: "{{ new_dataset_url }}"
+    - url: "{{ checkpoint_url }}"
     files:
     - path: /tmp/sampling-eval-entrypoint.sh
       localpath: "{{ entrypoint_localpath }}"
@@ -49,6 +51,7 @@ default-values:
   workflow_name: rowan-sampling-eval-a-e199-osmo-data
   old_dataset_url: ""
   new_dataset_url: ""
+  checkpoint_url: ""
   code_archive_base64_localpath: ""
   code_archive_sha256: ""
   entrypoint_localpath: ./entrypoint.sh

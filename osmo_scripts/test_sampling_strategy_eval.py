@@ -187,7 +187,9 @@ def test_osmo_workflows_and_entrypoint_freeze_the_sampling_contract() -> None:
     assert "sampling_strategy_eval.run_eval" in entrypoint
     assert "isaaclab_neural.train.train" not in entrypoint
     assert "sampling_strategy_eval.download_checkpoints" in entrypoint
-    assert entrypoint.index('cd "$PROJECT_ROOT"') < entrypoint.index("sampling_strategy_eval.download_checkpoints")
+    assert "SAMPLING_EVAL_CHECKPOINT_INPUT_ROOT" in entrypoint
+    assert "verified {len(loaded)} preloaded checkpoints" in entrypoint
+    assert entrypoint.index('cd "$PROJECT_ROOT"') < entrypoint.index("\nprepare_checkpoints\n")
     assert "base64 --decode" in entrypoint
     assert "sha256sum --check" in entrypoint
     assert "SAMPLING_EVAL_ANALYSIS_JSON_BEGIN" in entrypoint
@@ -201,14 +203,16 @@ def test_osmo_data_workflows_mount_both_sampling_generations() -> None:
     d_workflow = (EVAL_DIR / "eval_d_osmo_data_workflow.yaml").read_text()
 
     for workflow in (a_workflow, d_workflow):
-        assert workflow.count("    - url:") == 2
+        assert workflow.count("    - url:") == 3
         assert "gpu: 1" in workflow
         assert "storage: 512Gi" in workflow
         assert "/mnt/amlfs" not in workflow
         assert "/osmo/data/input/0/" in workflow
         assert "/osmo/data/input/1/" in workflow
+        assert "SAMPLING_EVAL_CHECKPOINT_INPUT_ROOT: /osmo/data/input/2" in workflow
         assert 'old_dataset_url: ""' in workflow
         assert 'new_dataset_url: ""' in workflow
+        assert 'checkpoint_url: ""' in workflow
     assert "Anymal-C-Rough-Native-Active15" in a_workflow
     assert "Anymal-C-Rough-Native-Raw15" in a_workflow
     assert d_workflow.count("Anymal-C-Rough-Native-ContactTokens") == 2

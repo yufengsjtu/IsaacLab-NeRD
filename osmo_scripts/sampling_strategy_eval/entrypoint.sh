@@ -10,6 +10,7 @@ NEW_DATASET_ROOT="${SAMPLING_EVAL_NEW_DATASET_ROOT:?SAMPLING_EVAL_NEW_DATASET_RO
 CODE_INPUT_DIR="${SAMPLING_EVAL_CODE_DIR:-/osmo/run/workspace/code}"
 CODE_SHA256="${SAMPLING_EVAL_CODE_SHA256:?SAMPLING_EVAL_CODE_SHA256 is required}"
 CHECKPOINT_ROOT="${SAMPLING_EVAL_CHECKPOINT_ROOT:-/osmo/run/workspace/checkpoints}"
+CHECKPOINT_INPUT_ROOT="${SAMPLING_EVAL_CHECKPOINT_INPUT_ROOT:-}"
 RESULT_ROOT="${SAMPLING_EVAL_RESULT_ROOT:-/osmo/run/workspace/results}"
 PROJECT_ROOT=/root/code/IsaacLab-NeRD
 WANDB_ENTITY="${WANDB_ENTITY:?WANDB_ENTITY is required}"
@@ -42,6 +43,24 @@ extract_code() {
         echo "[FATAL] Extracted archive does not contain IsaacLab-NeRD." >&2
         exit 1
     fi
+}
+
+prepare_checkpoints() {
+    local manifest
+
+    if [[ -n "$CHECKPOINT_INPUT_ROOT" ]]; then
+        CHECKPOINT_ROOT="$CHECKPOINT_INPUT_ROOT"
+        manifest="$CHECKPOINT_ROOT/checkpoint_manifest_${ENCODER}.json"
+        python3 -c \
+            'import sys; from osmo_scripts.sampling_strategy_eval.contract import load_verified_checkpoints; loaded = load_verified_checkpoints(sys.argv[1], sys.argv[2]); print(f"[sampling-eval] verified {len(loaded)} preloaded checkpoints")' \
+            "$manifest" "$ENCODER"
+        return
+    fi
+    python3 -m osmo_scripts.sampling_strategy_eval.download_checkpoints \
+        --source-manifest "$PROJECT_ROOT/osmo_scripts/sampling_strategy_eval/checkpoint_manifest_${ENCODER}.json" \
+        --output-root "$CHECKPOINT_ROOT" \
+        --entity "$WANDB_ENTITY" \
+        --project "$WANDB_PROJECT"
 }
 
 dataset_filename() {
@@ -134,11 +153,7 @@ install_python_shims
 extract_code
 cd "$PROJECT_ROOT"
 python3 -m pip install --no-cache-dir -e "$PROJECT_ROOT/source/isaaclab_neural" --no-deps
-python3 -m osmo_scripts.sampling_strategy_eval.download_checkpoints \
-    --source-manifest "$PROJECT_ROOT/osmo_scripts/sampling_strategy_eval/checkpoint_manifest_${ENCODER}.json" \
-    --output-root "$CHECKPOINT_ROOT" \
-    --entity "$WANDB_ENTITY" \
-    --project "$WANDB_PROJECT"
+prepare_checkpoints
 mkdir -p "$RESULT_ROOT"
 for sampling in old new; do
     for regime in \
