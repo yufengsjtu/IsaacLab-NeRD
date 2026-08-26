@@ -7,10 +7,9 @@ set -x
 ENCODER="${SAMPLING_EVAL_ENCODER:?SAMPLING_EVAL_ENCODER is required}"
 OLD_DATASET_ROOT="${SAMPLING_EVAL_OLD_DATASET_ROOT:?SAMPLING_EVAL_OLD_DATASET_ROOT is required}"
 NEW_DATASET_ROOT="${SAMPLING_EVAL_NEW_DATASET_ROOT:?SAMPLING_EVAL_NEW_DATASET_ROOT is required}"
-CODE_INPUT_DIR="${SAMPLING_EVAL_CODE_DIR:-/osmo/data/input/0}"
+CODE_INPUT_DIR="${SAMPLING_EVAL_CODE_DIR:-/osmo/run/workspace/code}"
 CHECKPOINT_ROOT="${SAMPLING_EVAL_CHECKPOINT_ROOT:-/osmo/run/workspace/checkpoints}"
 RESULT_ROOT="${SAMPLING_EVAL_RESULT_ROOT:-/osmo/run/workspace/results}"
-RESULT_URL="${SAMPLING_EVAL_RESULT_URL:?SAMPLING_EVAL_RESULT_URL is required}"
 PROJECT_ROOT=/root/code/IsaacLab-NeRD
 WANDB_ENTITY="${WANDB_ENTITY:?WANDB_ENTITY is required}"
 WANDB_PROJECT="${WANDB_PROJECT:?WANDB_PROJECT is required}"
@@ -114,8 +113,17 @@ analyze_results() {
         --bootstrap-seed 20260826
 }
 
-persist_results() {
-    osmo data upload "$RESULT_URL" "$RESULT_ROOT"
+emit_results() {
+    echo "=== SAMPLING_EVAL_ANALYSIS_MARKDOWN_BEGIN ==="
+    cat "$RESULT_ROOT/analysis.md"
+    echo "=== SAMPLING_EVAL_ANALYSIS_MARKDOWN_END ==="
+    echo "=== SAMPLING_EVAL_ANALYSIS_JSON_BEGIN ==="
+    cat "$RESULT_ROOT/analysis.json"
+    echo "=== SAMPLING_EVAL_ANALYSIS_JSON_END ==="
+    touch "$RESULT_ROOT/DONE"
+    while [[ ! -f "$RESULT_ROOT/RESULTS_ACKNOWLEDGED" ]]; do
+        sleep 15
+    done
 }
 
 install_python_shims
@@ -138,4 +146,4 @@ for sampling in old new; do
     done
 done
 analyze_results
-persist_results
+emit_results
