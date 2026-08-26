@@ -187,6 +187,7 @@ def test_osmo_workflows_and_entrypoint_freeze_the_sampling_contract() -> None:
     assert "sampling_strategy_eval.run_eval" in entrypoint
     assert "isaaclab_neural.train.train" not in entrypoint
     assert "sampling_strategy_eval.download_checkpoints" in entrypoint
+    assert entrypoint.index('cd "$PROJECT_ROOT"') < entrypoint.index("sampling_strategy_eval.download_checkpoints")
     assert "base64 --decode" in entrypoint
     assert "sha256sum --check" in entrypoint
     assert "SAMPLING_EVAL_ANALYSIS_JSON_BEGIN" in entrypoint

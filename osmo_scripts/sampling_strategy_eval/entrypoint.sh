@@ -132,6 +132,7 @@ emit_results() {
 
 install_python_shims
 extract_code
+cd "$PROJECT_ROOT"
 python3 -m pip install --no-cache-dir -e "$PROJECT_ROOT/source/isaaclab_neural" --no-deps
 python3 -m osmo_scripts.sampling_strategy_eval.download_checkpoints \
     --source-manifest "$PROJECT_ROOT/osmo_scripts/sampling_strategy_eval/checkpoint_manifest_${ENCODER}.json" \
@@ -139,7 +140,6 @@ python3 -m osmo_scripts.sampling_strategy_eval.download_checkpoints \
     --entity "$WANDB_ENTITY" \
     --project "$WANDB_PROJECT"
 mkdir -p "$RESULT_ROOT"
-cd "$PROJECT_ROOT"
 for sampling in old new; do
     for regime in \
         exp_trajectory \
