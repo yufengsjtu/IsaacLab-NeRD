@@ -174,7 +174,7 @@ def test_osmo_workflows_and_entrypoint_freeze_the_sampling_contract() -> None:
         assert "osmo_scripts/start.sh" not in workflow
         assert "run_experiment.py" not in workflow
         assert "WANDB_API_KEY: wandb_api_key" in workflow
-        assert "/osmo/run/workspace/code/IsaacLab-NeRD.tar.gz.base64" in workflow
+        assert "/tmp/sampling-eval-code-input/IsaacLab-NeRD.tar.gz.base64" in workflow
         assert "SAMPLING_EVAL_CODE_SHA256" in workflow
     assert a_workflow.count("    - url:") == 0
     assert d_workflow.count("    - url:") == 1
