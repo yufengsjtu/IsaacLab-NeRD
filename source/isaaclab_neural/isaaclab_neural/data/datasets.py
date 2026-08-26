@@ -17,14 +17,25 @@ from torch.utils.data import Dataset
 
 from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_REPRESENTATION_ACTIVE15,
+    CONTACT_REPRESENTATION_ACTIVE15_SELF,
     CONTACT_REPRESENTATION_FLAT,
     CONTACT_REPRESENTATION_RAW15,
+    CONTACT_REPRESENTATION_RAW15_SELF,
+    CONTACT_TOKEN_SELF_COLLISION_FIELD,
+    CONTACT_TOKEN_SELF_COLLISION_SCHEMA,
     CONTACT_TOKEN_SOLVER_ACTIVE_FIELD,
     CONTACT_TOKEN_SOLVER_ACTIVE_SCHEMA,
+    is_native15_contact_representation,
+    is_native15_self_contact_representation,
 )
 from isaaclab_neural.utils.commons import DATASET_MODES
 
-BOOL_DATASET_KEYS = {"contact_masks", CONTACT_TOKEN_SOLVER_ACTIVE_FIELD}
+BOOL_DATASET_KEYS = {
+    "contact_masks",
+    CONTACT_TOKEN_SELF_COLLISION_FIELD,
+    CONTACT_TOKEN_SOLVER_ACTIVE_FIELD,
+}
+
 INTEGER_DATASET_KEYS = {
     "contact_body_ids",
     "contact_token_body_ids",
@@ -88,24 +99,42 @@ def validate_contact_token_metadata(
         return
     token_frame = _decode_attr(data_group.attrs.get("contact_token_frame", ""))
     identity_schema = _decode_attr(data_group.attrs.get("contact_identity_schema", ""))
-    if representation in {CONTACT_REPRESENTATION_RAW15, CONTACT_REPRESENTATION_ACTIVE15}:
-        representation_name = "Raw15" if representation == CONTACT_REPRESENTATION_RAW15 else "Active15"
+    if is_native15_contact_representation(representation):
+        representation_name = {
+            CONTACT_REPRESENTATION_ACTIVE15: "Active15",
+            CONTACT_REPRESENTATION_ACTIVE15_SELF: "Active15Self",
+            CONTACT_REPRESENTATION_RAW15: "Raw15",
+            CONTACT_REPRESENTATION_RAW15_SELF: "Raw15Self",
+        }[representation]
         if token_frame != "owner_body_v1" or identity_schema != "world_owner_v1":
             raise ValueError(
                 f"{representation_name} dataset requires contact_token_frame='owner_body_v1' and "
                 "contact_identity_schema='world_owner_v1'; regenerate this dataset."
             )
-        required_metadata = {
-            "contact_schema": (
-                "raw15_owner_body_v1" if representation == CONTACT_REPRESENTATION_RAW15 else "active15_owner_body_v1"
+        representation_metadata = {
+            CONTACT_REPRESENTATION_ACTIVE15: (
+                "active15_owner_body_v1",
+                "mujoco_solver_included_v1",
             ),
+            CONTACT_REPRESENTATION_ACTIVE15_SELF: (
+                "active15_self_owner_body_v1",
+                "mujoco_solver_included_with_directed_robot_self_v1",
+            ),
+            CONTACT_REPRESENTATION_RAW15: (
+                "raw15_owner_body_v1",
+                "newton_raw_candidates_v1",
+            ),
+            CONTACT_REPRESENTATION_RAW15_SELF: (
+                "raw15_self_owner_body_v1",
+                "newton_raw_candidates_with_directed_robot_self_v1",
+            ),
+        }
+        contact_schema, contact_selection = representation_metadata[representation]
+        required_metadata = {
+            "contact_schema": contact_schema,
             "contact_frame": "owner_body_v1",
             "contact_velocity_point": "raw_point_midpoint_v1",
-            "contact_selection": (
-                "newton_raw_candidates_v1"
-                if representation == CONTACT_REPRESENTATION_RAW15
-                else "mujoco_solver_included_v1"
-            ),
+            "contact_selection": contact_selection,
         }
         mismatched = {
             key: _decode_attr(data_group.attrs.get(key, ""))
@@ -174,6 +203,25 @@ def validate_contact_token_metadata(
         if schema != CONTACT_TOKEN_SOLVER_ACTIVE_SCHEMA:
             raise ValueError(
                 f"{CONTACT_TOKEN_SOLVER_ACTIVE_FIELD} requires schema {CONTACT_TOKEN_SOLVER_ACTIVE_SCHEMA!r}."
+            )
+    has_self_collision = CONTACT_TOKEN_SELF_COLLISION_FIELD in data_group
+    if is_native15_self_contact_representation(representation) and not has_self_collision:
+        raise ValueError(
+            f"{representation!r} requires {CONTACT_TOKEN_SELF_COLLISION_FIELD!r}; regenerate this dataset."
+        )
+    if has_self_collision:
+        self_collision = cast(h5py.Dataset, data_group[CONTACT_TOKEN_SELF_COLLISION_FIELD])
+        if self_collision.shape != expected_identity_shape:
+            raise ValueError(
+                f"{CONTACT_TOKEN_SELF_COLLISION_FIELD} must have shape {expected_identity_shape}, "
+                f"got {self_collision.shape}."
+            )
+        if self_collision.dtype.kind != "b":
+            raise ValueError(f"{CONTACT_TOKEN_SELF_COLLISION_FIELD} must use a boolean dtype.")
+        schema = _decode_attr(data_group.attrs.get("contact_token_self_collision_schema", ""))
+        if schema != CONTACT_TOKEN_SELF_COLLISION_SCHEMA:
+            raise ValueError(
+                f"{CONTACT_TOKEN_SELF_COLLISION_FIELD} requires schema {CONTACT_TOKEN_SELF_COLLISION_SCHEMA!r}."
             )
 
 

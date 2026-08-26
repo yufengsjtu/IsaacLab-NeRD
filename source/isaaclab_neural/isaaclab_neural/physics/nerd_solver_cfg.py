@@ -29,7 +29,14 @@ ContactPackingPolicy = Literal[
 ]
 """Policy for ordering Newton native contacts before packing into fixed slots."""
 
-ContactRepresentation = Literal["flat", "contact_tokens", "raw15_tokens", "active15_tokens"]
+ContactRepresentation = Literal[
+    "flat",
+    "contact_tokens",
+    "raw15_tokens",
+    "active15_tokens",
+    "raw15_self_tokens",
+    "active15_self_tokens",
+]
 """Contact encoding used by the trained neural model."""
 
 ContactFilter = Literal["none", "solver_active"]

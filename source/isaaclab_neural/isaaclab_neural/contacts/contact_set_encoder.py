@@ -130,6 +130,7 @@ class ContactSetEncoder:
         self._overflow: torch.Tensor | None = None
         self._body_ids: torch.Tensor | None = None
         self._solver_active: torch.Tensor | None = None
+        self._self_collision: torch.Tensor | None = None
         self._overflow_total = 0
         self._frames = 0
 
@@ -147,6 +148,11 @@ class ContactSetEncoder:
     def last_solver_active(self) -> torch.Tensor | None:
         """Solver-active flags aligned with the last packed token frame."""
         return self._solver_active
+
+    @property
+    def last_self_collision(self) -> torch.Tensor | None:
+        """Robot self-collision flags aligned with the last packed token frame."""
+        return self._self_collision
 
     def reset_overflow_stats(self) -> None:
         """Reset cumulative overflow telemetry."""

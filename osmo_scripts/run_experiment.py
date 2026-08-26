@@ -98,6 +98,13 @@ def dataset_contact_representation(experiment: dict) -> str:
     return str(experiment.get("dataset_contact_representation", experiment.get("contact_representation", "flat")))
 
 
+def _hdf5_dataset_any(dataset: h5py.Dataset) -> bool:
+    """Return whether a dataset contains a nonzero value without materializing it."""
+    if dataset.chunks is None:
+        return bool(dataset[()].any())
+    return any(bool(dataset[selection].any()) for selection in dataset.iter_chunks())
+
+
 def dataset_cache_complete(
     candidate_dir: Path,
     required_files: list[str],
@@ -109,6 +116,10 @@ def dataset_cache_complete(
     require_solver_active = (
         experiment.get("contact_filter", "none") == "solver_active" and stored_representation == "contact_tokens"
     )
+    self_representations = {"raw15_self_tokens", "active15_self_tokens"}
+    require_self_collision_tokens = bool(experiment.get("require_self_collision_tokens", False))
+    require_zero_overflow = bool(experiment.get("require_zero_contact_token_overflow", False))
+    saw_self_collision = False
     for filename in required_files:
         dataset_path = candidate_dir / filename
         if not dataset_path.is_file():
@@ -120,6 +131,8 @@ def dataset_cache_complete(
             "contact_tokens",
             "raw15_tokens",
             "active15_tokens",
+            "raw15_self_tokens",
+            "active15_self_tokens",
         }
         require_terrain_context = bool(experiment.get("require_terrain_context", False))
         with h5py.File(dataset_path, "r") as handle:
@@ -177,6 +190,8 @@ def dataset_cache_complete(
                 }
                 if require_solver_active:
                     required_token_fields.add("contact_token_solver_active")
+                if stored_representation in self_representations:
+                    required_token_fields.add("contact_token_self_collision")
                 missing_token_fields = sorted(required_token_fields - set(data_group.keys()))
                 expected_representation = stored_representation
                 native15_metadata = {
@@ -187,6 +202,14 @@ def dataset_cache_complete(
                     "raw15_tokens": {
                         "contact_schema": "raw15_owner_body_v1",
                         "contact_selection": "newton_raw_candidates_v1",
+                    },
+                    "active15_self_tokens": {
+                        "contact_schema": "active15_self_owner_body_v1",
+                        "contact_selection": "mujoco_solver_included_with_directed_robot_self_v1",
+                    },
+                    "raw15_self_tokens": {
+                        "contact_schema": "raw15_self_owner_body_v1",
+                        "contact_selection": "newton_raw_candidates_with_directed_robot_self_v1",
                     },
                 }
                 expected_frame = "owner_body_v1" if expected_representation in native15_metadata else "world_v1"
@@ -221,6 +244,7 @@ def dataset_cache_complete(
                 world_ids = cast(h5py.Dataset, data_group["contact_token_world_ids"])
                 overflow = cast(h5py.Dataset, data_group["contact_token_overflow"])
                 solver_active = data_group.get("contact_token_solver_active")
+                self_collision = data_group.get("contact_token_self_collision")
                 token_shapes_ok = (
                     tokens.shape == (*step_shape, expected_capacity, 17)
                     and body_ids.shape == (*step_shape, expected_capacity)
@@ -244,6 +268,22 @@ def dataset_cache_complete(
                     )
                 elif require_solver_active:
                     token_shapes_ok = False
+                if self_collision is not None:
+                    self_collision = cast(h5py.Dataset, self_collision)
+                    token_shapes_ok = token_shapes_ok and self_collision.shape == (*step_shape, expected_capacity)
+                    token_dtypes_ok = token_dtypes_ok and self_collision.dtype.kind == "b"
+                    token_dtypes_ok = (
+                        token_dtypes_ok
+                        and str(data_group.attrs.get("contact_token_self_collision_schema", ""))
+                        == "directed_robot_self_v1"
+                    )
+                    if require_self_collision_tokens and not saw_self_collision:
+                        saw_self_collision = _hdf5_dataset_any(self_collision)
+                elif stored_representation in self_representations:
+                    token_shapes_ok = False
+                if require_zero_overflow and _hdf5_dataset_any(overflow):
+                    print(f"Rejected cached dataset with nonzero contact-token overflow: {dataset_path}")
+                    return False
                 if not token_shapes_ok or not token_dtypes_ok:
                     print(f"Rejected cached dataset with incompatible token shapes or dtypes: {dataset_path}")
                     return False
@@ -293,6 +333,9 @@ def dataset_cache_complete(
                 if not has_context:
                     print(f"Rejected cached dataset without required terrain context: {dataset_path}")
                     return False
+    if require_self_collision_tokens and not saw_self_collision:
+        print(f"Rejected cached dataset without any directed robot self-collision tokens: {candidate_dir}")
+        return False
     return True
 
 
@@ -399,7 +442,13 @@ def contact_args(experiment: dict) -> list[str]:
             "--contact-representation",
             representation,
         ]
-        if representation in {"contact_tokens", "raw15_tokens", "active15_tokens"}:
+        if representation in {
+            "contact_tokens",
+            "raw15_tokens",
+            "active15_tokens",
+            "raw15_self_tokens",
+            "active15_self_tokens",
+        }:
             args += [
                 "--max-contact-tokens",
                 str(experiment.get("max_contact_tokens", 64)),

@@ -23,7 +23,9 @@ from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_FILTER_NONE,
     CONTACT_FILTER_SOLVER_ACTIVE,
     CONTACT_REPRESENTATION_ACTIVE15,
+    CONTACT_REPRESENTATION_ACTIVE15_SELF,
     CONTACT_REPRESENTATION_RAW15,
+    CONTACT_REPRESENTATION_RAW15_SELF,
     CONTACT_REPRESENTATION_TOKENS,
     is_contact_token_representation,
 )
@@ -179,13 +181,19 @@ def validate_cfg(cfg) -> None:
         contact_representation == CONTACT_REPRESENTATION_ACTIVE15
         and dataset_representation == CONTACT_REPRESENTATION_RAW15
         and contact_filter == CONTACT_FILTER_SOLVER_ACTIVE
+    ) or (
+        contact_representation == CONTACT_REPRESENTATION_ACTIVE15_SELF
+        and dataset_representation == CONTACT_REPRESENTATION_RAW15_SELF
+        and contact_filter == CONTACT_FILTER_SOLVER_ACTIVE
     )
     if not representations_match and not active15_raw15_view:
         raise ValueError("Dataset and model contact representations differ without a supported reusable contact view.")
     encoder_type = cfg.get("inputs", {}).get("contact_set", {}).get("encoder_type")
     native15_encoder_pairs = {
         "active15_tokens": "body_routed_active15",
+        "active15_self_tokens": "body_routed_active15",
         "raw15_tokens": "body_routed_raw15",
+        "raw15_self_tokens": "body_routed_raw15",
     }
     expected_encoder = native15_encoder_pairs.get(contact_representation)
     configured_native15_encoder = encoder_type in native15_encoder_pairs.values()

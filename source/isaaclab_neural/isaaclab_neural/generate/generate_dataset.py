@@ -151,7 +151,13 @@ def main(env_cfg, agent_cfg=None) -> None:
     # moves tensors to CPU anyway.
     if args_cli.data_device is not None:
         data_device = args_cli.data_device
-    elif getattr(args_cli, "contact_representation", "flat") in {"contact_tokens", "raw15_tokens", "active15_tokens"}:
+    elif getattr(args_cli, "contact_representation", "flat") in {
+        "contact_tokens",
+        "raw15_tokens",
+        "active15_tokens",
+        "raw15_self_tokens",
+        "active15_self_tokens",
+    }:
         data_device = "cpu"
     else:
         data_device = args_cli.device
@@ -159,6 +165,8 @@ def main(env_cfg, agent_cfg=None) -> None:
         "contact_tokens",
         "raw15_tokens",
         "active15_tokens",
+        "raw15_self_tokens",
+        "active15_self_tokens",
     }:
         print("[dataset] staging contact_tokens rollouts on CPU to avoid GPU OOM during chunk merge.")
 

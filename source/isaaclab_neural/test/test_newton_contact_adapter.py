@@ -12,9 +12,12 @@ import torch
 from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_FILTER_SOLVER_ACTIVE,
     CONTACT_REPRESENTATION_ACTIVE15,
+    CONTACT_REPRESENTATION_ACTIVE15_SELF,
     CONTACT_REPRESENTATION_TOKENS,
+    CONTACT_TOKEN_SELF_COLLISION_FIELD,
     CONTACT_TOKEN_SOLVER_ACTIVE_FIELD,
 )
+from isaaclab_neural.contacts.native15_self_contact_encoder import Raw15SelfContactEncoder
 from isaaclab_neural.contacts.newton_contact_adapter import NewtonContactAdapter
 from isaaclab_neural.contacts.packing import get_contact_order, resolve_contact_packing_policy
 from isaaclab_neural.contacts.raw15_contact_encoder import Raw15ContactEncoder
@@ -57,6 +60,23 @@ def test_active15_solver_filter_packs_raw15_before_filtering() -> None:
 
     assert isinstance(adapter._token_encoder, Raw15ContactEncoder)
     assert CONTACT_TOKEN_SOLVER_ACTIVE_FIELD not in adapter.to_neural_inputs()
+
+
+def test_active15_self_solver_filter_packs_raw_self_and_exposes_provenance() -> None:
+    adapter = NewtonContactAdapter(
+        _token_model(),
+        num_contacts_per_env=4,
+        device="cpu",
+        contact_representation=CONTACT_REPRESENTATION_ACTIVE15_SELF,
+        contact_filter=CONTACT_FILTER_SOLVER_ACTIVE,
+        max_contact_tokens=4,
+    )
+
+    assert isinstance(adapter._token_encoder, Raw15SelfContactEncoder)
+    inputs = adapter.to_neural_inputs()
+    assert inputs[CONTACT_TOKEN_SELF_COLLISION_FIELD].shape == (1, 4)
+    assert inputs[CONTACT_TOKEN_SELF_COLLISION_FIELD].dtype == torch.bool
+    assert CONTACT_TOKEN_SOLVER_ACTIVE_FIELD not in inputs
 
 
 def test_generic_contact_tokens_expose_aligned_solver_active_sidecar() -> None:

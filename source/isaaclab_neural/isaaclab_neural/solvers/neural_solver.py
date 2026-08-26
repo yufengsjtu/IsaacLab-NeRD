@@ -22,6 +22,7 @@ from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_FILTER_SOLVER_ACTIVE,
     CONTACT_REPRESENTATION_TOKENS,
     CONTACT_TOKEN_DIM,
+    CONTACT_TOKEN_SELF_COLLISION_FIELD,
     CONTACT_TOKEN_SOLVER_ACTIVE_FIELD,
     is_contact_token_representation,
 )
@@ -523,6 +524,7 @@ class NeuralSolver(SolverBase):
         from isaaclab_neural.contacts.contact_set_encoder import transform_contact_tokens_to_body_frame
 
         solver_active = model_inputs.pop(CONTACT_TOKEN_SOLVER_ACTIVE_FIELD, None)
+        model_inputs.pop(CONTACT_TOKEN_SELF_COLLISION_FIELD, None)
         if self.contact_filter == CONTACT_FILTER_SOLVER_ACTIVE and "contact_tokens" in model_inputs:
             model_inputs["contact_tokens"] = filter_solver_active_contact_tokens(
                 model_inputs["contact_tokens"],

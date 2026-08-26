@@ -22,6 +22,7 @@ class Active15ContactEncoder(ContactSetEncoder):
     """Encode one owner-routed token for each solver-active robot contact."""
 
     _solver_active_only = True
+    _include_robot_self_collisions = False
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -82,10 +83,13 @@ class Active15ContactEncoder(ContactSetEncoder):
             owner_velocity - other_velocity,
         )
 
-        # The adapter canonicalizes a unique primary side to side 0. Both
-        # native15 views exclude robot self-collisions; Active15 additionally
-        # applies Newton's strict solver-active gate.
-        valid = primary0 & ~primary1 & (owner_slot >= 0) & (world_id >= 0) & (world_id < self.num_envs)
+        # The adapter canonicalizes a unique primary side to side 0. Legacy
+        # native15 views exclude robot self-collisions; the explicit self view
+        # adds the reciprocal owner-frame row below.
+        self_collision = primary0 & primary1
+        valid = primary0 & (owner_slot >= 0) & (world_id >= 0) & (world_id < self.num_envs)
+        if not self._include_robot_self_collisions:
+            valid &= ~primary1
         if self._solver_active_only:
             valid &= solver_active
         candidates = torch.cat(
@@ -102,17 +106,72 @@ class Active15ContactEncoder(ContactSetEncoder):
             ),
             dim=-1,
         )
-        packed, overflow, body_ids = self._pack_active_rows(
+        self_collision_rows = self_collision & valid
+        if self._include_robot_self_collisions:
+            reverse_owner_slot = self._body_slot(body1)
+            reverse_valid = self_collision & (reverse_owner_slot >= 0) & (world_id >= 0) & (world_id < self.num_envs)
+            if self._solver_active_only:
+                reverse_valid &= solver_active
+
+            safe_reverse_owner = body1.clamp(min=0, max=body_q.shape[0] - 1)
+            reverse_owner_pose = body_q.index_select(0, safe_reverse_owner)
+            reverse_owner_position = reverse_owner_pose[:, :3]
+            reverse_owner_rotation = reverse_owner_pose[:, 3:7]
+            reverse_owner_point = torch_utils.transform_point_inverse(
+                reverse_owner_position,
+                reverse_owner_rotation,
+                point1_world,
+            )
+            reverse_other_point = torch_utils.transform_point_inverse(
+                reverse_owner_position,
+                reverse_owner_rotation,
+                point0_world,
+            )
+            reverse_owner_normal = torch_utils.quat_rotate_inverse(
+                reverse_owner_rotation,
+                normal01_world,
+            )
+            reverse_relative_velocity = torch_utils.quat_rotate_inverse(
+                reverse_owner_rotation,
+                other_velocity - owner_velocity,
+            )
+            reverse_candidates = torch.cat(
+                (
+                    reverse_valid.to(torch.float32).unsqueeze(-1),
+                    reverse_owner_slot.to(torch.float32).unsqueeze(-1),
+                    reverse_owner_point,
+                    reverse_other_point,
+                    reverse_owner_normal,
+                    signed_gap.unsqueeze(-1),
+                    reverse_relative_velocity,
+                    other_margin.unsqueeze(-1),
+                    owner_margin.unsqueeze(-1),
+                ),
+                dim=-1,
+            )
+            candidates = torch.cat((candidates, reverse_candidates), dim=0)
+            valid = torch.cat((valid, reverse_valid), dim=0)
+            world_id = torch.cat((world_id, world_id), dim=0)
+            body0 = torch.cat((body0, body1), dim=0)
+            signed_gap = torch.cat((signed_gap, signed_gap), dim=0)
+            self_collision_rows = torch.cat(
+                (self_collision_rows, self_collision & reverse_valid),
+                dim=0,
+            )
+
+        packed, overflow, body_ids, packed_self_collision = self._pack_active_rows(
             candidates,
             valid,
             world_id,
             body0,
             signed_gap,
+            self_collision_rows,
         )
         if self._overflow is None or self._overflow.device != packed.device:
             self._overflow = torch.zeros(self.num_envs, dtype=torch.long, device=packed.device)
         self._overflow.copy_(overflow)
         self._body_ids = body_ids
+        self._self_collision = packed_self_collision
         self._overflow_total += int(overflow.sum().item())
         return packed
 
@@ -127,6 +186,11 @@ class Active15ContactEncoder(ContactSetEncoder):
             (self.num_envs, self.max_contact_tokens),
             -1,
             dtype=torch.long,
+            device=self.device,
+        )
+        self._self_collision = torch.zeros(
+            (self.num_envs, self.max_contact_tokens),
+            dtype=torch.bool,
             device=self.device,
         )
         return packed
@@ -149,7 +213,8 @@ class Active15ContactEncoder(ContactSetEncoder):
         world_id: torch.Tensor,
         body_id: torch.Tensor,
         gap: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self_collision: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Pack contacts round-robin by owner body, then by signed gap."""
         capacity = self.max_contact_tokens
         dump_world = self.num_envs
@@ -194,6 +259,14 @@ class Active15ContactEncoder(ContactSetEncoder):
         )
         flat_body_ids.index_copy_(0, destination_sorted, body_id.index_select(0, order))
         packed_body_ids = flat_body_ids[:-1].reshape(self.num_envs, capacity)
+        flat_self_collision = torch.zeros(
+            (self.num_envs * capacity + 1,),
+            dtype=torch.bool,
+            device=self.device,
+        )
+        flat_self_collision.index_copy_(0, destination_sorted, self_collision.index_select(0, order))
+        packed_self_collision = flat_self_collision[:-1].reshape(self.num_envs, capacity)
+        packed_self_collision &= packed[..., ACTIVE15_VALID_INDEX] > 0.5
         overflow = torch.zeros(self.num_envs + 1, dtype=torch.long, device=self.device)
         dropped_sorted = valid.index_select(0, order) & ~keep_sorted
         if dropped_sorted.any():
@@ -202,4 +275,4 @@ class Active15ContactEncoder(ContactSetEncoder):
                 sorted_world[dropped_sorted],
                 torch.ones_like(sorted_world[dropped_sorted]),
             )
-        return packed, overflow[: self.num_envs], packed_body_ids
+        return packed, overflow[: self.num_envs], packed_body_ids, packed_self_collision

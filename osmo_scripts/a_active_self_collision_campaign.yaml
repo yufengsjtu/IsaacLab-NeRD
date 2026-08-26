@@ -1,0 +1,32 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+campaign:
+  name: a-active-self-collision
+  dataset_subdir: anymal-c-rough-newton-native-raw15-self-sampling-v1-20260826-0447
+  dataset_preset: anymal_rough_newton_native_raw15_self_dataset
+  dataset_cache_mode: require
+  storage_backend: osmo_data
+  priority: NORMAL
+  wandb_entity: nvr-srl
+  wandb_project: isaaclab-nerd-rowan-contact-ablation
+  resources:
+    num_gpu: 8
+    num_cpu: 96
+    memory: 512Gi
+    storage: 512Gi
+    platform: ovx-l40
+  training:
+    num_epochs: 1000
+    num_iters_per_epoch: 5000
+    save_interval: 100
+    persist_periodic_checkpoints: true
+    early_stop_checkpoint_gate: verify_wandb_file_download
+
+rows:
+  - id: A-ACTIVE-SELF-COLLISION
+    preset: anymal_rough_newton_native_active15_self
+    dataset_family: raw15_self
+    seeds: [0, 1, 2]

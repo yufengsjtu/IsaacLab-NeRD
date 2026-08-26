@@ -28,9 +28,9 @@ from tqdm import tqdm
 from isaaclab_neural.contacts.contact_set_schema import (
     ACTIVE15_CATEGORICAL_CHANNELS,
     CONTACT_FILTER_SOLVER_ACTIVE,
-    CONTACT_REPRESENTATION_ACTIVE15,
-    CONTACT_REPRESENTATION_RAW15,
     CONTACT_REPRESENTATION_TOKENS,
+    CONTACT_TOKEN_SELF_COLLISION_FIELD,
+    is_native15_contact_representation,
 )
 from isaaclab_neural.contacts.tensor_utils import (
     MIN_CONTACT_RMS_SAMPLES,
@@ -59,6 +59,7 @@ from isaaclab_neural.utils.time_report import TimeProfiler, TimeReport
 from isaaclab_neural.utils.torch_utils import grad_norm, num_params_torch_model
 
 NON_MODEL_DATA_KEYS = {
+    CONTACT_TOKEN_SELF_COLLISION_FIELD,
     "contact_token_body_ids",
     "contact_token_world_ids",
     "root_body_qd",
@@ -699,6 +700,10 @@ class VanillaTrainer:
             "save_interval": getattr(self, "save_interval", None),
             "wandb_save_periodic_checkpoints": getattr(self, "wandb_save_periodic_checkpoints", False),
             "model_num_parameters": num_params_torch_model(self.neural_model),
+            "contact_representation": solver_cfg.get("contact_representation", "flat"),
+            "dataset_contact_representation": algo_cfg.get("dataset", {}).get(
+                "contact_representation", solver_cfg.get("contact_representation", "flat")
+            ),
             "contact_encoder_type": contact_cfg.get("encoder_type"),
             "contact_body_latent_dim": contact_cfg.get("body_latent_dim"),
             "contact_hidden_dim": contact_cfg.get("hidden_dim"),
@@ -862,8 +867,7 @@ class VanillaTrainer:
                     if contact_token_moments is None:
                         categorical_channels = (
                             ACTIVE15_CATEGORICAL_CHANNELS
-                            if self.neural_solver.contact_representation
-                            in {CONTACT_REPRESENTATION_RAW15, CONTACT_REPRESENTATION_ACTIVE15}
+                            if is_native15_contact_representation(self.neural_solver.contact_representation)
                             else None
                         )
                         contact_token_moments = ContactTokenMoments(

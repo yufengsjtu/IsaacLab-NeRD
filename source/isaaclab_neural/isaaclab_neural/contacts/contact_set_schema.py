@@ -44,12 +44,16 @@ CONTACT_FILTER_NONE = "none"
 CONTACT_FILTER_SOLVER_ACTIVE = "solver_active"
 CONTACT_TOKEN_SOLVER_ACTIVE_FIELD = "contact_token_solver_active"
 CONTACT_TOKEN_SOLVER_ACTIVE_SCHEMA = "mujoco_solver_included_v1"
+CONTACT_TOKEN_SELF_COLLISION_FIELD = "contact_token_self_collision"
+CONTACT_TOKEN_SELF_COLLISION_SCHEMA = "directed_robot_self_v1"
 
 
 CONTACT_REPRESENTATION_FLAT = "flat"
 CONTACT_REPRESENTATION_TOKENS = "contact_tokens"
 CONTACT_REPRESENTATION_ACTIVE15 = "active15_tokens"
 CONTACT_REPRESENTATION_RAW15 = "raw15_tokens"
+CONTACT_REPRESENTATION_ACTIVE15_SELF = "active15_self_tokens"
+CONTACT_REPRESENTATION_RAW15_SELF = "raw15_self_tokens"
 
 ACTIVE15_TOKEN_DIM = 17
 ACTIVE15_FEATURE_DIM = 15
@@ -97,7 +101,17 @@ RAW15_FEATURE_NAMES = ACTIVE15_FEATURE_NAMES
 
 def is_native15_contact_representation(representation: str) -> bool:
     """Return whether the representation uses the owner-frame native15 schema."""
-    return representation in {CONTACT_REPRESENTATION_RAW15, CONTACT_REPRESENTATION_ACTIVE15}
+    return representation in {
+        CONTACT_REPRESENTATION_RAW15,
+        CONTACT_REPRESENTATION_ACTIVE15,
+        CONTACT_REPRESENTATION_RAW15_SELF,
+        CONTACT_REPRESENTATION_ACTIVE15_SELF,
+    }
+
+
+def is_native15_self_contact_representation(representation: str) -> bool:
+    """Return whether native15 tokens include directed robot self-collisions."""
+    return representation in {CONTACT_REPRESENTATION_RAW15_SELF, CONTACT_REPRESENTATION_ACTIVE15_SELF}
 
 
 def is_contact_token_representation(representation: str) -> bool:

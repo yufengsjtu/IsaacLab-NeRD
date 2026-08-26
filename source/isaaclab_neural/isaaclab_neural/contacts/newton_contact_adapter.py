@@ -17,13 +17,21 @@ from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_FILTER_NONE,
     CONTACT_FILTER_SOLVER_ACTIVE,
     CONTACT_REPRESENTATION_ACTIVE15,
+    CONTACT_REPRESENTATION_ACTIVE15_SELF,
     CONTACT_REPRESENTATION_FLAT,
     CONTACT_REPRESENTATION_RAW15,
+    CONTACT_REPRESENTATION_RAW15_SELF,
     CONTACT_REPRESENTATION_TOKENS,
     CONTACT_TOKEN_DIM,
+    CONTACT_TOKEN_SELF_COLLISION_FIELD,
     CONTACT_TOKEN_SOLVER_ACTIVE_FIELD,
     DEFAULT_MAX_CONTACT_TOKENS,
     is_contact_token_representation,
+    is_native15_self_contact_representation,
+)
+from isaaclab_neural.contacts.native15_self_contact_encoder import (
+    Active15SelfContactEncoder,
+    Raw15SelfContactEncoder,
 )
 from isaaclab_neural.contacts.packing import ContactPackingPolicy, get_contact_order
 from isaaclab_neural.contacts.raw15_contact_encoder import Raw15ContactEncoder
@@ -182,17 +190,28 @@ class NewtonContactAdapter:
             dtype=torch.bool,
             device=self.device,
         )
+        self.contact_token_self_collision = torch.zeros(
+            (self.num_envs, self.max_contact_tokens),
+            dtype=torch.bool,
+            device=self.device,
+        )
         self._token_encoder: ContactSetEncoder | None = None
         if is_contact_token_representation(self.contact_representation):
             encoder_types = {
                 CONTACT_REPRESENTATION_ACTIVE15: Active15ContactEncoder,
                 CONTACT_REPRESENTATION_RAW15: Raw15ContactEncoder,
+                CONTACT_REPRESENTATION_ACTIVE15_SELF: Active15SelfContactEncoder,
+                CONTACT_REPRESENTATION_RAW15_SELF: Raw15SelfContactEncoder,
+            }
+            filtered_raw_views = {
+                CONTACT_REPRESENTATION_ACTIVE15: Raw15ContactEncoder,
+                CONTACT_REPRESENTATION_ACTIVE15_SELF: Raw15SelfContactEncoder,
             }
             if (
-                self.contact_representation == CONTACT_REPRESENTATION_ACTIVE15
+                self.contact_representation in filtered_raw_views
                 and self.contact_filter == CONTACT_FILTER_SOLVER_ACTIVE
             ):
-                encoder_type = Raw15ContactEncoder
+                encoder_type = filtered_raw_views[self.contact_representation]
             else:
                 encoder_type = encoder_types.get(self.contact_representation, ContactSetEncoder)
             self._token_encoder = encoder_type(
@@ -223,6 +242,8 @@ class NewtonContactAdapter:
             self.contact_token_body_ids.fill_(-1)
         if hasattr(self, "contact_token_solver_active"):
             self.contact_token_solver_active.zero_()
+        if hasattr(self, "contact_token_self_collision"):
+            self.contact_token_self_collision.zero_()
 
     def update(
         self,
@@ -250,6 +271,11 @@ class NewtonContactAdapter:
             body_ids = self._token_encoder.last_body_ids
             if body_ids is not None:
                 self.contact_token_body_ids.copy_(body_ids)
+            if is_native15_self_contact_representation(self.contact_representation):
+                self_collision = self._token_encoder.last_self_collision
+                if self_collision is None:
+                    raise RuntimeError("Native15 self-collision encoding did not produce aligned flags.")
+                self.contact_token_self_collision.copy_(self_collision)
             if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
                 solver_active = self._token_encoder.last_solver_active
                 if solver_active is None:
@@ -411,6 +437,8 @@ class NewtonContactAdapter:
             }
             if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
                 inputs[CONTACT_TOKEN_SOLVER_ACTIVE_FIELD] = self.contact_token_solver_active
+            if is_native15_self_contact_representation(self.contact_representation):
+                inputs[CONTACT_TOKEN_SELF_COLLISION_FIELD] = self.contact_token_self_collision
             return inputs
 
         B = self.num_envs

@@ -17,11 +17,16 @@ import torch
 
 from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_REPRESENTATION_ACTIVE15,
+    CONTACT_REPRESENTATION_ACTIVE15_SELF,
     CONTACT_REPRESENTATION_RAW15,
+    CONTACT_REPRESENTATION_RAW15_SELF,
     CONTACT_REPRESENTATION_TOKENS,
+    CONTACT_TOKEN_SELF_COLLISION_FIELD,
+    CONTACT_TOKEN_SELF_COLLISION_SCHEMA,
     CONTACT_TOKEN_SOLVER_ACTIVE_FIELD,
     CONTACT_TOKEN_SOLVER_ACTIVE_SCHEMA,
     is_native15_contact_representation,
+    is_native15_self_contact_representation,
 )
 
 
@@ -54,7 +59,7 @@ def write_rollouts_to_hdf5(
     trajectory_context = _trajectory_context_arrays(rollouts, arrays["states"].shape[0])
     _validate_rollout_arrays(arrays)
     _validate_data_context_keys(arrays, trajectory_context)
-    _validate_contact_token_identity(arrays, trajectory_context)
+    _validate_contact_token_identity(arrays, trajectory_context, contact_representation)
     _validate_replay_context(arrays, terrain_context)
 
     with h5py.File(dataset_path, "w") as dataset_file:
@@ -91,7 +96,7 @@ def append_rollouts_to_hdf5(
     trajectory_context = _trajectory_context_arrays(rollouts, arrays["states"].shape[0])
     _validate_rollout_arrays(arrays)
     _validate_data_context_keys(arrays, trajectory_context)
-    _validate_contact_token_identity(arrays, trajectory_context)
+    _validate_contact_token_identity(arrays, trajectory_context, contact_representation)
     _validate_replay_context(arrays, terrain_context)
 
     with h5py.File(dataset_path, "a") as dataset_file:
@@ -167,6 +172,7 @@ def _validate_data_context_keys(arrays: Mapping[str, Any], trajectory_context: M
 def _validate_contact_token_identity(
     arrays: Mapping[str, Any],
     trajectory_context: Mapping[str, Any],
+    contact_representation: str | None,
 ) -> None:
     """Validate packed token identity shapes, padding, and row-world ownership."""
     if "contact_tokens" not in arrays:
@@ -191,16 +197,23 @@ def _validate_contact_token_identity(
         raise ValueError("Every valid contact token must have nonnegative owner body and world ids.")
     if np.any(~valid & ((body_ids != -1) | (world_ids != -1))):
         raise ValueError("Every padded contact token must use owner body and world id -1.")
-    solver_active = arrays.get(CONTACT_TOKEN_SOLVER_ACTIVE_FIELD)
-    if solver_active is not None:
-        if solver_active.shape != expected_shape:
+    aligned_boolean_fields = (CONTACT_TOKEN_SOLVER_ACTIVE_FIELD, CONTACT_TOKEN_SELF_COLLISION_FIELD)
+    for field in aligned_boolean_fields:
+        values = arrays.get(field)
+        if values is None:
+            continue
+        if values.shape != expected_shape:
+            raise ValueError(f"{field} must have shape {expected_shape}, got {values.shape}.")
+        if values.dtype != np.bool_:
+            raise ValueError(f"{field} must use a boolean dtype.")
+        if np.any(~valid & values):
+            raise ValueError(f"padded tokens must be false in {field}.")
+
+    if is_native15_self_contact_representation(contact_representation or ""):
+        if CONTACT_TOKEN_SELF_COLLISION_FIELD not in arrays:
             raise ValueError(
-                f"{CONTACT_TOKEN_SOLVER_ACTIVE_FIELD} must have shape {expected_shape}, got {solver_active.shape}."
+                f"{contact_representation} requires {CONTACT_TOKEN_SELF_COLLISION_FIELD}; regenerate this dataset."
             )
-        if solver_active.dtype != np.bool_:
-            raise ValueError(f"{CONTACT_TOKEN_SOLVER_ACTIVE_FIELD} must use a boolean dtype.")
-        if np.any(~valid & solver_active):
-            raise ValueError(f"padded tokens must be false in {CONTACT_TOKEN_SOLVER_ACTIVE_FIELD}.")
 
     required_context = {"state_world_id", "root_world_id", "contact_world_id"}
     missing_context = sorted(required_context - set(trajectory_context))
@@ -295,6 +308,8 @@ def _validate_append_target(
         }
         if CONTACT_TOKEN_SOLVER_ACTIVE_FIELD in arrays:
             expected_metadata["contact_token_solver_active_schema"] = CONTACT_TOKEN_SOLVER_ACTIVE_SCHEMA
+        if CONTACT_TOKEN_SELF_COLLISION_FIELD in arrays:
+            expected_metadata["contact_token_self_collision_schema"] = CONTACT_TOKEN_SELF_COLLISION_SCHEMA
         if is_native15_contact_representation(representation):
             expected_metadata.update(
                 {
@@ -309,11 +324,25 @@ def _validate_append_target(
                         "contact_selection": "mujoco_solver_included_v1",
                     }
                 )
+            elif representation == CONTACT_REPRESENTATION_ACTIVE15_SELF:
+                expected_metadata.update(
+                    {
+                        "contact_schema": "active15_self_owner_body_v1",
+                        "contact_selection": "mujoco_solver_included_with_directed_robot_self_v1",
+                    }
+                )
             elif representation == CONTACT_REPRESENTATION_RAW15:
                 expected_metadata.update(
                     {
                         "contact_schema": "raw15_owner_body_v1",
                         "contact_selection": "newton_raw_candidates_v1",
+                    }
+                )
+            elif representation == CONTACT_REPRESENTATION_RAW15_SELF:
+                expected_metadata.update(
+                    {
+                        "contact_schema": "raw15_self_owner_body_v1",
+                        "contact_selection": "newton_raw_candidates_with_directed_robot_self_v1",
                     }
                 )
         mismatched = {
@@ -473,6 +502,8 @@ def _update_metadata(data_group: h5py.Group, contact_representation: str | None 
         data_group.attrs["contact_identity_schema"] = "world_owner_v1"
         if CONTACT_TOKEN_SOLVER_ACTIVE_FIELD in data_group:
             data_group.attrs["contact_token_solver_active_schema"] = CONTACT_TOKEN_SOLVER_ACTIVE_SCHEMA
+        if CONTACT_TOKEN_SELF_COLLISION_FIELD in data_group:
+            data_group.attrs["contact_token_self_collision_schema"] = CONTACT_TOKEN_SELF_COLLISION_SCHEMA
         if is_native15_contact_representation(representation):
             data_group.attrs["contact_frame"] = "owner_body_v1"
             data_group.attrs["contact_token_frame"] = "owner_body_v1"
@@ -480,9 +511,15 @@ def _update_metadata(data_group: h5py.Group, contact_representation: str | None 
             if representation == CONTACT_REPRESENTATION_ACTIVE15:
                 data_group.attrs["contact_schema"] = "active15_owner_body_v1"
                 data_group.attrs["contact_selection"] = "mujoco_solver_included_v1"
+            elif representation == CONTACT_REPRESENTATION_ACTIVE15_SELF:
+                data_group.attrs["contact_schema"] = "active15_self_owner_body_v1"
+                data_group.attrs["contact_selection"] = "mujoco_solver_included_with_directed_robot_self_v1"
             elif representation == CONTACT_REPRESENTATION_RAW15:
                 data_group.attrs["contact_schema"] = "raw15_owner_body_v1"
                 data_group.attrs["contact_selection"] = "newton_raw_candidates_v1"
+            elif representation == CONTACT_REPRESENTATION_RAW15_SELF:
+                data_group.attrs["contact_schema"] = "raw15_self_owner_body_v1"
+                data_group.attrs["contact_selection"] = "newton_raw_candidates_with_directed_robot_self_v1"
         else:
             data_group.attrs["contact_token_frame"] = "world_v1"
         if "num_contacts_per_env" not in data_group.attrs:

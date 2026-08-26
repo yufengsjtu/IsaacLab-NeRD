@@ -76,7 +76,9 @@ class ModelMixedInput(nn.Module):
         encoder_type = input_cfg.get("contact_set", {}).get("encoder_type")
         native15_encoder_pairs = {
             "active15_tokens": "body_routed_active15",
+            "active15_self_tokens": "body_routed_active15",
             "raw15_tokens": "body_routed_raw15",
+            "raw15_self_tokens": "body_routed_raw15",
         }
         if contact_representation is not None:
             expected_encoder = native15_encoder_pairs.get(contact_representation)
