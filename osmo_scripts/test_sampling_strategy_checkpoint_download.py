@@ -16,7 +16,10 @@ from types import SimpleNamespace
 import torch
 
 from osmo_scripts.sampling_strategy_eval.contract import load_verified_checkpoints
-from osmo_scripts.sampling_strategy_eval.download_checkpoints import download_checkpoint_set
+from osmo_scripts.sampling_strategy_eval.download_checkpoints import (
+    download_checkpoint_artifact_set,
+    download_checkpoint_set,
+)
 
 
 def _cfg() -> dict:
@@ -115,6 +118,63 @@ def test_download_checkpoint_set_rebuilds_and_verifies_manifest(tmp_path: Path) 
         tmp_path / "downloaded",
         entity="entity",
         project="project",
+        api=FakeApi(),
+    )
+
+    assert len(load_verified_checkpoints(output_manifest, "a")) == 6
+
+
+def test_download_checkpoint_artifact_set_verifies_downloaded_bundle(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifact"
+    entries = []
+    for group in ("old", "new"):
+        for seed in range(3):
+            checkpoint_path = artifact_root / f"{group}_a" / f"seed{seed}" / "model_epoch199.pt"
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                {
+                    "version": 2,
+                    "epoch": 199,
+                    "cfg": _cfg(),
+                    "model_state_dict": {"weight": torch.arange(4).reshape(2, 2)},
+                },
+                checkpoint_path,
+            )
+            entries.append(
+                {
+                    "group": group,
+                    "seed": seed,
+                    "wandb_run_id": f"{group}{seed}",
+                    "path": str(checkpoint_path.relative_to(artifact_root)),
+                    "size_bytes": checkpoint_path.stat().st_size,
+                    "sha256": hashlib.sha256(checkpoint_path.read_bytes()).hexdigest(),
+                }
+            )
+    (artifact_root / "checkpoint_manifest_a.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "encoder": "a",
+                "checkpoint_epoch": 199,
+                "checkpoints": entries,
+            }
+        )
+    )
+
+    class FakeArtifact:
+        def download(self, *, root: str) -> str:
+            shutil.copytree(artifact_root, root, dirs_exist_ok=True)
+            return root
+
+    class FakeApi:
+        def artifact(self, name: str) -> FakeArtifact:
+            assert name == "entity/project/checkpoints:v3"
+            return FakeArtifact()
+
+    output_manifest = download_checkpoint_artifact_set(
+        "entity/project/checkpoints:v3",
+        tmp_path / "downloaded",
+        encoder="a",
         api=FakeApi(),
     )
 

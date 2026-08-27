@@ -11,6 +11,7 @@ CODE_INPUT_DIR="${SAMPLING_EVAL_CODE_DIR:-/osmo/run/workspace/code}"
 CODE_SHA256="${SAMPLING_EVAL_CODE_SHA256:?SAMPLING_EVAL_CODE_SHA256 is required}"
 CHECKPOINT_ROOT="${SAMPLING_EVAL_CHECKPOINT_ROOT:-/osmo/run/workspace/checkpoints}"
 CHECKPOINT_INPUT_ROOT="${SAMPLING_EVAL_CHECKPOINT_INPUT_ROOT:-}"
+CHECKPOINT_ARTIFACT="${SAMPLING_EVAL_CHECKPOINT_ARTIFACT:-}"
 RESULT_ROOT="${SAMPLING_EVAL_RESULT_ROOT:-/osmo/run/workspace/results}"
 PROJECT_ROOT=/root/code/IsaacLab-NeRD
 WANDB_ENTITY="${WANDB_ENTITY:?WANDB_ENTITY is required}"
@@ -54,6 +55,13 @@ prepare_checkpoints() {
         python3 -c \
             'import sys; from osmo_scripts.sampling_strategy_eval.contract import load_verified_checkpoints; loaded = load_verified_checkpoints(sys.argv[1], sys.argv[2]); print(f"[sampling-eval] verified {len(loaded)} preloaded checkpoints")' \
             "$manifest" "$ENCODER"
+        return
+    fi
+    if [[ -n "$CHECKPOINT_ARTIFACT" ]]; then
+        python3 -m osmo_scripts.sampling_strategy_eval.download_checkpoints \
+            --artifact "$CHECKPOINT_ARTIFACT" \
+            --encoder "$ENCODER" \
+            --output-root "$CHECKPOINT_ROOT"
         return
     fi
     python3 -m osmo_scripts.sampling_strategy_eval.download_checkpoints \

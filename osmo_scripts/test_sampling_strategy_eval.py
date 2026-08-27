@@ -203,16 +203,16 @@ def test_osmo_data_workflows_mount_both_sampling_generations() -> None:
     d_workflow = (EVAL_DIR / "eval_d_osmo_data_workflow.yaml").read_text()
 
     for workflow in (a_workflow, d_workflow):
-        assert workflow.count("    - url:") == 3
+        assert workflow.count("    - url:") == 2
         assert "gpu: 1" in workflow
         assert "storage: 512Gi" in workflow
         assert "/mnt/amlfs" not in workflow
         assert "/osmo/data/input/0/" in workflow
         assert "/osmo/data/input/1/" in workflow
-        assert "SAMPLING_EVAL_CHECKPOINT_INPUT_ROOT: /osmo/data/input/2" in workflow
+        assert 'SAMPLING_EVAL_CHECKPOINT_ARTIFACT: "{{ checkpoint_artifact }}"' in workflow
         assert 'old_dataset_url: ""' in workflow
         assert 'new_dataset_url: ""' in workflow
-        assert 'checkpoint_url: ""' in workflow
+        assert 'checkpoint_artifact: ""' in workflow
     assert "Anymal-C-Rough-Native-Active15" in a_workflow
     assert "Anymal-C-Rough-Native-Raw15" in a_workflow
     assert d_workflow.count("Anymal-C-Rough-Native-ContactTokens") == 2

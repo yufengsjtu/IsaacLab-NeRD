@@ -12,9 +12,9 @@ rollouts. The primary comparison is always old/new checkpoints on the same
 suite; own-distribution scores alone are descriptive.
 
 The jobs embed a Base64-encoded minimal immutable code archive in each OSMO
-workflow. Production workflows mount the exact fixed-Epoch-199 files as a
-read-only OSMO DATA input; a W&B download path remains available for runs that
-publish periodic files. Both paths enforce size, SHA-256, checkpoint, model,
+workflow. Production workflows download the exact fixed-Epoch-199 files from a
+versioned W&B Artifact; per-run W&B files and a preloaded input remain available
+as fallback ingress paths. All paths enforce size, SHA-256, checkpoint, model,
 and training-contract validation. Final Markdown and JSON analyses are printed
 into persistent OSMO logs; each task waits for an explicit result ACK before it
 exits.

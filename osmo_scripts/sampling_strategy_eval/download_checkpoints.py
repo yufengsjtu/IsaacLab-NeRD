@@ -12,7 +12,25 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .contract import CHECKPOINT_EPOCH, EXPECTED_SEEDS, sha256_file
+from .contract import CHECKPOINT_EPOCH, EXPECTED_SEEDS, load_verified_checkpoints, sha256_file
+
+
+def download_checkpoint_artifact_set(
+    artifact_name: str,
+    output_root: str | Path,
+    *,
+    encoder: str,
+    api: Any,
+) -> Path:
+    """Download and verify one versioned six-checkpoint W&B Artifact."""
+    root = Path(output_root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    downloaded_root = Path(api.artifact(artifact_name).download(root=str(root))).resolve()
+    if downloaded_root != root:
+        raise ValueError(f"W&B downloaded artifact to unexpected path: {downloaded_root}.")
+    output_manifest = root / f"checkpoint_manifest_{encoder}.json"
+    load_verified_checkpoints(output_manifest, encoder)
+    return output_manifest
 
 
 def download_checkpoint_set(
@@ -61,14 +79,30 @@ def download_checkpoint_set(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-manifest", required=True)
+    parser.add_argument("--source-manifest")
+    parser.add_argument("--artifact")
+    parser.add_argument("--encoder", choices=("a", "d"))
     parser.add_argument("--output-root", required=True)
-    parser.add_argument("--entity", required=True)
-    parser.add_argument("--project", required=True)
+    parser.add_argument("--entity")
+    parser.add_argument("--project")
     args = parser.parse_args()
 
     import wandb
 
+    if bool(args.source_manifest) == bool(args.artifact):
+        parser.error("Specify exactly one of --source-manifest or --artifact.")
+    if args.artifact:
+        if not args.encoder:
+            parser.error("--encoder is required with --artifact.")
+        download_checkpoint_artifact_set(
+            args.artifact,
+            args.output_root,
+            encoder=args.encoder,
+            api=wandb.Api(),
+        )
+        return
+    if not args.entity or not args.project:
+        parser.error("--entity and --project are required with --source-manifest.")
     download_checkpoint_set(
         args.source_manifest,
         args.output_root,
