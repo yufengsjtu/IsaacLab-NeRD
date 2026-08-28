@@ -118,6 +118,13 @@ the Newton-viewer rollout is recorded to
 `videos/contact_force_validation/contact_force_validation.mp4`; use
 `--video-path` and `--video-fps` to override the output.
 
+The final console summary reports `body_force_RMSE_N`,
+`body_force_active_RMSE_N`, and `body_force_active_fraction` using the same
+vector-error definitions as training. By default, samples from the first
+`num_states_history - 1` physics steps are excluded while transformer history
+fills. Use `--warmup-steps` to override this interval and
+`--active-force-threshold` to change the active-contact threshold.
+
 To validate under uniformly sampled actions without loading an RSL-RL policy:
 
 ```bash

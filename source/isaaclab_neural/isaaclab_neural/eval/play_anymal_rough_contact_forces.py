@@ -53,6 +53,18 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--nerd-checkpoint", type=str, default=None, help="Force-enabled NeRD checkpoint.")
     parser.add_argument("--num-envs", type=int, default=1, help="Number of parallel Newton environments.")
     parser.add_argument("--num-steps", type=int, default=500, help="Number of policy steps.")
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=None,
+        help="Physics steps excluded from plots and metrics. Defaults to the checkpoint history length minus one.",
+    )
+    parser.add_argument(
+        "--active-force-threshold",
+        type=float,
+        default=1.0,
+        help="Ground-truth force magnitude above which a body is active [N].",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--plot-env-id", type=int, default=0, help="Environment row recorded in the force plot.")
     parser.add_argument(
@@ -126,6 +138,29 @@ def rotate_body_forces_to_world(forces_b: torch.Tensor, root_body_q: torch.Tenso
 
     quaternions = root_body_q[:, None, 3:7].expand(*forces_b.shape[:-1], 4)
     return torch_utils.quat_rotate(quaternions.reshape(-1, 4), forces_b.reshape(-1, 3)).view_as(forces_b)
+
+
+def contact_force_metrics(
+    sensor_forces_w: torch.Tensor,
+    predicted_forces_w: torch.Tensor,
+    *,
+    active_threshold_n: float,
+) -> dict[str, float]:
+    """Compute vector-force RMSE metrics matching the training evaluator."""
+    if sensor_forces_w.shape != predicted_forces_w.shape or sensor_forces_w.shape[-1] != 3:
+        raise ValueError("Sensor and predicted force histories must have matching [..., num_bodies, 3] shapes.")
+    if sensor_forces_w.numel() == 0:
+        raise ValueError("Cannot compute contact-force metrics from empty histories.")
+    if active_threshold_n < 0.0:
+        raise ValueError("active_threshold_n must be non-negative.")
+    error_norm_sq = (predicted_forces_w - sensor_forces_w).square().sum(dim=-1)
+    active_mask = sensor_forces_w.norm(dim=-1) > active_threshold_n
+    active_rmse = error_norm_sq[active_mask].mean().sqrt() if active_mask.any() else error_norm_sq.new_zeros(())
+    return {
+        "body_force_RMSE_N": float(error_norm_sq.mean().sqrt()),
+        "body_force_active_RMSE_N": float(active_rmse),
+        "body_force_active_fraction": float(active_mask.float().mean()),
+    }
 
 
 def save_contact_force_plot(
@@ -432,6 +467,10 @@ def run(env_cfg, agent_cfg, args: argparse.Namespace) -> None:
         raise ValueError("Marker scale must be positive; threshold and offset must be non-negative.")
     if args.video_fps is not None and args.video_fps <= 0:
         raise ValueError("--video-fps must be positive.")
+    if args.warmup_steps is not None and args.warmup_steps < 0:
+        raise ValueError("--warmup-steps must be non-negative.")
+    if args.active_force_threshold < 0.0:
+        raise ValueError("--active-force-threshold must be non-negative.")
 
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.sim.device = args.device
@@ -501,8 +540,13 @@ def run(env_cfg, agent_cfg, args: argparse.Namespace) -> None:
 
         decimation = max(1, int(env.cfg.decimation))
         physics_dt = float(env.physics_dt)
+        warmup_steps = (
+            max(0, int(adapter.solver.num_states_history) - 1) if args.warmup_steps is None else args.warmup_steps
+        )
+        print(f"[metrics] excluding first {warmup_steps} physics step(s) as transformer warmup")
         sensor_history: list[torch.Tensor] = []
         predicted_history: list[torch.Tensor] = []
+        physics_step = 0
         video_writer = None
         if args.video:
             import imageio.v2 as imageio
@@ -544,8 +588,9 @@ def run(env_cfg, agent_cfg, args: argparse.Namespace) -> None:
                         env.scene.update(dt=physics_dt)
 
                         sensor_forces_w = adapter.body_net_contact_forces_w()
-                        sensor_history.append(sensor_forces_w[args.plot_env_id].norm(dim=-1).detach().cpu())
-                        predicted_history.append(predicted_forces_w[args.plot_env_id].norm(dim=-1).detach().cpu())
+                        if physics_step >= warmup_steps:
+                            sensor_history.append(sensor_forces_w[args.plot_env_id].detach().cpu())
+                            predicted_history.append(predicted_forces_w[args.plot_env_id].detach().cpu())
                         if markers is not None:
                             body_poses_w = wp.to_torch(adapter.backend.state.body_q).index_select(0, primary_body_ids)
                             markers.update(
@@ -554,6 +599,7 @@ def run(env_cfg, agent_cfg, args: argparse.Namespace) -> None:
                                 predicted_forces_w[args.plot_env_id],
                             )
                             env.render()
+                        physics_step += 1
 
                     if video_writer is not None:
                         frame = env.render(recompute=True)
@@ -562,18 +608,27 @@ def run(env_cfg, agent_cfg, args: argparse.Namespace) -> None:
                         video_writer.append_data(frame[..., :3])
                     action_source.update_observations()
                     if policy_step % 25 == 0 or policy_step == args.num_steps - 1:
+                        sensor_magnitudes = sensor_forces_w[args.plot_env_id].norm(dim=-1)
                         print(
                             f"[step {policy_step:05d}] "
-                            f"sensor_mean={sensor_history[-1].mean().item():.3f} N, "
-                            f"sensor_max={sensor_history[-1].max().item():.3f} N"
+                            f"sensor_mean={sensor_magnitudes.mean().item():.3f} N, "
+                            f"sensor_max={sensor_magnitudes.max().item():.3f} N"
                         )
         finally:
             if video_writer is not None:
                 video_writer.close()
                 print(f"[video] saved to: {Path(args.video_path).expanduser()}")
             if sensor_history:
-                sensor_history_tensor = torch.stack(sensor_history)
-                predicted_history_tensor = torch.stack(predicted_history)
+                sensor_force_vectors = torch.stack(sensor_history)
+                predicted_force_vectors = torch.stack(predicted_history)
+                metrics = contact_force_metrics(
+                    sensor_force_vectors,
+                    predicted_force_vectors,
+                    active_threshold_n=args.active_force_threshold,
+                )
+                print("[metrics] " + ", ".join(f"{name}={value:.6f}" for name, value in metrics.items()))
+                sensor_history_tensor = sensor_force_vectors.norm(dim=-1)
+                predicted_history_tensor = predicted_force_vectors.norm(dim=-1)
                 save_contact_force_plot(
                     sensor_history_tensor,
                     predicted_history_tensor,

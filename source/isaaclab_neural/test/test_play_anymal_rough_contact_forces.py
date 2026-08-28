@@ -12,6 +12,7 @@ import pytest
 import torch
 from isaaclab_neural.eval.play_anymal_rough_contact_forces import (
     _ActionSource,
+    contact_force_metrics,
     requested_newton_visualizer,
     rotate_body_forces_to_world,
     save_contact_force_plot,
@@ -72,6 +73,17 @@ def test_rotate_body_forces_to_world_uses_root_orientation():
 def test_rotate_body_forces_to_world_rejects_mismatched_root_shape():
     with pytest.raises(ValueError, match="root_body_q"):
         rotate_body_forces_to_world(torch.zeros(2, 17, 3), torch.zeros(1, 7))
+
+
+def test_contact_force_metrics_excludes_inactive_bodies():
+    sensor = torch.tensor([[[[0.0, 0.0, 0.0], [3.0, 0.0, 0.0]]]])
+    prediction = torch.tensor([[[[0.0, 4.0, 0.0], [0.0, 0.0, 0.0]]]])
+
+    metrics = contact_force_metrics(sensor, prediction, active_threshold_n=1.0)
+
+    assert metrics["body_force_RMSE_N"] == pytest.approx((25.0 / 2.0) ** 0.5)
+    assert metrics["body_force_active_RMSE_N"] == pytest.approx(3.0)
+    assert metrics["body_force_active_fraction"] == pytest.approx(0.5)
 
 
 def test_save_contact_force_plot_writes_all_body_curves(tmp_path):
