@@ -345,7 +345,7 @@ class NeuralSolver(SolverBase):
     def _before_model_forward(self):
         pass
 
-    def _model_forward(self, model_inputs):
+    def _forward_neural_model(self, model_inputs):
         """Predict state and update any enabled diagnostic auxiliary caches."""
         if self.predicted_body_net_contact_forces_b is None:
             return self.neural_model.forward(model_inputs, single_step=True)
@@ -354,6 +354,10 @@ class NeuralSolver(SolverBase):
         predicted_forces = model_output.auxiliary_predictions["body_net_contact_forces_b"]
         self.predicted_body_net_contact_forces_b.copy_(predicted_forces[:, -1])
         return model_output.state_prediction
+
+    def _model_forward(self, model_inputs):
+        """Run the neural-model inference path for the current solver."""
+        return self._forward_neural_model(model_inputs)
 
     def step(
         self,
