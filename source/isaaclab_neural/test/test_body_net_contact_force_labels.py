@@ -158,6 +158,27 @@ def test_hdf5_round_trip_and_missing_label_rejection(tmp_path):
         TrajectoryDataset(dataset_path, sample_sequence_length=2)
 
 
+def test_hdf5_rejects_missing_or_invalid_body_name_order(tmp_path):
+    dataset_path = tmp_path / "force_label_body_names.hdf5"
+    body_names = [f"body_{index}" for index in range(5)]
+    write_rollouts_to_hdf5(
+        dataset_path,
+        _token_rollouts(num_primary_bodies=5),
+        "rough-anymal",
+        body_net_contact_force_body_names=body_names,
+    )
+
+    with h5py.File(dataset_path, "a") as dataset_file:
+        del dataset_file["data"].attrs["body_net_contact_force_body_names"]
+    with pytest.raises(ValueError, match="body-name"):
+        TrajectoryDataset(dataset_path, sample_sequence_length=2)
+
+    with h5py.File(dataset_path, "a") as dataset_file:
+        dataset_file["data"].attrs["body_net_contact_force_body_names"] = ["body_0"] * 5
+    with pytest.raises(ValueError, match="unique"):
+        TrajectoryDataset(dataset_path, sample_sequence_length=2)
+
+
 def test_hdf5_append_preserves_body_name_order(tmp_path):
     dataset_path = tmp_path / "force_labels_append.hdf5"
     rollouts = _token_rollouts(num_primary_bodies=5)

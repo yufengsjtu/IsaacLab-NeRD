@@ -87,12 +87,12 @@ def validate_contact_token_metadata(data_group: h5py.Group) -> None:
         raise ValueError(f"Contact-token identity fields must use integer dtypes: {invalid_dtypes}.")
 
 
-def validate_body_net_contact_force_metadata(data_group: h5py.Group) -> None:
+def validate_body_net_contact_force_metadata(data_group: h5py.Group) -> tuple[str, ...] | None:
     """Reject missing or ambiguous per-body net contact-force labels."""
     force_key = "body_net_contact_forces_w"
     schema = _decode_attr(data_group.attrs.get("body_net_contact_force_schema", ""))
     if force_key not in data_group and not schema:
-        return
+        return None
     if force_key not in data_group:
         raise ValueError(f"Dataset declares body net contact-force labels but is missing field {force_key!r}.")
     expected_attrs = {
@@ -115,6 +115,19 @@ def validate_body_net_contact_force_metadata(data_group: h5py.Group) -> None:
             "Body net contact-force labels must have shape "
             f"[trajectories, steps, {num_primary_bodies}, 3], got {forces.shape}."
         )
+    body_names_attr = data_group.attrs.get("body_net_contact_force_body_names")
+    if body_names_attr is None:
+        raise ValueError("Body net contact-force dataset is missing body-name order metadata.")
+    body_names = tuple(_decode_attr(name) for name in body_names_attr)
+    if len(body_names) != num_primary_bodies:
+        raise ValueError(
+            f"Body net contact-force body-name order must contain {num_primary_bodies} names, got {len(body_names)}."
+        )
+    if any(not name for name in body_names):
+        raise ValueError("Body net contact-force body-name order contains an empty name.")
+    if len(set(body_names)) != len(body_names):
+        raise ValueError("Body net contact-force body names must be unique.")
+    return body_names
 
 
 def _read_hdf5_metadata(
@@ -128,7 +141,7 @@ def _read_hdf5_metadata(
     with h5py.File(dataset_path, "r", swmr=True, libver="latest") as dataset_file:
         data_group = cast(h5py.Group, dataset_file["data"])
         validate_contact_token_metadata(data_group)
-        validate_body_net_contact_force_metadata(data_group)
+        body_net_contact_force_body_names = validate_body_net_contact_force_metadata(data_group)
         mode = _decode_attr(data_group.attrs["mode"])
         if mode not in DATASET_MODES:
             raise ValueError(f"Unsupported dataset mode: {mode!r}. Expected one of {DATASET_MODES}.")
@@ -147,6 +160,7 @@ def _read_hdf5_metadata(
             "num_transitions_per_trajectory": num_transitions_per_trajectory,
             "num_trajectories": num_trajectories,
             "traj_lengths": None,
+            "body_net_contact_force_body_names": body_net_contact_force_body_names,
         }
 
         if mode == "trajectory":
@@ -261,6 +275,7 @@ class BatchTransitionDataset:
         self.traj_lengths: np.ndarray | None = None
         self.dataset: dict[str, torch.Tensor] = {}
         self.data_keys: list[str] = []
+        self.body_net_contact_force_body_names: tuple[str, ...] | None = None
         self.dataset_length = 0
 
         self.load_dataset(hdf5_dataset_path)
@@ -272,7 +287,7 @@ class BatchTransitionDataset:
         with h5py.File(dataset_path, "r", swmr=True, libver="latest") as dataset_file:
             data_group = cast(h5py.Group, dataset_file["data"])
             validate_contact_token_metadata(data_group)
-            validate_body_net_contact_force_metadata(data_group)
+            self.body_net_contact_force_body_names = validate_body_net_contact_force_metadata(data_group)
             mode = _decode_attr(data_group.attrs["mode"])
             if mode not in DATASET_MODES:
                 raise ValueError(f"Unsupported dataset mode: {mode!r}. Expected one of {DATASET_MODES}.")
@@ -352,6 +367,7 @@ class LazyBatchTransitionDataset:
         self.dataset_length = int(metadata["dataset_length"])
         self.total_transitions = int(metadata["total_transitions"])
         self.data_keys = list(metadata["data_keys"])
+        self.body_net_contact_force_body_names = metadata["body_net_contact_force_body_names"]
         self.num_transitions_per_trajectory = int(metadata["num_transitions_per_trajectory"])
         self._hdf5 = _LazyHdf5Accessor(self.dataset_path)
 
@@ -450,6 +466,7 @@ class TrajectoryDataset(Dataset):
         self.is_rank_sharded = world_size > 1
         self.dataset: dict[str, np.ndarray] = {}
         self.data_keys: list[str] = []
+        self.body_net_contact_force_body_names: tuple[str, ...] | None = None
         self.trajectory_context: dict[str, np.ndarray] = {}
         self.traj_lengths: np.ndarray = np.array([], dtype="int32")
         self.global_trajectory_indices = np.array([], dtype=np.int64)
@@ -465,7 +482,7 @@ class TrajectoryDataset(Dataset):
         with h5py.File(_resolve_dataset_path(hdf5_dataset_path), "r", swmr=True, libver="latest") as dataset_file:
             data_group = cast(h5py.Group, dataset_file["data"])
             validate_contact_token_metadata(data_group)
-            validate_body_net_contact_force_metadata(data_group)
+            self.body_net_contact_force_body_names = validate_body_net_contact_force_metadata(data_group)
             mode = _decode_attr(data_group.attrs["mode"])
             if mode != "trajectory":
                 raise ValueError(f"TrajectoryDataset requires dataset mode 'trajectory', got {mode!r}.")
@@ -580,6 +597,7 @@ class LazyTrajectoryDataset(Dataset):
 
         self.dataset_path = metadata["dataset_path"]
         self.data_keys = list(metadata["data_keys"])
+        self.body_net_contact_force_body_names = metadata["body_net_contact_force_body_names"]
         self.traj_lengths = cast(np.ndarray, metadata["traj_lengths"])
         self._hdf5 = _LazyHdf5Accessor(self.dataset_path)
         self.trajectory_context_keys: list[str] = []

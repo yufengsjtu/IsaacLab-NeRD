@@ -153,10 +153,16 @@ def _download_object_with_resume(
         raise ValueError("max_attempts must be positive.")
 
     connection, _ = connect()
-    object_headers = connection.head_object(container, object_name)
+    object_headers = _head_object_with_retries(
+        connection,
+        container,
+        object_name,
+        max_attempts=max_attempts,
+    )
     expected_size = int(object_headers["content-length"])
+    expected_etag = str(object_headers.get("etag", "")).strip('"').lower()
     partial_path = destination.with_name(f".{destination.name}.part")
-    if destination.is_file() and destination.stat().st_size == expected_size:
+    if destination.is_file() and _file_matches_object(destination, expected_size, expected_etag):
         return
     destination.unlink(missing_ok=True)
     if partial_path.is_file() and partial_path.stat().st_size > expected_size:
@@ -165,8 +171,11 @@ def _download_object_with_resume(
     for attempt in range(1, max_attempts + 1):
         offset = partial_path.stat().st_size if partial_path.is_file() else 0
         if offset == expected_size:
-            partial_path.replace(destination)
-            return
+            if _file_matches_object(partial_path, expected_size, expected_etag):
+                partial_path.replace(destination)
+                return
+            partial_path.unlink()
+            offset = 0
 
         try:
             connection, _ = connect()
@@ -214,6 +223,37 @@ def _download_object_with_resume(
 
         partial_path.replace(destination)
         return
+
+
+def _file_matches_object(path: Path, expected_size: int, expected_etag: str) -> bool:
+    """Return whether a local file matches Swift size and content ETag."""
+    if path.stat().st_size != expected_size:
+        return False
+    if len(expected_etag) != 32 or any(character not in "0123456789abcdef" for character in expected_etag):
+        return False
+    digest = hashlib.md5(usedforsecurity=False)
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest() == expected_etag
+
+
+def _head_object_with_retries(connection, container: str, object_name: str, *, max_attempts: int):
+    """Read Swift object metadata with bounded retries for transient failures."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return connection.head_object(container, object_name)
+        except Exception as exc:
+            if getattr(exc, "http_status", None) == 404 or attempt == max_attempts:
+                raise
+            delay_seconds = min(2 ** (attempt - 1), 30)
+            print(
+                f"Swift HEAD attempt {attempt}/{max_attempts} failed for {container}/{object_name}: "
+                f"{type(exc).__name__}: {exc}; retrying in {delay_seconds}s.",
+                flush=True,
+            )
+            time.sleep(delay_seconds)
+    raise AssertionError("unreachable")
 
 
 def download_prefix(
@@ -284,13 +324,20 @@ def upload_directory(container: str, source_dir: Path, prefix: str = "", *, resu
 
 def _upload_object(connection, container: str, source: Path, object_name: str, *, resume: bool = False) -> None:
     size = source.stat().st_size
-    if resume and _remote_object_has_size(connection, container, object_name, size):
-        print(f"Skipping existing Swift object {container}/{object_name}.")
-        return
     segment_size = int(os.environ.get("SWIFT_SEGMENT_SIZE_BYTES", DEFAULT_SEGMENT_SIZE_BYTES))
     if segment_size <= 0:
         raise ValueError("SWIFT_SEGMENT_SIZE_BYTES must be positive.")
     if size <= segment_size:
+        if resume and _matching_segment_etag(
+            connection,
+            container,
+            object_name,
+            source,
+            offset=0,
+            size=size,
+        ):
+            print(f"Skipping matching Swift object {container}/{object_name}.")
+            return
         with source.open("rb") as stream:
             connection.put_object(
                 container,
@@ -361,17 +408,6 @@ def _upload_object(connection, container: str, source: Path, object_name: str, *
         query_string="multipart-manifest=put",
     )
     print(f"Created static large object manifest for {container}/{object_name}.")
-
-
-def _remote_object_has_size(connection, container: str, object_name: str, size: int) -> bool:
-    """Return whether an existing object has the expected assembled size."""
-    try:
-        headers = connection.head_object(container, object_name)
-    except Exception as exc:
-        if getattr(exc, "http_status", None) == 404:
-            return False
-        raise
-    return int(headers.get("content-length", -1)) == size
 
 
 def _matching_segment_etag(

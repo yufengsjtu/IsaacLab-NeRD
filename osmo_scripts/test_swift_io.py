@@ -190,6 +190,42 @@ class TestSwiftIO(unittest.TestCase):
             )
             self.assertEqual(destination.read_bytes(), source.read_bytes())
 
+    def test_upload_resume_replaces_same_size_corrupt_object(self):
+        connection = FakeConnection()
+        connection.objects[("datasets", "cache/dataset.hdf5")] = b"xxxx"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "dataset.hdf5"
+            source.write_bytes(b"data")
+            with mock.patch.object(swift_io, "connect", return_value=(connection, "https://auth")):
+                swift_io.upload_directory("datasets", Path(temp_dir), "cache", resume=True)
+
+        self.assertEqual(connection.objects[("datasets", "cache/dataset.hdf5")], b"data")
+
+    def test_download_retries_transient_head_failure(self):
+        class FlakyHeadConnection(FakeConnection):
+            def __init__(self):
+                super().__init__()
+                self.head_attempts = 0
+
+            def head_object(self, container: str, object_name: str):
+                self.head_attempts += 1
+                if self.head_attempts == 1:
+                    raise ConnectionError("transient HEAD failure")
+                return super().head_object(container, object_name)
+
+        connection = FlakyHeadConnection()
+        connection.objects[("datasets", "cache/dataset.hdf5")] = b"dataset"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "dataset.hdf5"
+            with (
+                mock.patch.object(swift_io, "connect", return_value=(connection, "https://auth")),
+                mock.patch.object(swift_io.time, "sleep"),
+            ):
+                swift_io.download_object("datasets", "cache/dataset.hdf5", destination)
+
+            self.assertEqual(connection.head_attempts, 2)
+            self.assertEqual(destination.read_bytes(), b"dataset")
+
     def test_download_resumes_partial_object_for_up_to_five_attempts(self):
         class FlakyConnection(FakeConnection):
             def __init__(self):

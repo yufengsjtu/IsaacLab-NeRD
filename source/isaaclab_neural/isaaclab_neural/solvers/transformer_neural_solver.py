@@ -78,6 +78,7 @@ class TransformerNeuralSolver(NeuralSolver):
 
     def reset(self, env_ids=None):
         """Reset transformer history globally or for selected environments."""
+        super().reset(env_ids)
         if env_ids is None:
             self.reset_states_history()
             return

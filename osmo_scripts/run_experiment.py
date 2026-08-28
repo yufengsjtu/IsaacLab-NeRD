@@ -178,12 +178,22 @@ def dataset_cache_complete(
                     and data_group.attrs.get("body_net_contact_force_units") == "N"
                     and data_group.attrs.get("body_net_contact_force_timing") == "post_solve_t_to_t_plus_1"
                 )
+                body_names = tuple(
+                    name.decode() if isinstance(name, bytes) else str(name)
+                    for name in data_group.attrs.get("body_net_contact_force_body_names", ())
+                )
+                force_body_names_match = (
+                    len(body_names) == expected_primary_bodies
+                    and len(set(body_names)) == expected_primary_bodies
+                    and all(body_names)
+                )
                 if (
                     force_dataset is None
                     or force_dataset.ndim != 4
                     or force_dataset.shape[:2] != step_shape
                     or force_dataset.shape[-2:] != (expected_primary_bodies, 3)
                     or not force_metadata_matches
+                    or not force_body_names_match
                 ):
                     print(f"Rejected cached dataset without compatible per-body force labels: {dataset_path}")
                     return False

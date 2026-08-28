@@ -184,6 +184,27 @@ def test_solver_caches_latest_force_prediction_without_changing_state_prediction
     )
 
 
+def test_solver_reset_clears_cached_force_predictions():
+    solver = NeuralSolver.__new__(NeuralSolver)
+    solver.predicted_body_net_contact_forces_b = torch.ones(3, 4, 3)
+    solver.torch_device = "cpu"
+
+    NeuralSolver.reset(solver, env_ids=torch.tensor([1]))
+    assert torch.count_nonzero(solver.predicted_body_net_contact_forces_b[1]) == 0
+    assert torch.count_nonzero(solver.predicted_body_net_contact_forces_b[[0, 2]]) > 0
+
+    NeuralSolver.reset(solver)
+    assert torch.count_nonzero(solver.predicted_body_net_contact_forces_b) == 0
+
+
+def test_solver_reset_without_force_prediction_cache():
+    solver = NeuralSolver.__new__(NeuralSolver)
+    solver.predicted_body_net_contact_forces_b = None
+
+    NeuralSolver.reset(solver, env_ids=torch.tensor([0]))
+    NeuralSolver.reset(solver)
+
+
 def test_world_force_labels_rotate_into_current_root_axes():
     angle = torch.tensor(torch.pi / 4)
     root_body_q = torch.zeros(1, 2, 7)
@@ -208,6 +229,24 @@ def test_enabled_head_requires_force_labels_in_all_datasets():
     trainer.valid_datasets = {"missing": SimpleNamespace(data_keys=["states"])}
 
     with pytest.raises(ValueError, match=BODY_FORCE_LABEL_KEY):
+        trainer._validate_force_label_datasets()
+
+
+def test_enabled_head_requires_consistent_force_body_order():
+    trainer = VanillaTrainer.__new__(VanillaTrainer)
+    trainer.force_head_enabled = True
+    trainer.train_dataset = SimpleNamespace(
+        data_keys=["states", BODY_FORCE_LABEL_KEY],
+        body_net_contact_force_body_names=("base", "LF_FOOT"),
+    )
+    trainer.valid_datasets = {
+        "reversed": SimpleNamespace(
+            data_keys=["states", BODY_FORCE_LABEL_KEY],
+            body_net_contact_force_body_names=("LF_FOOT", "base"),
+        )
+    }
+
+    with pytest.raises(ValueError, match="body-name order"):
         trainer._validate_force_label_datasets()
 
 

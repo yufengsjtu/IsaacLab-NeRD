@@ -17,6 +17,7 @@ PACKAGE_ROOT = Path(__file__).parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
 CFG_DIR = PACKAGE_ROOT / "isaaclab_neural" / "train" / "cfg" / "Anymal"
 PRESET_DIR = REPOSITORY_ROOT / "osmo_scripts" / "presets"
+ENTRYPOINT_PATH = REPOSITORY_ROOT / "osmo_scripts" / "entrypoint.sh"
 sys.path.insert(0, str(REPOSITORY_ROOT / "osmo_scripts"))
 
 from run_experiment import DatasetSpec, build_dataset_args, dataset_cache_complete  # noqa: E402
@@ -101,6 +102,14 @@ def test_force_preset_adds_generation_flag_and_old_preset_does_not(tmp_path: Pat
     assert "record_body_net_contact_forces" not in old_experiment
 
 
+def test_osmo_entrypoint_traces_only_after_credentials_are_exported() -> None:
+    entrypoint = ENTRYPOINT_PATH.read_text(encoding="utf-8")
+    trace_offset = entrypoint.index("\nset -x\n")
+
+    assert trace_offset > entrypoint.index('export NGC_API_KEY="${NGC_API_KEY:-}"')
+    assert trace_offset > entrypoint.index('export WANDB_API_KEY="${WANDB_API_KEY:-}"')
+
+
 def test_force_preset_rejects_old_cache_without_force_labels(tmp_path: Path) -> None:
     dataset_path = tmp_path / "dataset_train.hdf5"
     experiment = {
@@ -136,5 +145,10 @@ def test_force_preset_rejects_old_cache_without_force_labels(tmp_path: Path) -> 
         data.attrs["body_net_contact_force_frame"] = "world"
         data.attrs["body_net_contact_force_units"] = "N"
         data.attrs["body_net_contact_force_timing"] = "post_solve_t_to_t_plus_1"
+
+    assert not dataset_cache_complete(tmp_path, [dataset_path.name], experiment)
+
+    with h5py.File(dataset_path, "a") as handle:
+        handle["data"].attrs["body_net_contact_force_body_names"] = [f"body_{index}" for index in range(17)]
 
     assert dataset_cache_complete(tmp_path, [dataset_path.name], experiment)

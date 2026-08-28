@@ -661,6 +661,20 @@ class VanillaTrainer:
                 f"Enabled body_net_contact_force_head requires {BODY_FORCE_LABEL_KEY!r} labels; "
                 f"missing from datasets: {missing}."
             )
+        body_name_orders = {
+            name: tuple(getattr(dataset, "body_net_contact_force_body_names", ()) or ())
+            for name, dataset in datasets.items()
+            if dataset is not None
+        }
+        reference_name, reference_order = next(iter(body_name_orders.items()))
+        mismatched_orders = {
+            name: order for name, order in body_name_orders.items() if not order or order != reference_order
+        }
+        if mismatched_orders:
+            raise ValueError(
+                "Body net contact-force datasets must use the same non-empty body-name order; "
+                f"{reference_name}={reference_order}, mismatched={mismatched_orders}."
+            )
 
     def _make_dataloader(
         self,

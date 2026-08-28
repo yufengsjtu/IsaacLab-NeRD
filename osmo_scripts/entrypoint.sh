@@ -2,7 +2,6 @@
 # OSMO task entrypoint. Downloads code/data, runs the selected preset, and uploads output.
 
 set -euo pipefail
-set -x
 
 WORKFLOW_ID="${WORKFLOW_ID:?WORKFLOW_ID is required}"
 OUTPUT_LOCAL_PATH="${OUTPUT_LOCAL_PATH:-/tmp/runs/output}"
@@ -20,6 +19,8 @@ NVDATASET_INDEX_URL="${NVDATASET_INDEX_URL:-https://artifactory.pdx.nvidia.com/a
 export OUTPUT_LOCAL_PATH
 export NGC_API_KEY="${NGC_API_KEY:-}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
+
+set -x
 
 write_shell_exports() {
     {

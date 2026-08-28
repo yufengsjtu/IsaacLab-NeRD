@@ -309,11 +309,17 @@ class NeuralSolver(SolverBase):
         """Reset solver state.
 
         Args:
-            env_ids: Optional environment ids to reset. Stateless solvers do
-                not maintain per-env memory, so the argument is accepted for
-                subclass consistency.
+            env_ids: Optional environment ids whose auxiliary predictions
+                should be cleared. Clears all environments when omitted.
         """
-        del env_ids
+        predicted_forces = getattr(self, "predicted_body_net_contact_forces_b", None)
+        if predicted_forces is None:
+            return
+        if env_ids is None:
+            predicted_forces.zero_()
+            return
+        env_ids = torch.as_tensor(env_ids, device=predicted_forces.device, dtype=torch.long)
+        predicted_forces[env_ids] = 0.0
 
     def sync_from_newton(
         self,
