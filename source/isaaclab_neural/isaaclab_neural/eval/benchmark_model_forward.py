@@ -10,7 +10,6 @@ import json
 import time
 
 import torch
-
 from isaaclab_neural.models.models import ModelMixedInput
 
 

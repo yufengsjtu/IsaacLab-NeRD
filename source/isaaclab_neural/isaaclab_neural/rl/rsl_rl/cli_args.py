@@ -72,6 +72,12 @@ def add_nerd_args(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument("--contact-mode", choices=["fixed_ground", "newton_native"], default=None)
     group.add_argument("--num-contacts-per-env", type=int, default=None)
+    group.add_argument(
+        "--use_kv_cache",
+        action="store_true",
+        default=False,
+        help="Use incremental RoPE Transformer inference with a per-environment KV cache.",
+    )
 
 
 def update_rsl_rl_cfg(agent_cfg: RslRlBaseRunnerCfg, args_cli: argparse.Namespace) -> RslRlBaseRunnerCfg:
@@ -106,6 +112,8 @@ def apply_solver_overrides(solver_cfg: NerdSolverCfg, args: argparse.Namespace) 
         solver_cfg.contact_mode = args.contact_mode
     if args.num_contacts_per_env is not None:
         solver_cfg.num_contacts_per_env = args.num_contacts_per_env
+    if getattr(args, "use_kv_cache", False):
+        solver_cfg.use_kv_cache = True
 
 
 def build_solver_cfg_from_neural_model(

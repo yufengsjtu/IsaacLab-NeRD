@@ -66,6 +66,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         default=False,
         help="Cache encoded Transformer input frames while retaining full-window attention.",
     )
+    parser.add_argument(
+        "--use_kv_cache",
+        action="store_true",
+        default=False,
+        help="Use incremental RoPE Transformer inference with a per-environment KV cache.",
+    )
     parser.add_argument("--neural-model-path-fg", type=str, default=None, help="FG ckpt for --compare.")
     parser.add_argument(
         "--neural-model-path-native",
@@ -184,6 +190,8 @@ def _spawn_worker(
     ]
     if neural_model_path is not None:
         cmd.extend(["--neural-model-path", neural_model_path])
+    if args.use_kv_cache:
+        cmd.append("--use_kv_cache")
     if getattr(args, "headless", False):
         cmd.append("--headless")
     if getattr(args, "device", None):
@@ -294,6 +302,7 @@ def main(env_cfg, agent_cfg) -> None:
         assert nerd_cli is not None
         solver_cfg = nerd_cli.apply_neural_model_to_env_cfg(env_cfg, args_cli)
         solver_cfg.use_feature_cache = args_cli.use_feature_cache
+        solver_cfg.use_kv_cache = args_cli.use_kv_cache
         launch_cfg = nerd_cli.build_launch_cfg(env_cfg)
 
     step_profile.reset()
@@ -333,6 +342,7 @@ def main(env_cfg, agent_cfg) -> None:
             "task": worker_task,
             "neural_model_path": args_cli.neural_model_path,
             "use_feature_cache": args_cli.use_feature_cache,
+            "use_kv_cache": args_cli.use_kv_cache,
             "num_envs": args_cli.num_envs,
             "warmup": args_cli.warmup,
             "steps": args_cli.steps,

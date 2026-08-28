@@ -58,6 +58,9 @@ class NerdSolverCfg(NewtonSolverCfg):
     use_feature_cache: bool = False
     """Whether to cache encoded Transformer inputs during sequential inference."""
 
+    use_kv_cache: bool = False
+    """Whether to use incremental RoPE Transformer inference with a per-environment KV cache."""
+
     reset_seq_length: int = 1
     """Step interval used by ``RNNNeuralSolver`` to reset recurrent hidden state."""
 

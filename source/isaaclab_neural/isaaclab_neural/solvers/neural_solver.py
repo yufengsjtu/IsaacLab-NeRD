@@ -380,23 +380,23 @@ class NeuralSolver(SolverBase):
             stream_context = nullcontext()
 
         with torch.no_grad(), stream_context:
-            self._before_model_forward()
-            # get the inputs for neural model
-            model_inputs = self.get_neural_model_inputs()
+            with step_profile.section("model_input_prepare"):
+                self._before_model_forward()
+                model_inputs = self.get_neural_model_inputs()
             # compute the prediction using neural model, shape (num_envs, 1, dim)
             with step_profile.section("model_forward"):
                 prediction = self._model_forward(model_inputs)
 
-            # convert the prediction to next states
-            cur_states = model_inputs["states"][:, -1, :]
-            next_states = self.convert_prediction_to_next_states(cur_states, prediction.squeeze(1), dt)
+            with step_profile.section("prediction_postprocess"):
+                cur_states = model_inputs["states"][:, -1, :]
+                next_states = self.convert_prediction_to_next_states(cur_states, prediction.squeeze(1), dt)
 
-            next_states_world = self.convert_states_back_to_world(model_inputs["root_body_q"], next_states)
+                next_states_world = self.convert_states_back_to_world(model_inputs["root_body_q"], next_states)
 
-            # copy next states to state_out
-            self.wrap2PI(next_states_world)
+                self.wrap2PI(next_states_world)
 
-            self._assign_states_from_torch(state_out, next_states_world)
+            with step_profile.section("state_writeback"):
+                self._assign_states_from_torch(state_out, next_states_world)
 
         # update maximal coordinates
         with step_profile.section("eval_fk"):

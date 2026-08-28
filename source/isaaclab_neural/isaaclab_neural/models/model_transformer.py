@@ -215,6 +215,29 @@ class GPT(nn.Module):
                 key[batch_indices] = 0
                 value[batch_indices] = 0
 
+        def copy_rows_from(self, source, batch_indices):
+            """Replace selected rows with rows from a smaller cache."""
+            batch_indices = torch.as_tensor(batch_indices, device=self.positions.device, dtype=torch.long).reshape(-1)
+            if source.positions.shape[0] != batch_indices.numel():
+                raise ValueError(
+                    f"Source cache batch size {source.positions.shape[0]} does not match "
+                    f"destination row count {batch_indices.numel()}."
+                )
+            if source.max_length != self.max_length or len(source.keys) != len(self.keys):
+                raise ValueError("Source and destination cache layouts must match.")
+
+            self.positions[batch_indices] = source.positions
+            self.lengths[batch_indices] = source.lengths
+            self.next_positions[batch_indices] = source.next_positions
+            for destination_key, destination_value, source_key, source_value in zip(
+                self.keys,
+                self.values,
+                source.keys,
+                source.values,
+            ):
+                destination_key[batch_indices] = source_key
+                destination_value[batch_indices] = source_value
+
         def prepare_append(self):
             """Reserve one cache entry per batch row and return its index and position."""
             old_lengths = self.lengths.clone()

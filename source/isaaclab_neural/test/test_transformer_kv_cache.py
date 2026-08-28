@@ -9,7 +9,6 @@ from collections import deque
 
 import pytest
 import torch
-
 from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
 from isaaclab_neural.models.model_transformer import GPT, GPTConfig
 from isaaclab_neural.models.models import ModelMixedInput
@@ -34,6 +33,7 @@ def _gpt(position_encoding: str = "rope") -> GPT:
 
 def test_solver_history_stacks_directly_into_batch_time_layout():
     solver = TransformerNeuralSolver.__new__(TransformerNeuralSolver)
+    solver.use_kv_cache = False
     solver.states_history = deque(
         (
             {"states": torch.tensor([[1.0], [2.0]]), "contact_token_overflow": torch.tensor([3, 4])},
@@ -46,6 +46,24 @@ def test_solver_history_stacks_directly_into_batch_time_layout():
 
     torch.testing.assert_close(inputs["states"], torch.tensor([[[1.0], [5.0]], [[2.0], [6.0]]]))
     torch.testing.assert_close(inputs["contact_token_overflow"], torch.tensor([[3, 7], [4, 8]]))
+
+
+def test_solver_kv_input_preparation_uses_only_latest_frame():
+    solver = TransformerNeuralSolver.__new__(TransformerNeuralSolver)
+    solver.use_kv_cache = True
+    solver.kv_cache_rebuild_env_ids = None
+    solver.kv_cache_rebuild_inputs = None
+    solver.states_history = deque(
+        ({"observation": torch.full((2, 6), float(step))} for step in range(5)),
+        maxlen=5,
+    )
+    solver.process_neural_model_inputs = lambda inputs: inputs
+
+    inputs = solver.get_neural_model_inputs()
+
+    assert inputs["observation"].shape == (2, 1, 6)
+    torch.testing.assert_close(inputs["observation"][:, 0], torch.full((2, 6), 4.0))
+    assert solver.kv_cache_rebuild_inputs is None
 
 
 def _mixed_input_model(position_encoding: str = "rope") -> ModelMixedInput:
@@ -180,6 +198,77 @@ def test_cache_eviction_and_partial_reset():
     assert not cache.valid_mask[0].any()
     assert cache.valid_mask[1].all()
     assert not cache.valid_mask[2].any()
+
+
+def test_rope_cached_forward_matches_prefix_and_bounds_evicted_cache():
+    model = _mixed_input_model()
+    inputs = torch.randn(2, 12, 6)
+    cache = None
+
+    with torch.inference_mode():
+        for step in range(inputs.shape[1]):
+            window = {"observation": inputs[:, max(0, step - 4) : step + 1]}
+            expected = model(window, single_step=True)
+            actual, cache = model.forward_cached(
+                {"observation": inputs[:, step : step + 1]},
+                cache,
+                max_cache_length=5,
+            )
+            if step < 5:
+                torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
+            else:
+                # Once eviction starts, retained deep-layer K/V entries still
+                # encode evicted causal context and are not exactly equivalent
+                # to recomputing a fresh sliding window.
+                assert torch.isfinite(actual).all()
+
+    assert cache.lengths.tolist() == [5, 5]
+    assert cache.next_positions.tolist() == [12, 12]
+
+
+def test_solver_kv_cache_rebuilds_only_reset_rows():
+    model = _mixed_input_model()
+    solver = TransformerNeuralSolver.__new__(TransformerNeuralSolver)
+    solver.num_states_history = 5
+    solver.use_feature_cache = False
+    solver.use_kv_cache = True
+    solver.feature_cache = None
+    solver.feature_cache_rebuild_env_ids = None
+    solver.kv_cache = None
+    solver.kv_cache_rebuild_env_ids = None
+    solver.kv_cache_rebuild_inputs = None
+    solver.neural_model = model
+    solver.torch_device = torch.device("cpu")
+    solver.process_neural_model_inputs = lambda inputs: inputs
+
+    initial_values = torch.randn(2, 5, 6)
+    solver.states_history = deque(
+        ({"observation": initial_values[:, step].clone()} for step in range(5)),
+        maxlen=5,
+    )
+    with torch.inference_mode():
+        for step in range(5):
+            solver._model_forward({"observation": initial_values[:, step : step + 1]})
+
+        solver.reset([0])
+        next_values = torch.randn(2, 1, 6)
+        solver.states_history.append({"observation": next_values[:, 0].clone()})
+        full_window = {
+            "observation": torch.stack(tuple(entry["observation"] for entry in solver.states_history), dim=1)
+        }
+        model_inputs = solver.get_neural_model_inputs()
+        assert solver.kv_cache_rebuild_inputs["observation"].shape == (1, 5, 6)
+        expected = model(full_window, single_step=True)
+        actual = solver._model_forward(model_inputs)
+
+    # The reset row is rebuilt from its complete zero-padded solver window and
+    # remains exactly equivalent. The uninterrupted row keeps incremental
+    # cache semantics after eviction.
+    torch.testing.assert_close(actual[0], expected[0], atol=1e-6, rtol=1e-5)
+    assert model_inputs["observation"].shape == (2, 1, 6)
+    assert solver.kv_cache_rebuild_inputs is None
+    assert solver.kv_cache.lengths.tolist() == [5, 5]
+    assert solver.kv_cache.next_positions.tolist() == [5, 6]
 
 
 def test_mixed_input_exposes_separate_cached_interface():
