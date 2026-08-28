@@ -14,6 +14,13 @@ import torch
 
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 
+from .contact_set_schema import (
+    CONTACT_REPRESENTATION_TOKENS,
+    CONTACT_TOKEN_BODY_SLOT_INDEX,
+    CONTACT_TOKEN_GAP_INDEX,
+    CONTACT_TOKEN_VALID_INDEX,
+)
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
     from isaaclab.managers import RewardTermCfg
@@ -51,6 +58,15 @@ def body_contacts(
         selected = torch.arange(adapter.bodies_per_env, device=adapter.device)[body_ids]
     else:
         selected = torch.as_tensor(body_ids, dtype=torch.long, device=adapter.device)
+
+    if getattr(adapter, "contact_representation", None) == CONTACT_REPRESENTATION_TOKENS:
+        tokens = adapter.contact_tokens
+        active = (tokens[..., CONTACT_TOKEN_VALID_INDEX] > 0.5) & (
+            tokens[..., CONTACT_TOKEN_GAP_INDEX] <= maximum_separation
+        )
+        body_slots = tokens[..., CONTACT_TOKEN_BODY_SLOT_INDEX].to(dtype=torch.long)
+        selected_bodies = body_slots.unsqueeze(-1) == selected
+        return torch.any(active.unsqueeze(-1) & selected_bodies, dim=1)
 
     active = adapter.contact_masks & (adapter.contact_depths <= maximum_separation)
     side0 = adapter.contact_body_ids_0.unsqueeze(-1) == selected

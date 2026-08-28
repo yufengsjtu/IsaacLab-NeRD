@@ -8,6 +8,12 @@
 from types import SimpleNamespace
 
 import torch
+from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_TOKEN_BODY_SLOT_INDEX,
+    CONTACT_TOKEN_DIM,
+    CONTACT_TOKEN_GAP_INDEX,
+    CONTACT_TOKEN_VALID_INDEX,
+)
 from isaaclab_neural.contacts.geometry_mdp import GeometryFeetAirTime, body_contacts
 from isaaclab_neural.physics import NewtonNerdManager
 
@@ -34,6 +40,34 @@ def test_body_contacts_matches_either_side_and_rejects_positive_separation(monke
 
     torch.testing.assert_close(
         actual,
+        torch.tensor([[True, False, False], [True, False, True]]),
+    )
+
+
+def test_body_contacts_reads_contact_tokens(monkeypatch):
+    adapter = _install_adapter(monkeypatch)
+    adapter.contact_representation = "contact_tokens"
+    adapter.contact_tokens = torch.zeros((2, 3, CONTACT_TOKEN_DIM))
+    adapter.contact_masks.zero_()
+
+    adapter.contact_tokens[0, 0, CONTACT_TOKEN_VALID_INDEX] = 1.0
+    adapter.contact_tokens[0, 0, CONTACT_TOKEN_BODY_SLOT_INDEX] = 1
+    adapter.contact_tokens[0, 0, CONTACT_TOKEN_GAP_INDEX] = -0.01
+    adapter.contact_tokens[0, 1, CONTACT_TOKEN_VALID_INDEX] = 1.0
+    adapter.contact_tokens[0, 1, CONTACT_TOKEN_BODY_SLOT_INDEX] = 2
+    adapter.contact_tokens[0, 1, CONTACT_TOKEN_GAP_INDEX] = 0.02
+    adapter.contact_tokens[0, 2, CONTACT_TOKEN_BODY_SLOT_INDEX] = 3
+    adapter.contact_tokens[0, 2, CONTACT_TOKEN_GAP_INDEX] = -0.01
+
+    adapter.contact_tokens[1, 0, CONTACT_TOKEN_VALID_INDEX] = 1.0
+    adapter.contact_tokens[1, 0, CONTACT_TOKEN_BODY_SLOT_INDEX] = 3
+    adapter.contact_tokens[1, 0, CONTACT_TOKEN_GAP_INDEX] = 0.0
+    adapter.contact_tokens[1, 1, CONTACT_TOKEN_VALID_INDEX] = 1.0
+    adapter.contact_tokens[1, 1, CONTACT_TOKEN_BODY_SLOT_INDEX] = 1
+    adapter.contact_tokens[1, 1, CONTACT_TOKEN_GAP_INDEX] = -0.01
+
+    torch.testing.assert_close(
+        body_contacts([1, 2, 3]),
         torch.tensor([[True, False, False], [True, False, True]]),
     )
 
