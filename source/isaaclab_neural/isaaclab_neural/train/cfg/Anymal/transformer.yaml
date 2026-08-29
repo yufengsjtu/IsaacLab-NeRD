@@ -15,7 +15,8 @@ env:
     orientation_prediction_parameterization: quaternion
     num_states_history: 10
     min_contact_event_threshold: 0.12
-    contact_mode: fixed_ground
+    contact_mode: newton_native
+    num_contacts_per_env: 64
 
 algorithm:
   name: SequenceModelTrainer

@@ -88,8 +88,11 @@ def configure_env(env_cfg, args) -> None:
     from isaaclab_newton.physics import MJWarpSolverCfg
     from isaaclab_newton.physics.newton_manager_cfg import NewtonCfg
 
+    from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
+
     if not isinstance(env_cfg.sim.physics, NewtonCfg):
         raise ValueError("Dataset generation requires a Newton physics preset.")
+    args.contact_mode = normalize_contact_mode(args.contact_mode)
     if args.contact_mode == "newton_native":
         physics_solver_cfg = env_cfg.sim.physics.solver_cfg
         if not isinstance(physics_solver_cfg, MJWarpSolverCfg):

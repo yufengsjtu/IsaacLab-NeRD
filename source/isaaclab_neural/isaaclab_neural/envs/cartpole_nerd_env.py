@@ -15,7 +15,7 @@ from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 
 from .neural_env_wrapper import NerdManagerBasedRLEnv
 
-DEFAULT_CARTPOLE_NERD_MODEL_PATH = "./pre-trained_models/Cartpole/nn/final_model.pt"
+DEFAULT_CARTPOLE_NERD_MODEL_PATH: str | None = None
 
 
 @configclass
@@ -29,7 +29,7 @@ class NerdCartpoleEnvCfg(CartpoleEnvCfg):
                 name="NeuralSolver",
                 neural_model_path=DEFAULT_CARTPOLE_NERD_MODEL_PATH,
                 num_contacts_per_env=0,
-                contact_mode="fixed_ground",
+                contact_mode="newton_native",
                 contact_packing_policy="penetration_priority",
                 states_frame="body",
                 anchor_frame_step="every",

@@ -63,8 +63,18 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kd-min", type=float, default=0.5, help="Minimum randomized actuator damping.")
     parser.add_argument("--kd-max", type=float, default=4.0, help="Maximum randomized actuator damping.")
     parser.add_argument("--render", action="store_true", help="Render while generating trajectories.")
-    parser.add_argument("--contact-mode", choices=["fixed_ground", "newton_native"], default="fixed_ground")
-    parser.add_argument("--num-contacts-per-env", type=int, default=0)
+    parser.add_argument(
+        "--contact-mode",
+        choices=["fixed_ground", "newton_native"],
+        default="newton_native",
+        help="Contact source. fixed_ground is deprecated and rejected as incompatible.",
+    )
+    parser.add_argument(
+        "--num-contacts-per-env",
+        type=int,
+        default=0,
+        help="Native contact capacity per environment. Use zero for the default contact-free Cartpole task.",
+    )
     parser.add_argument(
         "--contact-packing-policy",
         choices=["stable_index", "penetration_priority", "random", "force_priority", "body_round_robin_pair_atomic"],

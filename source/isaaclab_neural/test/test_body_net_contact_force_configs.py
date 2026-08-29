@@ -23,16 +23,16 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "osmo_scripts"))
 from run_experiment import DatasetSpec, build_dataset_args, dataset_cache_complete  # noqa: E402
 
 FORCE_VARIANTS = {
-    "smoke": (
-        "transformer_rough_native_shared_per_body_contact_force_smoke.yaml",
-        "anymal_rough_newton_native_shared_per_body_contact_force_smoke.yaml",
-        100_000,
-        1,
-        64,
-    ),
     "formal": (
         "transformer_rough_native_shared_per_body_contact_force_formal.yaml",
         "anymal_rough_newton_native_shared_per_body_contact_force_formal.yaml",
+        10_000_000,
+        1000,
+        1024,
+    ),
+    "rope": (
+        "transformer_rough_native_shared_per_body_contact_force_rope.yaml",
+        "anymal_rough_newton_native_shared_per_body_contact_force_rope.yaml",
         10_000_000,
         1000,
         1024,
@@ -78,7 +78,7 @@ def test_force_variants_preserve_shared_per_body_contract() -> None:
         assert Path(experiment["train_cfg"]).name == cfg_filename
 
 
-def test_force_preset_adds_generation_flag_and_old_preset_does_not(tmp_path: Path) -> None:
+def test_force_presets_add_generation_flag_and_baseline_does_not(tmp_path: Path) -> None:
     spec = DatasetSpec(
         filename="dataset_train.hdf5",
         seed=0,
@@ -87,19 +87,17 @@ def test_force_preset_adds_generation_flag_and_old_preset_does_not(tmp_path: Pat
         zero_actions=False,
         use_policy=False,
     )
-    force_experiment = _load_yaml(PRESET_DIR / "anymal_rough_newton_native_shared_per_body_contact_force_smoke.yaml")[
-        "experiment"
-    ]
-    old_experiment = _load_yaml(PRESET_DIR / "anymal_rough_newton_native_shared_per_body.yaml")["experiment"]
+    baseline_experiment = _load_yaml(PRESET_DIR / "anymal_rough_formal.yaml")["experiment"]
+    baseline_args = build_dataset_args(baseline_experiment, spec, tmp_path)
 
-    force_args = build_dataset_args(force_experiment, spec, tmp_path)
-    old_args = build_dataset_args(old_experiment, spec, tmp_path)
-
-    assert force_args is not None
-    assert "--record-body-net-contact-forces" in force_args
-    assert old_args is not None
-    assert "--record-body-net-contact-forces" not in old_args
-    assert "record_body_net_contact_forces" not in old_experiment
+    for _, preset_filename, *_ in FORCE_VARIANTS.values():
+        force_experiment = _load_yaml(PRESET_DIR / preset_filename)["experiment"]
+        force_args = build_dataset_args(force_experiment, spec, tmp_path)
+        assert force_args is not None
+        assert "--record-body-net-contact-forces" in force_args
+    assert baseline_args is not None
+    assert "--record-body-net-contact-forces" not in baseline_args
+    assert "record_body_net_contact_forces" not in baseline_experiment
 
 
 def test_osmo_entrypoint_traces_only_after_credentials_are_exported() -> None:

@@ -8,8 +8,8 @@
 Example:
     ./isaaclab.sh -p -m isaaclab_neural.rl.rsl_rl.play \\
       --task Isaac-Velocity-Flat-Anymal-C-NeRD-v0 \\
-      --neural-model-path ./pre-trained_models/Anymal-C/nn/final_model.pt \\
-      --checkpoint logs/rsl_rl/anymal_c_flat_nerd/<run>/model_299.pt \\
+      --neural-model-path "$NERD_CHECKPOINT" \\
+      --checkpoint "$POLICY_CHECKPOINT" \\
       --num_envs 16 --num_steps 200 \\
       presets=newton_mjwarp --headless
 """

@@ -21,10 +21,7 @@ logger = logging.getLogger(__name__)
 class NewtonNerdManager(NewtonManager):
     """Newton manager variant that runs a NeRD neural solver."""
 
-    _nerd_abstract_contacts = None
     _nerd_contact_adapter = None
-    _nerd_contact_mode: str | None = None
-    _nerd_ground_shape_index: int = -1
     _nerd_active: bool = False
 
     _UPSTREAM_SYNC_ATTRS = (
@@ -55,10 +52,7 @@ class NewtonNerdManager(NewtonManager):
 
     @classmethod
     def _solver_specific_clear(cls) -> None:
-        cls._nerd_abstract_contacts = None
         cls._nerd_contact_adapter = None
-        cls._nerd_contact_mode = None
-        cls._nerd_ground_shape_index = -1
         cls._nerd_active = False
 
     @classmethod
@@ -116,7 +110,10 @@ class NewtonNerdManager(NewtonManager):
     def _load_nerd_neural_model(cls, cfg_dict: dict, neural_solver=None):
         neural_model_path = cfg_dict.get("neural_model_path")
         if neural_model_path is None:
-            return None
+            raise ValueError(
+                "NeRD runtime requires an explicit neural_model_path. "
+                "Dynamics checkpoints are not bundled with this release."
+            )
 
         from isaaclab_neural.utils.checkpoint import install_legacy_module_aliases
 
@@ -146,33 +143,29 @@ class NewtonNerdManager(NewtonManager):
     @classmethod
     def _build_solver(cls, model, solver_cfg) -> None:
         from isaaclab_neural.contacts import (
-            AbstractContact,
             NewtonContactAdapter,
             resolve_contact_packing_policy,
         )
+        from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
         from isaaclab_neural.solvers import create_neural_solver
 
         cfg_dict = solver_cfg.to_dict() if hasattr(solver_cfg, "to_dict") else dict(vars(solver_cfg))
-        contact_mode = cfg_dict.get("contact_mode", "fixed_ground")
+        contact_mode = normalize_contact_mode(cfg_dict.get("contact_mode", "newton_native"))
+        cfg_dict["contact_mode"] = contact_mode
+        if hasattr(solver_cfg, "contact_mode"):
+            solver_cfg.contact_mode = contact_mode
         cls._nerd_active = True
-        cls._nerd_contact_mode = contact_mode
         NewtonManager._use_single_state = False
 
-        if contact_mode == "fixed_ground":
+        num_contacts_per_env = int(cfg_dict.get("num_contacts_per_env", 0))
+        if num_contacts_per_env < 0:
+            raise ValueError("NerdSolverCfg.num_contacts_per_env must be non-negative.")
+        if num_contacts_per_env == 0:
             NewtonManager._needs_collision_pipeline = False
             NewtonManager._collision_pipeline = None
-            cls._nerd_abstract_contacts = AbstractContact(model)
-            NewtonManager._contacts = cls._nerd_abstract_contacts.newton_contacts
-            cls._nerd_ground_shape_index = cls._nerd_abstract_contacts.ground_shape_index
-            num_contacts_per_env = cls._nerd_abstract_contacts.num_contacts_per_env
             contact_adapter = None
-        elif contact_mode == "newton_native":
+        else:
             NewtonManager._needs_collision_pipeline = True
-            num_contacts_per_env = int(cfg_dict.get("num_contacts_per_env", 0))
-            if num_contacts_per_env <= 0:
-                raise ValueError(
-                    "NerdSolverCfg.num_contacts_per_env must be positive when contact_mode='newton_native'."
-                )
             packing_policy = resolve_contact_packing_policy(
                 contact_mode,
                 cfg_dict.get("contact_packing_policy"),
@@ -185,9 +178,7 @@ class NewtonNerdManager(NewtonManager):
                 contact_representation=cfg_dict.get("contact_representation", "flat"),
                 max_contact_tokens=int(cfg_dict.get("max_contact_tokens", 64)),
             )
-            cls._nerd_contact_adapter = contact_adapter
-        else:
-            raise ValueError(f"Unsupported NerdSolverCfg.contact_mode: {contact_mode}")
+        cls._nerd_contact_adapter = contact_adapter
 
         NewtonManager._solver = create_neural_solver(
             solver_cfg,
@@ -201,9 +192,8 @@ class NewtonNerdManager(NewtonManager):
             max_contact_tokens=int(cfg_dict.get("max_contact_tokens", 0)),
         )
         neural_model = cls._load_nerd_neural_model(cfg_dict, cls._solver)
-        if neural_model is not None:
-            NewtonManager._solver.set_neural_solver_model(neural_model)
-            NewtonManager._solver.eval()
+        NewtonManager._solver.set_neural_solver_model(neural_model)
+        NewtonManager._solver.eval()
         cls._disable_cuda_graph_for_nerd()
         cls._sync_upstream_newton_state()
 
@@ -212,25 +202,12 @@ class NewtonNerdManager(NewtonManager):
         from isaaclab_neural.utils import step_profile
 
         with step_profile.section("contact_prepare"):
-            if cls._nerd_contact_mode == "fixed_ground":
-                from isaaclab_neural.contacts import collision_detection_fixed_ground
-
-                if cls._contacts is None:
-                    raise RuntimeError("NeRD fixed_ground contact buffer has not been initialized.")
-                collision_detection_fixed_ground(
-                    cls._model,
-                    cls._state_0,
-                    cls._contacts,
-                    ground_shape_index=cls._nerd_ground_shape_index,
-                )
-                return cls._contacts
-            elif cls._nerd_contact_mode == "newton_native":
-                if cls._collision_pipeline is None or cls._contacts is None:
-                    raise RuntimeError("NeRD newton_native contact pipeline has not been initialized.")
-                cls._collision_pipeline.collide(cls._state_0, cls._contacts)
-                return cls._contacts
-            else:
-                raise RuntimeError(f"Unsupported active NeRD contact mode: {cls._nerd_contact_mode}")
+            if cls._nerd_contact_adapter is None:
+                return None
+            if cls._collision_pipeline is None or cls._contacts is None:
+                raise RuntimeError("NeRD newton_native contact pipeline has not been initialized.")
+            cls._collision_pipeline.collide(cls._state_0, cls._contacts)
+            return cls._contacts
 
     @classmethod
     def _simulate_full(cls) -> None:

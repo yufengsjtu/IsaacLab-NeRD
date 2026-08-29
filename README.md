@@ -13,6 +13,30 @@
 [![License](https://img.shields.io/badge/license-BSD--3-yellow.svg)](https://opensource.org/licenses/BSD-3-Clause)
 [![License](https://img.shields.io/badge/license-Apache--2.0-yellow.svg)](https://opensource.org/license/apache-2-0)
 
+## IsaacLab-NeRD
+
+This repository extends Isaac Lab with NeRD neural rigid-body dynamics on the
+Newton physics backend. It includes dataset generation, transformer training,
+evaluation, and reinforcement-learning integration.
+
+Supported release paths:
+
+- **Cartpole:** contact-free (`num_contacts_per_env=0`) minimal example.
+- **Anymal-C flat and rough terrain:** Newton native contacts with flat or
+  tokenized contact inputs.
+- **Advanced Anymal-C models:** shared-per-body contact encoding, auxiliary
+  contact-force prediction, RoPE, and KV-cache inference.
+- **Execution:** local workflows and optional OSMO workflows backed by
+  NV-Datasets or Swift.
+
+Start with the [IsaacLab Neural documentation](source/isaaclab_neural/docs/README.md).
+It links to installation, the Cartpole tutorial, the Anymal-C workflow,
+advanced features, RL, and OSMO.
+
+> [!NOTE]
+> G1 support is being developed in a separate worktree and is not part of this
+> release.
+
 
 This branch is a development branch for Isaac Sim 6.0, which is currently only available through the Isaac Sim [GitHub repo](https://github.com/isaac-sim/IsaacSim).
 For installation, please refer to the Isaac Sim GitHub repo to build the latest Isaac Sim branch, and follow the binary installation method in the

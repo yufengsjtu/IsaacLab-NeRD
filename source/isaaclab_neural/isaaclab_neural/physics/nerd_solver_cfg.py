@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING, Literal
 
 from isaaclab_newton.physics.newton_manager_cfg import NewtonSolverCfg
@@ -19,6 +20,37 @@ if TYPE_CHECKING:
 
 ContactMode = Literal["fixed_ground", "newton_native"]
 """Contact source used to build neural-model inputs."""
+
+DEFAULT_NUM_CONTACTS_PER_ENV = 64
+"""Default Newton-native contact capacity per environment."""
+
+
+def normalize_contact_mode(contact_mode: ContactMode | str) -> Literal["newton_native"]:
+    """Reject the deprecated contact mode and return the supported mode.
+
+    Args:
+        contact_mode: Requested contact source convention.
+
+    Returns:
+        The validated ``"newton_native"`` contact mode.
+
+    Raises:
+        ValueError: If :paramref:`contact_mode` is deprecated or not recognized.
+    """
+    if contact_mode == "fixed_ground":
+        warnings.warn(
+            "'fixed_ground' contact mode is deprecated and unsupported.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        raise ValueError(
+            "'fixed_ground' and 'newton_native' use incompatible contact representations. "
+            "Select 'newton_native' and use a matching dataset and checkpoint."
+        )
+    if contact_mode == "newton_native":
+        return "newton_native"
+    raise ValueError(f"Unsupported contact mode: {contact_mode}")
+
 
 ContactPackingPolicy = Literal[
     "stable_index",
@@ -75,16 +107,19 @@ class NerdSolverCfg(NewtonSolverCfg):
     neural_model_cfg: dict | None = None
     """Optional model architecture config used to instantiate the neural model before loading weights."""
 
-    num_contacts_per_env: int = 0
-    """Fixed contact slots per environment expected by the trained neural model."""
+    num_contacts_per_env: int = DEFAULT_NUM_CONTACTS_PER_ENV
+    """Fixed contact slots per environment expected by the trained neural model.
 
-    contact_mode: ContactMode = "fixed_ground"
+    Set to zero for contact-free systems.
+    """
+
+    contact_mode: ContactMode = "newton_native"
     """Contact input mode.
 
-    ``"fixed_ground"`` uses NeRD's original fixed-size abstract contact buffer.
     ``"newton_native"`` uses Newton's ``CollisionPipeline`` plus
-    ``NewtonContactAdapter`` to pack dynamic contacts into fixed-size neural
-    inputs.
+    ``NewtonContactAdapter`` to pack dynamic contacts into fixed-size neural inputs.
+    The deprecated ``"fixed_ground"`` value emits :class:`DeprecationWarning`
+    and is rejected because its contact representation is incompatible.
     """
 
     contact_packing_policy: ContactPackingPolicy = "penetration_priority"
@@ -116,3 +151,14 @@ class NerdSolverCfg(NewtonSolverCfg):
 
     If ``None``, ``NeuralSolver`` uses its package default.
     """
+
+    def __post_init__(self) -> None:
+        """Validate the configured contact mode after initialization."""
+        self.contact_mode = normalize_contact_mode(self.contact_mode)
+        if self.num_contacts_per_env < 0:
+            raise ValueError("num_contacts_per_env must be non-negative.")
+        if self.contact_representation == "contact_tokens":
+            if self.num_contacts_per_env == 0:
+                raise ValueError("contact_representation='contact_tokens' requires a positive contact capacity.")
+            if self.max_contact_tokens <= 0:
+                raise ValueError("max_contact_tokens must be positive for contact_representation='contact_tokens'.")

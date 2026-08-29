@@ -4,8 +4,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 workflow:
-  base_name: cartpole-fixed-ground
-  dataset_subdir: cartpole-fixed-ground
+  base_name: cartpole-newton-native
+  dataset_subdir: cartpole-newton-native
 
 resources:
   num_gpu: 1
@@ -23,7 +23,9 @@ experiment:
   train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Cartpole/transformer.yaml
   train_preset: ""
   num_gpus: 1
-  contact_mode: fixed_ground
+  contact_mode: newton_native
+  contact_representation: flat
+  num_contacts_per_env: 0
   sample_mode: joint_f
   initial_states_source: sample
   states_frame: world

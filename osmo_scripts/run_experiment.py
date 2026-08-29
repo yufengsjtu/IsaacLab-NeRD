@@ -12,6 +12,7 @@ import io
 import shutil
 import subprocess
 import sys
+import warnings
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from numbers import Integral
@@ -331,8 +332,19 @@ def stage_generated_datasets(
 
 
 def contact_args(experiment: dict) -> list[str]:
-    args = ["--contact-mode", str(experiment.get("contact_mode", "fixed_ground"))]
-    if experiment.get("contact_mode") == "newton_native":
+    contact_mode = str(experiment.get("contact_mode", "newton_native"))
+    if contact_mode == "fixed_ground":
+        warnings.warn(
+            "OSMO preset contact_mode='fixed_ground' is deprecated and unsupported.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        raise ValueError(
+            "fixed_ground and newton_native use incompatible contact representations. "
+            "Update the preset to contact_mode='newton_native' and use matching data."
+        )
+    args = ["--contact-mode", contact_mode]
+    if contact_mode == "newton_native":
         representation = str(experiment.get("contact_representation", "flat"))
         args += [
             "--num-contacts-per-env",

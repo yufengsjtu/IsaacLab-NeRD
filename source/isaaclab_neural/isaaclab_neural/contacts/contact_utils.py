@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import warnings
+
 import newton
 import numpy as np
 import warp as wp
@@ -15,7 +17,7 @@ def find_ground_shape_index(model: newton.Model) -> int:
 
     Returns the index, or -1 if no ground shape exists.
     """
-    shape_body = model.shape_body.numpy()
+    shape_body = model.shape_body.numpy()  # type: ignore[union-attr]
     candidates = np.where(shape_body == -1)[0]
     if len(candidates) == 0:
         return -1
@@ -30,21 +32,29 @@ def collision_detection_fixed_ground(
     contacts: newton.Contacts,
     ground_shape_index: int = -1,
 ):
-    """Run collision detection against the ground plane.
+    """Reject the deprecated fixed-ground collision path.
 
     Args:
         model: Newton model.
-        state: Newton state with populated body_q (run eval_fk first).
-        contacts: AbstractContact's newton_contacts view.
-        ground_shape_index: Index of the ground shape. If -1, auto-detect
-            by searching for shape_body == -1. If no ground exists, this
-            function is a no-op.
+        state: Newton state with populated body poses.
+        contacts: Fixed-order contact buffer.
+        ground_shape_index: Ground shape index, or -1 to auto-detect it.
+
+    Raises:
+        ValueError: Always, because fixed-ground contacts are unsupported.
     """
+    warnings.warn(
+        "collision_detection_fixed_ground() is deprecated and incompatible with the native Newton contact path.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    raise ValueError("fixed_ground contact processing is no longer supported; use newton_native contacts.")
+
+    # Retained until the deprecated public API can be removed in a major release.
     if ground_shape_index < 0:
-        # Auto-detect ground shape
         ground_shape_index = find_ground_shape_index(model)
         if ground_shape_index < 0:
-            return  # no ground plane
+            return
 
     wp.launch(
         collision_detection_ground_kernel,

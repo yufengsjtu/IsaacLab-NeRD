@@ -221,7 +221,7 @@ def _validate_rollout_arrays(arrays: Mapping[str, Any]) -> None:
                 "gravity_dir",
             }
         )
-    else:
+    elif "contact_depths" in arrays or "contact_masks" in arrays:
         required.update({"contact_depths", "contact_masks"})
     missing = sorted(required - set(arrays))
     if missing:

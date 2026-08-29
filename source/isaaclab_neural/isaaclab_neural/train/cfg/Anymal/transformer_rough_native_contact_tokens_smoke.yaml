@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 # Local smoke cfg for rough Newton-native contact tokens.
-# Pair with docs/smoke_train.md (1M-scale datasets).
+# Local 1M-transition validation config; not an OSMO preset.
 
 env:
   env_name: Anymal-C-Rough-Native

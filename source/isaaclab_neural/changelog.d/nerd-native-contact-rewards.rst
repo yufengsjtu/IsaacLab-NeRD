@@ -8,5 +8,6 @@ Changed
 
 * Enabled geometry-based ``feet_air_time``, ``undesired_contacts``, and
   ``base_contact`` terms for Anymal-C NeRD when ``contact_mode`` is
-  ``newton_native``; they stay off under ``fixed_ground``. These terms use
-  signed native-contact separation without synthesizing contact forces.
+  ``newton_native``. These terms use signed native-contact separation without
+  synthesizing contact forces. The incompatible ``fixed_ground`` mode is
+  rejected.

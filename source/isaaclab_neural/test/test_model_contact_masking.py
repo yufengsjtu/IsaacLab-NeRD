@@ -5,6 +5,7 @@
 
 """Tests for contact padding at the neural encoder boundary."""
 
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -25,7 +26,12 @@ class _PassThrough(nn.Module):
         return inputs
 
 
-def test_contact_processing_is_derived_from_contact_mode():
+def test_neural_solver_requires_newton_model():
+    with pytest.raises(ValueError, match="requires a Newton model"):
+        NeuralSolver(model=None)
+
+
+def test_legacy_contact_mode_is_rejected():
     input_sample = {"states_embedding": torch.zeros(1, 1, 2)}
     input_cfg = {"low_dim": ["states_embedding"]}
     network_cfg = {
@@ -56,17 +62,18 @@ def test_contact_processing_is_derived_from_contact_mode():
         device="cpu",
         contact_mode="newton_native",
     )
-    fixed_model = ModelMixedInput(
-        input_sample,
-        1,
-        input_cfg,
-        network_cfg,
-        device="cpu",
-        contact_mode="fixed_ground",
-    )
+    with pytest.warns(DeprecationWarning, match="fixed_ground"):
+        with pytest.raises(ValueError, match="incompatible contact representations"):
+            ModelMixedInput(
+                input_sample,
+                1,
+                input_cfg,
+                network_cfg,
+                device="cpu",
+                contact_mode="fixed_ground",
+            )
 
     assert native_model.use_native_contact_processing
-    assert not fixed_model.use_native_contact_processing
 
 
 def test_mask_inactive_contact_features_zeros_normalized_padding():
@@ -169,5 +176,14 @@ def test_native_contact_masks_cannot_be_reconstructed_from_separation():
     solver.contact_mode = "newton_native"
     values = torch.zeros(1, 1, 2)
 
-    with pytest.raises(ValueError, match="require explicit contact_masks"):
-        solver.get_contact_masks(values, values, values)
+    with pytest.warns(DeprecationWarning, match="fixed_ground"):
+        with pytest.raises(ValueError, match="require explicit contact_masks"):
+            solver.get_contact_masks(values, values, values)
+
+
+def test_native_contact_adapter_requires_newton_contacts():
+    solver = NeuralSolver.__new__(NeuralSolver)
+    solver.contact_adapter = object()
+
+    with pytest.raises(RuntimeError, match="contacts are not initialized"):
+        solver._update_states(SimpleNamespace(), None, None)

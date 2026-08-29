@@ -1,14 +1,24 @@
 # IsaacLab Neural
 
-`isaaclab_neural` provides NeRD-backed neural simulation interfaces for IsaacLab.
-It includes registered NeRD tasks, Newton solver integration, dataset generation,
-training, evaluation, and RSL-RL policy learning utilities.
+`isaaclab_neural` integrates NeRD neural dynamics with Isaac Lab's Newton
+backend. The public release supports local dataset generation, model training,
+evaluation, RSL-RL, and optional OSMO execution.
 
-For workflow details, see:
+Choose a path:
 
-- [Training](train.md) (NeRD dynamics datasets / OSMO)
-- [Smoke train](smoke_train.md) (local 1M-scale rough native contact tokens)
-- [Per-body net contact forces](body_net_contact_force.md) (Stage 1 labels, training, and smoke commands)
-- [Evaluation](eval.md) (dynamics smoke / policy-closed-loop eval)
-- [RL policy learning](rl.md) (flat Anymal-C locomotion on NeRD)
-- [KV-cache inference](kv_cache_inference.md) (RoPE incremental inference and benchmark)
+1. [Getting Started](getting_started.md) — install the extension and understand
+   the common workflow.
+2. [Cartpole Tutorial](cartpole.md) — run the smallest contact-free example.
+3. [Anymal-C Guide](anymal.md) — work with flat or rough terrain and native
+   contacts.
+4. [Reinforcement Learning](rl.md) — train or evaluate a policy on NeRD.
+5. [Advanced Features](advanced.md) — contact tokens, shared-per-body encoding,
+   contact-force prediction, RoPE, and KV-cache inference.
+6. [OSMO Reference](osmo.md) — submit one of the maintained remote presets.
+
+The deprecated `fixed_ground` mode is intentionally rejected after emitting a
+deprecation warning. New code must use `newton_native`; set
+`num_contacts_per_env: 0` only for contact-free systems such as Cartpole.
+
+G1 development lives in a separate worktree and is not included in this
+release.

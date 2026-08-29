@@ -74,21 +74,30 @@ def _trajectories(recorded_contacts: dict[str, torch.Tensor]) -> dict[str, torch
     return trajectories
 
 
-@pytest.mark.parametrize(
-    ("contact_mode", "expected_validation"),
-    (("newton_native", "warn"), ("fixed_ground", "strict")),
-)
-def test_contact_validation_default_depends_on_contact_mode(contact_mode, expected_validation):
+def test_contact_validation_defaults_to_warn():
     neural_env = SimpleNamespace(
         solver_neural=SimpleNamespace(
-            contact_mode=contact_mode,
+            contact_mode="newton_native",
             num_states_history=1,
         )
     )
 
     evaluator = TrainingRolloutEvaluator(neural_env)
 
-    assert evaluator.contact_context_validation == expected_validation
+    assert evaluator.contact_context_validation == "warn"
+
+
+def test_contact_validation_rejects_legacy_mode():
+    neural_env = SimpleNamespace(
+        solver_neural=SimpleNamespace(
+            contact_mode="fixed_ground",
+            num_states_history=1,
+        )
+    )
+
+    with pytest.warns(DeprecationWarning, match="fixed_ground"):
+        with pytest.raises(ValueError, match="incompatible contact representations"):
+            TrainingRolloutEvaluator(neural_env)
 
 
 def test_runtime_contact_mismatch_warns_with_dataset_and_terrain_coordinates(caplog):

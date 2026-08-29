@@ -10,10 +10,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
 
 exec "${REPO_ROOT}/isaaclab.sh" -p -m isaaclab_neural.generate.generate_dataset \
-    --task Isaac-Velocity-Flat-Anymal-C-v0 \
-    --env-name Anymal-C \
+    --task Isaac-Velocity-Flat-Anymal-C-Dataset-Gen-v0 \
+    --env-name Anymal-C-Native \
     --robot-name Anymal-C \
     --sample-mode action \
     --initial-states-source env \
-    --contact-mode fixed_ground \
+    --contact-mode newton_native \
+    --num-contacts-per-env 64 \
+    --randomize-pd-gains \
     "$@"

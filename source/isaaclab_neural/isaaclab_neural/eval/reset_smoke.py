@@ -21,6 +21,7 @@ from typing import Any
 import isaaclab_neural.envs  # noqa: F401 - registers built-in NeRD eval tasks
 import torch
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
+from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 from isaaclab_neural.utils.checkpoint import get_cfg_from_checkpoint, load_checkpoint
 
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -48,7 +49,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
 def apply_solver_overrides(solver_cfg: NerdSolverCfg, args: argparse.Namespace) -> None:
     """Apply CLI solver overrides to an existing solver config."""
     if args.contact_mode is not None:
-        solver_cfg.contact_mode = args.contact_mode
+        solver_cfg.contact_mode = normalize_contact_mode(args.contact_mode)
     if args.num_contacts_per_env is not None:
         solver_cfg.num_contacts_per_env = args.num_contacts_per_env
 
@@ -150,20 +151,17 @@ def zero_action(env) -> torch.Tensor:
 
 
 def print_contact_summary(env) -> None:
-    """Print fixed-ground abstract contact counts when available."""
+    """Print the active native-contact adapter configuration."""
     manager = env.neural_adapter.manager
-    abstract_contact = getattr(manager, "_nerd_abstract_contacts", None)
-    if abstract_contact is None:
+    solver = getattr(manager, "_solver", None)
+    contact_adapter = getattr(manager, "_nerd_contact_adapter", None)
+    if solver is None:
         return
-
-    model = getattr(manager, "_model", None)
-    counts = abstract_contact.count_contacts_by_body_world_per_env(model)
-    print(
-        "[contacts] "
-        f"mode={getattr(manager, '_nerd_contact_mode', None)}, "
-        f"num_contacts_per_env={abstract_contact.num_contacts_per_env}, "
-        f"per_env_counts={counts}"
-    )
+    capacity = int(getattr(solver, "num_contacts_per_env", 0))
+    if contact_adapter is None:
+        print(f"[contacts] mode=newton_native, num_contacts_per_env={capacity}, contact_free={capacity == 0}")
+        return
+    print(f"[contacts] mode=newton_native, num_contacts_per_env={capacity}")
 
 
 def run_reset_smoke(env, args: argparse.Namespace) -> None:

@@ -129,21 +129,9 @@ class NewtonDataGenerationBackend:
             pipeline.collide(self.state, contacts)
         return contacts
 
-    def collide_fixed_ground_contacts(self, abstract_contacts):
-        """Refresh and return abstract fixed-ground contacts."""
-        from isaaclab_neural.contacts import collision_detection_fixed_ground
-
-        collision_detection_fixed_ground(
-            self.model,
-            self.state,
-            abstract_contacts.newton_contacts,
-            ground_shape_index=abstract_contacts.ground_shape_index,
-        )
-        return abstract_contacts.newton_contacts
-
     def sync_solver(self, solver, contacts) -> None:
         """Synchronize a recording solver from current Newton state."""
-        if contacts is None:
+        if contacts is None and int(getattr(solver, "num_contacts_per_env", 0)) > 0:
             raise RuntimeError("Newton contacts are not initialized; cannot record NeRD contact tensors.")
         if self.control is None:
             raise RuntimeError("Newton control is not initialized; cannot record joint forces.")
@@ -202,37 +190,36 @@ class DataGenerationAdapter:
         self._body_world_torch: torch.Tensor | None = None
         self.body_net_contact_force_recorder: BodyNetContactForceRecorder | None = None
 
-        self.contact_mode = solver_cfg.contact_mode
-        self.abstract_contacts = None
-        self.contact_adapter = None
-        if self.contact_mode == "fixed_ground":
-            from isaaclab_neural.contacts import AbstractContact
+        from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 
-            self.abstract_contacts = AbstractContact(self.model)
-            contacts = self.abstract_contacts.newton_contacts
-            num_contacts_per_env = self.abstract_contacts.num_contacts_per_env
-        elif self.contact_mode == "newton_native":
-            from isaaclab_neural.contacts import NewtonContactAdapter
+        self.contact_mode = normalize_contact_mode(solver_cfg.contact_mode)
+        solver_cfg.contact_mode = self.contact_mode
+        from isaaclab_neural.contacts import NewtonContactAdapter
 
-            num_contacts_per_env = int(solver_cfg.num_contacts_per_env)
-            if num_contacts_per_env <= 0:
-                raise ValueError("num_contacts_per_env must be positive for contact_mode='newton_native'.")
+        num_contacts_per_env = int(solver_cfg.num_contacts_per_env)
+        if num_contacts_per_env < 0:
+            raise ValueError("num_contacts_per_env must be non-negative.")
+        contact_representation = getattr(solver_cfg, "contact_representation", "flat")
+        if num_contacts_per_env == 0 and contact_representation == "contact_tokens":
+            raise ValueError("contact_representation='contact_tokens' requires a positive contact capacity.")
+        if num_contacts_per_env == 0:
+            contacts = None
+            self.contact_adapter = None
+        else:
             contacts = self.backend.native_contacts
             self.contact_adapter = NewtonContactAdapter(
                 self.model,
                 num_contacts_per_env=num_contacts_per_env,
                 device=str(self.device),
                 packing_policy=solver_cfg.contact_packing_policy,
-                contact_representation=getattr(solver_cfg, "contact_representation", "flat"),
+                contact_representation=contact_representation,
                 max_contact_tokens=int(getattr(solver_cfg, "max_contact_tokens", 64)),
             )
-        else:
-            raise ValueError(f"Unsupported contact_mode: {self.contact_mode}")
 
         if record_body_net_contact_forces:
-            if self.contact_mode != "newton_native" or self.contact_adapter is None:
-                raise ValueError("Body net contact-force labels require contact_mode='newton_native'.")
-            if getattr(solver_cfg, "contact_representation", "flat") != "contact_tokens":
+            if self.contact_adapter is None:
+                raise ValueError("Body net contact-force labels require a positive contact capacity.")
+            if contact_representation != "contact_tokens":
                 raise ValueError("Body net contact-force labels require contact_representation='contact_tokens'.")
             scene = getattr(self.env, "scene", None)
             sensors = getattr(scene, "sensors", {})
@@ -256,7 +243,7 @@ class DataGenerationAdapter:
             num_contacts_per_env=num_contacts_per_env,
             contact_mode=self.contact_mode,
             contact_adapter=self.contact_adapter,
-            contact_representation=getattr(self.solver_cfg, "contact_representation", "flat"),
+            contact_representation=contact_representation,
             max_contact_tokens=int(getattr(self.solver_cfg, "max_contact_tokens", 0)),
         )
         self.sync()
@@ -368,11 +355,8 @@ class DataGenerationAdapter:
         raise ValueError(f"Unsupported action space shape: {shape}")
 
     def _prepare_contacts(self):
-        if self.contact_mode == "fixed_ground":
-            abstract_contacts = self.abstract_contacts
-            if abstract_contacts is None:
-                raise RuntimeError("Abstract contacts are not initialized for fixed_ground data generation.")
-            return self.backend.collide_fixed_ground_contacts(abstract_contacts)
+        if self.contact_adapter is None:
+            return None
         return self.backend.collide_native_contacts()
 
     def sync(self) -> None:

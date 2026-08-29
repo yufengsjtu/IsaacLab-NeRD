@@ -10,25 +10,23 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
+import warnings
 from contextlib import nullcontext
+from typing import Literal
 
 import numpy as np
+import torch
 import warp as wp
 from newton import Contacts, Control, JointType, Model, State
 from newton.solvers import SolverBase
 
 from isaaclab_neural.contacts.newton_contact_adapter import NewtonContactAdapter
-from isaaclab_neural.utils import newton_utils, warp_utils
+from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
+from isaaclab_neural.solvers.kernels import determine_angular_dofs
+from isaaclab_neural.utils import newton_utils, torch_utils, warp_utils
 from isaaclab_neural.utils.newton_utils import base_joint_type
 
-CONTACT_DEPTH_UPPER_RATIO = 4.0
 MIN_CONTACT_EVENT_THRESHOLD = 0.12
-from typing import Literal
-
-import torch
-
-from isaaclab_neural.solvers.kernels import determine_angular_dofs
-from isaaclab_neural.utils import torch_utils
 
 
 def _resolve_root_body_ids(model, articulation_starts: np.ndarray, num_envs: int) -> np.ndarray:
@@ -52,8 +50,8 @@ class NeuralSolver(SolverBase):
     def __init__(
         self,
         name="NeuralSolver",
-        model: Model = None,
-        contacts: Contacts = None,
+        model: Model | None = None,
+        contacts: Contacts | None = None,
         neural_model: torch.nn.Module | None = None,
         num_contacts_per_env: int = 0,
         states_frame: str | None = "body",
@@ -61,8 +59,8 @@ class NeuralSolver(SolverBase):
         states_embedding_type: str | None = None,
         prediction_type: str = "relative",
         orientation_prediction_parameterization: str = "quaternion",
-        min_contact_event_threshold: float = None,
-        contact_mode: Literal["fixed_ground", "newton_native"] = "fixed_ground",
+        min_contact_event_threshold: float | None = None,
+        contact_mode: Literal["fixed_ground", "newton_native"] = "newton_native",
         contact_adapter: NewtonContactAdapter | None = None,
         contact_representation: str = "flat",
         max_contact_tokens: int = 0,
@@ -71,9 +69,10 @@ class NeuralSolver(SolverBase):
         Args:
             name (str, optional): Name used to identify this solver.
             model (Model): The Newton model storing static simulation metadata.
-            contacts (Contacts): Fixed-size contact buffer used to build neural-model inputs.
+            contacts (Contacts): Optional contact buffer used to build neural-model inputs.
             neural_model (torch.nn.Module, optional): Neural network used for prediction.
-            num_contacts_per_env (int, optional): Number of abstract contacts per environment.
+            num_contacts_per_env (int, optional): Contact capacity per environment. Set to
+                zero for contact-free systems.
             states_frame (str, optional): Frame used to express states; one of "world",
                 "body", or "body_translation_only". Defaults to "body".
             anchor_frame_step (str, optional): Anchor frame step for body-frame states; one
@@ -86,12 +85,13 @@ class NeuralSolver(SolverBase):
                 parameterization; one of "quaternion", "exponential", or "naive".
             min_contact_event_threshold (float, optional): Minimum depth threshold used
                 when computing contact masks. Defaults to MIN_CONTACT_EVENT_THRESHOLD.
-            contact_mode: Contact source convention. ``fixed_ground`` expects a
-                fixed-size NeRD contact buffer, while ``newton_native`` expects
-                Newton native contacts plus a ``NewtonContactAdapter``.
+            contact_mode: Contact source convention. Deprecated ``fixed_ground``
+                inputs warn and are rejected as incompatible.
             contact_adapter: Adapter used by ``newton_native`` mode.
         """
         self.solver_name = name
+        if model is None:
+            raise ValueError("NeuralSolver requires a Newton model.")
         self.torch_device = wp.device_to_torch(model.device)
         self.model = model
         self.neural_model = neural_model
@@ -154,14 +154,19 @@ class NeuralSolver(SolverBase):
                 f"state={self.state_world_ids}, root={self.root_world_ids}."
             )
         self.num_contacts_per_env = num_contacts_per_env
-        self.contact_mode = contact_mode
+        self.contact_mode = normalize_contact_mode(contact_mode)
         self.contact_representation = contact_representation
         self.max_contact_tokens = int(max_contact_tokens)
         self.contact_adapter = contact_adapter
-        if self.contact_mode == "newton_native" and self.contact_adapter is None:
+        if self.num_contacts_per_env < 0:
+            raise ValueError("num_contacts_per_env must be non-negative.")
+        if self.contact_representation == "contact_tokens":
+            if self.num_contacts_per_env == 0:
+                raise ValueError("contact_representation='contact_tokens' requires a positive contact capacity.")
+            if self.max_contact_tokens <= 0:
+                raise ValueError("max_contact_tokens must be positive for contact_representation='contact_tokens'.")
+        if self.num_contacts_per_env > 0 and self.contact_adapter is None:
             raise ValueError("NeuralSolver contact_mode='newton_native' requires a NewtonContactAdapter.")
-        if self.contact_mode not in ["fixed_ground", "newton_native"]:
-            raise ValueError(f"Unsupported NeuralSolver contact_mode: {self.contact_mode}")
         self.num_contact_bodies_per_env = getattr(
             self.contact_adapter, "num_primary_bodies_per_env", self.num_bodies_per_env
         )
@@ -176,13 +181,7 @@ class NeuralSolver(SolverBase):
         self.root_body_qd = torch.empty((self.num_envs, 6), device=self.torch_device)
         self.states = torch.empty((self.num_envs, self.state_dim), device=self.torch_device)
         self.joint_f = torch.empty((self.num_envs, self.joint_f_dim), device=self.torch_device)
-        if self.contact_mode == "fixed_ground":
-            if contacts is None:
-                self.contacts = self._empty_contacts()
-            else:
-                self.contacts = self._get_contacts_for_neural_model_input(contacts)
-        else:
-            self.contacts = self.contact_adapter.to_neural_inputs()
+        self.contacts = {} if self.contact_adapter is None else self.contact_adapter.to_neural_inputs()
 
         self.gravity_dir = torch.zeros((self.num_envs, 3), device=self.torch_device)
         self.gravity_dir[:, self.model.up_axis] = -1.0
@@ -324,7 +323,7 @@ class NeuralSolver(SolverBase):
     def sync_from_newton(
         self,
         newton_states: State,
-        contacts: Contacts,
+        contacts: Contacts | None,
         joint_f,
         *,
         update_history: bool = True,
@@ -363,8 +362,8 @@ class NeuralSolver(SolverBase):
         self,
         state_in: State,
         state_out: State,
-        control: Control = None,
-        contacts: Contacts = None,
+        control: Control | None = None,
+        contacts: Contacts | None = None,
         dt: float = 0.01,
     ):
         from isaaclab_neural.utils import step_profile
@@ -372,6 +371,8 @@ class NeuralSolver(SolverBase):
         assert self.neural_model is not None, (
             "Cannot simulate via neural integrator as a neural model has not been setup yet."
         )
+        if control is None:
+            raise RuntimeError("Newton control is not initialized; cannot run the NeRD solver.")
         with step_profile.section("solver_update_states"):
             self._update_states(state_in, contacts, control.joint_f)
 
@@ -410,18 +411,19 @@ class NeuralSolver(SolverBase):
     Update the states, joint_f, and contacts in neural solver from a Newton state.
     """
 
-    def _update_states(self, newton_states: State, contacts: Contacts, joint_f):
+    def _update_states(self, newton_states: State, contacts: Contacts | None, joint_f):
         from isaaclab_neural.utils import step_profile
 
+        if self.contact_adapter is not None and contacts is None:
+            raise RuntimeError("Newton contacts are not initialized; cannot update NeRD contact inputs.")
         self._acquire_states_to_torch(newton_states, self.states)
         self.wrap2PI(self.states)
         self.root_body_q = wp.to_torch(newton_states.body_q).index_select(0, self.root_body_ids)
         self.root_body_qd = wp.to_torch(newton_states.body_qd).index_select(0, self.root_body_ids)
         if self.joint_f_dim > 0:
             self.joint_f = wp.to_torch(joint_f).view(self.num_envs, self.joint_f_dim)
-        if self.contact_mode == "fixed_ground":
-            self.contacts = self._get_contacts_for_neural_model_input(contacts)
-        else:
+        if self.contact_adapter is not None:
+            assert contacts is not None
             with step_profile.section("adapter_update"):
                 self.contact_adapter.update(contacts, newton_states)
             with step_profile.section("to_neural_inputs"):
@@ -433,106 +435,16 @@ class NeuralSolver(SolverBase):
         contact_thickness0,  # (num_envs, (T), num_contacts_per_env)
         contact_thickness1,  # (num_envs, (T), num_contacts_per_env)
     ):
-        if self.contact_mode == "newton_native":
-            raise ValueError(
-                "Newton-native inputs require explicit contact_masks. Masks cannot be reconstructed "
-                "from signed surface separation because inactive padding and touching contacts can both be zero."
-            )
-
-        # compute the threshold to detect a contact event
-        contact_event_threshold = CONTACT_DEPTH_UPPER_RATIO * (contact_thickness0 + contact_thickness1)
-        contact_event_threshold = torch.where(
-            contact_event_threshold < self.min_contact_event_threshold,
-            self.min_contact_event_threshold,
-            contact_event_threshold,
+        del contact_depths, contact_thickness0, contact_thickness1
+        warnings.warn(
+            "NeuralSolver.get_contact_masks() is deprecated with fixed_ground contact processing.",
+            DeprecationWarning,
+            stacklevel=2,
         )
-
-        contact_masks = contact_depths < contact_event_threshold  # (num_envs, (T), num_contacts_per_env)
-
-        return contact_masks
-
-    """
-    Get abstract contact representation for neural network input
-    """
-
-    def _get_contacts_for_neural_model_input(self, contacts: Contacts):
-        contact_normals = (
-            wp.to_torch(contacts.rigid_contact_normal).view(self.num_envs, self.num_contacts_per_env * 3).clone()
+        raise ValueError(
+            "Newton-native inputs require explicit contact_masks. Masks cannot be reconstructed "
+            "from signed surface separation because inactive padding and touching contacts can both be zero."
         )
-
-        contact_depths = (
-            wp.to_torch(contacts.rigid_contact_depth).view(self.num_envs, self.num_contacts_per_env).clone()
-        )
-
-        contact_thickness0 = (
-            wp.to_torch(contacts.rigid_contact_thickness0).view(self.num_envs, self.num_contacts_per_env).clone()
-        )
-
-        contact_thickness1 = (
-            wp.to_torch(contacts.rigid_contact_thickness1).view(self.num_envs, self.num_contacts_per_env).clone()
-        )
-
-        contact_points_0 = (
-            wp.to_torch(contacts.rigid_contact_point0).view(self.num_envs, self.num_contacts_per_env * 3).clone()
-        )
-
-        contact_points_1 = (
-            wp.to_torch(contacts.rigid_contact_point1).view(self.num_envs, self.num_contacts_per_env * 3).clone()
-        )
-
-        contact_masks = self.get_contact_masks(contact_depths, contact_thickness0, contact_thickness1)
-
-        return {
-            "contact_masks": contact_masks,
-            "contact_normals": contact_normals,
-            "contact_depths": contact_depths,
-            "contact_thicknesses_0": contact_thickness0,
-            "contact_thicknesses_1": contact_thickness1,
-            "contact_points_0": contact_points_0,
-            "contact_points_1": contact_points_1,
-        }
-
-    def _empty_contacts(self):
-        from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
-
-        if self.contact_representation == "contact_tokens":
-            max_tokens = self.max_contact_tokens or self.num_contacts_per_env
-            return {
-                "contact_tokens": torch.zeros(
-                    (self.num_envs, max_tokens, CONTACT_TOKEN_DIM),
-                    device=self.torch_device,
-                ),
-                "contact_token_overflow": torch.zeros((self.num_envs,), dtype=torch.long, device=self.torch_device),
-            }
-
-        contact_depths = torch.zeros(
-            (self.num_envs, self.num_contacts_per_env),
-            device=self.torch_device,
-        )
-        contact_thickness0 = torch.zeros_like(contact_depths)
-        contact_thickness1 = torch.zeros_like(contact_depths)
-        return {
-            "contact_masks": torch.zeros(
-                (self.num_envs, self.num_contacts_per_env),
-                dtype=torch.bool,
-                device=self.torch_device,
-            ),
-            "contact_normals": torch.zeros(
-                (self.num_envs, self.num_contacts_per_env * 3),
-                device=self.torch_device,
-            ),
-            "contact_depths": contact_depths,
-            "contact_thicknesses_0": contact_thickness0,
-            "contact_thicknesses_1": contact_thickness1,
-            "contact_points_0": torch.zeros(
-                (self.num_envs, self.num_contacts_per_env * 3),
-                device=self.torch_device,
-            ),
-            "contact_points_1": torch.zeros(
-                (self.num_envs, self.num_contacts_per_env * 3),
-                device=self.torch_device,
-            ),
-        }
 
     def process_neural_model_inputs(self, model_inputs):
         from isaaclab_neural.contacts.contact_set_encoder import transform_contact_tokens_to_body_frame

@@ -4,36 +4,37 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 workflow:
-  base_name: anymal-c-rough-newton-native-shared-per-body-small-10m
-  # Reuse the canonical 20M token cache; training loads a deterministic 10M prefix.
-  dataset_subdir: anymal-c-rough-newton-native-contact-tokens
+  base_name: anymal-c-rough-shared-per-body-contact-force-rope
+  dataset_subdir: anymal-c-rough-contact-tokens-contact-force-formal-v1
 
 resources:
   num_gpu: 8
-  num_cpu: 96
+  num_cpu: 80
   memory: 512Gi
   storage: 512Gi
   platform: ovx-l40s
 
 experiment:
-  env_name: Anymal-C-Rough-Native-ContactTokens
+  env_name: Anymal-C-Rough-Native-ContactTokens-ContactForce
   robot_name: Anymal-C
   data_gen_task: Isaac-Velocity-Rough-Anymal-C-Dataset-Gen-v0
   deployment_task: Isaac-Velocity-Rough-Anymal-C-v0
   train_task: Isaac-Velocity-Rough-Anymal-C-NeRD-v0
-  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native_shared_per_body_small_10m.yaml
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_native_shared_per_body_contact_force_rope.yaml
   train_preset: newton_mjwarp
   num_gpus: 8
   contact_mode: newton_native
   contact_representation: contact_tokens
   num_contacts_per_env: 64
   max_contact_tokens: 64
+  num_primary_bodies: 17
   require_terrain_context: true
   contact_packing_policy: body_round_robin_pair_atomic
+  record_body_net_contact_forces: true
   sample_mode: action
   initial_states_source: env
   randomize_pd_gains: true
-  train_transitions: 20000000
+  train_transitions: 10000000
   valid_transitions: 1000000
   data_gen_num_envs: 1024
   train_num_envs: 64

@@ -12,7 +12,7 @@ point at a trained NeRD dynamics checkpoint.
 Example:
     ./isaaclab.sh -p -m isaaclab_neural.rl.rsl_rl.train \\
       --task Isaac-Velocity-Flat-Anymal-C-NeRD-v0 \\
-      --neural-model-path ./pre-trained_models/Anymal-C/nn/final_model.pt \\
+      --neural-model-path "$NERD_CHECKPOINT" \\
       --num_envs 64 --max_iterations 5 \\
       presets=newton_mjwarp --headless
 """
@@ -96,12 +96,6 @@ def main(env_cfg, agent_cfg) -> None:
         agent_cfg.seed = seed
 
     solver_cfg = cli_args.apply_neural_model_to_env_cfg(env_cfg, args_cli)
-    if args_cli.neural_model_path is None:
-        default_path = getattr(getattr(env_cfg.sim.physics, "solver_cfg", None), "neural_model_path", None)
-        print(
-            "[WARN] --neural-model-path not set; using task default "
-            f"neural_model_path={default_path!r}. Provide an explicit NeRD checkpoint for real runs."
-        )
 
     log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
     print(f"[INFO] Logging experiment in directory: {log_root_path}")

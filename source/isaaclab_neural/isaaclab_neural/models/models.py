@@ -23,6 +23,7 @@ from isaaclab_neural.models.contact_set_model import ContactSetEncoderBlock
 from isaaclab_neural.models.model_kan import KAN
 from isaaclab_neural.models.model_transformer import GPT, GPTConfig
 from isaaclab_neural.models.shared_per_body_contact_encoder import SharedPerBodyContactEncoder
+from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 
 
 @dataclass
@@ -66,7 +67,7 @@ class ModelMixedInput(nn.Module):
         network_cfg,
         device="cuda:0",
         *,
-        contact_mode="fixed_ground",
+        contact_mode="newton_native",
         num_bodies=None,
     ):
         super().__init__()
@@ -76,6 +77,7 @@ class ModelMixedInput(nn.Module):
 
         self.input_rms = None
         self.normalize_input = network_cfg.get("normalize_input", False)
+        contact_mode = normalize_contact_mode(contact_mode)
         self.use_native_contact_processing = contact_mode == "newton_native"
         self.use_contact_token_set = "contact_set" in input_cfg
         self.output_rms = None

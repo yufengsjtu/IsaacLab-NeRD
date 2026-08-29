@@ -30,6 +30,7 @@ from pathlib import Path
 import isaaclab_neural.envs  # noqa: F401 - registers built-in NeRD eval tasks
 import torch
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
+from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 from isaaclab_neural.utils.checkpoint import get_cfg_from_checkpoint, load_checkpoint
 
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -85,7 +86,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
 
 def apply_solver_overrides(solver_cfg: NerdSolverCfg, args: argparse.Namespace) -> None:
     if args.contact_mode is not None:
-        solver_cfg.contact_mode = args.contact_mode
+        solver_cfg.contact_mode = normalize_contact_mode(args.contact_mode)
     if args.num_contacts_per_env is not None:
         solver_cfg.num_contacts_per_env = args.num_contacts_per_env
 

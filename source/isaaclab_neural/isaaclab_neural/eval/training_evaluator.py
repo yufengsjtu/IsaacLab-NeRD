@@ -18,6 +18,7 @@ from isaaclab_neural.eval.contact_set_matching import (
     contact_set_tolerance_failures,
     match_contact_tokens_by_identity,
 )
+from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 from isaaclab_neural.utils.commons import JOINT_F_LIM, JOINT_Q_MAX, JOINT_Q_MIN, JOINT_QD_LIM
 from newton import JointType
 from torch.utils.data import default_collate
@@ -47,10 +48,10 @@ class TrainingRolloutEvaluator:
         self.eval_horizon = eval_horizon
         self.history_length = int(getattr(neural_env.solver_neural, "num_states_history", 1))
         self.require_terrain_context = require_terrain_context
+        contact_mode = getattr(neural_env.solver_neural, "contact_mode", "newton_native")
+        neural_env.solver_neural.contact_mode = normalize_contact_mode(contact_mode)
         if contact_context_validation is None:
-            contact_context_validation = (
-                "warn" if getattr(neural_env.solver_neural, "contact_mode", None) == "newton_native" else "strict"
-            )
+            contact_context_validation = "warn"
         if contact_context_validation not in ("strict", "warn"):
             raise ValueError(
                 f"contact_context_validation must be 'strict' or 'warn', got {contact_context_validation!r}."

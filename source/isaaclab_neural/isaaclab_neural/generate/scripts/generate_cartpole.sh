@@ -15,5 +15,6 @@ exec "${REPO_ROOT}/isaaclab.sh" -p -m isaaclab_neural.generate.generate_dataset 
     --robot-name Cartpole \
     --sample-mode joint_f \
     --initial-states-source sample \
-    --contact-mode fixed_ground \
+    --contact-mode newton_native \
+    --num-contacts-per-env 0 \
     "$@"

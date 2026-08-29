@@ -74,16 +74,16 @@ workflow:
       localpath: {{ swift_io_localpath }}
 
 default-values:
-  workflow_name: anymal-c-fixed-ground
-  workflow_base_name: anymal-c-fixed-ground
-  osmo_experiment_preset: anymal_fixed_ground
+  workflow_name: anymal-c-newton-native
+  workflow_base_name: anymal-c-newton-native
+  osmo_experiment_preset: anymal_newton_native
   image: nvcr.io/nvidia/isaac-lab:3.0.0-beta2
   num_cpu: 15
   num_gpu: 1
   memory: 64Gi
   storage: 256Gi
   resource_platform: ovx-l40s
-  dataset_subdir: anymal-c-fixed-ground
+  dataset_subdir: anymal-c-newton-native
   dataset_cache_mode: auto
   storage_backend: nvdataset
   storage_credential: nvdataset_cred

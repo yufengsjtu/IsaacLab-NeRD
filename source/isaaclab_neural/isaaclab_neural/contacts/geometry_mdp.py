@@ -31,8 +31,8 @@ def _native_contact_adapter():
     from isaaclab_neural.physics import NewtonNerdManager
 
     adapter = NewtonNerdManager._nerd_contact_adapter
-    if adapter is None or NewtonNerdManager._nerd_contact_mode != "newton_native":
-        raise RuntimeError("Geometry contact MDP terms require NeRD contact_mode='newton_native'.")
+    if adapter is None:
+        raise RuntimeError("Geometry contact MDP terms require an active NeRD native-contact adapter.")
     return adapter
 
 

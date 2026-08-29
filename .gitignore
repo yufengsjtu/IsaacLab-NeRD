@@ -79,9 +79,13 @@ _build
 
 # Ruff cache
 **/.ruff_cache/
+.pre-commit-cache/
 
 # Dev-time files, generated stuff
 # **/__*
+.worktree/
+memory/
+pre-trained_models/
 
 # Isaac Lab CI environments in native mode
 **/_isaaclab_install_ci_*

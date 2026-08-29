@@ -823,11 +823,10 @@ class VanillaTrainer:
             data[key] = value.to(self.device, non_blocking=self.non_blocking_data_transfer)
         if "contact_masks" in data:
             data["contact_masks"] = data["contact_masks"].bool()
-        elif "contact_tokens" not in data:
-            data["contact_masks"] = self.neural_solver.get_contact_masks(
-                data["contact_depths"],
-                data["contact_thicknesses_0"],
-                data["contact_thicknesses_1"],
+        elif "contact_tokens" not in data and "contact_depths" in data:
+            raise ValueError(
+                "Flat native-contact datasets require explicit contact_masks. "
+                "Regenerate the dataset with the current generator."
             )
         if self.force_head_enabled:
             if BODY_FORCE_LABEL_KEY not in data:

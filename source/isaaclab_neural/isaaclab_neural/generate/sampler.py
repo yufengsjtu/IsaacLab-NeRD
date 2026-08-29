@@ -88,7 +88,7 @@ class ActionTrajectorySampler:
                     (num_envs, trajectory_length, self.adapter.num_primary_bodies, 3),
                     device=self.data_device,
                 )
-        else:
+        elif num_contacts_per_env > 0:
             buffers["contacts"] = {
                 "contact_masks": torch.empty(
                     (num_envs, trajectory_length, num_contacts_per_env),
@@ -114,6 +114,8 @@ class ActionTrajectorySampler:
                     (num_envs, trajectory_length, num_contacts_per_env), device=self.data_device
                 ),
             }
+        else:
+            buffers["contacts"] = {}
         buffers["trajectory_context"] = self._trajectory_context()
         if record_actions:
             buffers["actions"] = torch.empty(

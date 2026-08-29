@@ -13,6 +13,7 @@ import random
 from typing import TYPE_CHECKING
 
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
+from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 from isaaclab_neural.utils.checkpoint import get_cfg_from_checkpoint, load_checkpoint
 
 if TYPE_CHECKING:
@@ -109,7 +110,7 @@ def update_rsl_rl_cfg(agent_cfg: RslRlBaseRunnerCfg, args_cli: argparse.Namespac
 def apply_solver_overrides(solver_cfg: NerdSolverCfg, args: argparse.Namespace) -> None:
     """Apply CLI contact overrides onto a solver config."""
     if args.contact_mode is not None:
-        solver_cfg.contact_mode = args.contact_mode
+        solver_cfg.contact_mode = normalize_contact_mode(args.contact_mode)
     if args.num_contacts_per_env is not None:
         solver_cfg.num_contacts_per_env = args.num_contacts_per_env
     if getattr(args, "use_kv_cache", False):
@@ -154,6 +155,10 @@ def apply_neural_model_to_env_cfg(env_cfg, args: argparse.Namespace) -> NerdSolv
     physics_cfg.use_cuda_graph = False
     # Re-sync contact rewards after CLI ``--contact-mode`` overrides.
     apply_contact_mode_mdp(env_cfg)
+    if physics_cfg.solver_cfg.neural_model_path is None:
+        raise ValueError(
+            "NeRD RL requires --neural-model-path because dynamics checkpoints are not bundled with this release."
+        )
     return solver_cfg
 
 

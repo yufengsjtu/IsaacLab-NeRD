@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import warnings
+
 import newton
 import torch
 import warp as wp
@@ -26,6 +28,13 @@ class AbstractContact:
     """
 
     def __init__(self, model: newton.Model):
+        warnings.warn(
+            "AbstractContact is deprecated and incompatible with the native Newton contact path.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        raise ValueError("fixed_ground contact processing is no longer supported; use NewtonContactAdapter.")
+
         self.device = device_to_torch(model.device)
 
         self.contact_mode = "fixed_ground"

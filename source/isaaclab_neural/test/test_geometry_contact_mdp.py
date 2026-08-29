@@ -29,7 +29,6 @@ def _install_adapter(monkeypatch) -> SimpleNamespace:
         contact_body_ids_1=torch.tensor([[-1, -1, -1], [1, -1, -1]]),
     )
     monkeypatch.setattr(NewtonNerdManager, "_nerd_contact_adapter", adapter)
-    monkeypatch.setattr(NewtonNerdManager, "_nerd_contact_mode", "newton_native")
     return adapter
 
 
