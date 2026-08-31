@@ -19,7 +19,7 @@ import yaml
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import isaaclab_neural.envs  # noqa: F401 - registers built-in NeRD tasks
-from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
+from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg, NewtonNerdManager
 from isaaclab_neural.train import SequenceModelTrainer, VanillaTrainer
 from isaaclab_neural.train.arguments import get_parser
 from isaaclab_neural.utils.checkpoint import get_cfg_from_checkpoint, load_checkpoint
@@ -192,9 +192,11 @@ def main(env_cfg, _agent_cfg=None) -> None:
                 raise ValueError("Evaluation dataset contains terrain context but the task has no terrain generator.")
             validate_terrain_context(expected_terrain_context, actual_terrain_context)
 
-        with newton_material_binding_api_autofix():
+        with (
+            newton_material_binding_api_autofix(),
+            NewtonNerdManager._defer_neural_model_loading(),  # pyright: ignore[reportPrivateUsage]
+        ):
             env = gym.make(args_cli.task, cfg=env_cfg, device=args_cli.device, solver_cfg=solver_cfg).unwrapped
-            env.reset()
         algorithm_name = cfg["algorithm"].get("name", "VanillaTrainer")
         algorithm_cls = ALGORITHMS.get(algorithm_name)
         if algorithm_cls is None:
@@ -203,6 +205,7 @@ def main(env_cfg, _agent_cfg=None) -> None:
             raise ValueError("VanillaTrainer requires NeuralSolver.")
 
         trainer = algorithm_cls(neural_env=env, checkpoint=checkpoint, cfg=cfg, device=args_cli.device)
+        env.reset()
         if args_cli.train:
             trainer.train()
         else:

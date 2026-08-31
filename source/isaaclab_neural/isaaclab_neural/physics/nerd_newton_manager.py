@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import torch
 import warp as wp
@@ -23,6 +25,7 @@ class NewtonNerdManager(NewtonManager):
 
     _nerd_contact_adapter = None
     _nerd_active: bool = False
+    _neural_model_loading_deferred: bool = False
 
     _UPSTREAM_SYNC_ATTRS = (
         "_builder",
@@ -54,6 +57,17 @@ class NewtonNerdManager(NewtonManager):
     def _solver_specific_clear(cls) -> None:
         cls._nerd_contact_adapter = None
         cls._nerd_active = False
+
+    @classmethod
+    @contextmanager
+    def _defer_neural_model_loading(cls) -> Iterator[None]:
+        """Temporarily defer model attachment while a trainer constructs the environment."""
+        previous = cls._neural_model_loading_deferred
+        cls._neural_model_loading_deferred = True
+        try:
+            yield
+        finally:
+            cls._neural_model_loading_deferred = previous
 
     @classmethod
     def dispatch_event(cls, event: PhysicsEvent, payload=None) -> None:
@@ -191,9 +205,10 @@ class NewtonNerdManager(NewtonManager):
             contact_representation=cfg_dict.get("contact_representation", "flat"),
             max_contact_tokens=int(cfg_dict.get("max_contact_tokens", 0)),
         )
-        neural_model = cls._load_nerd_neural_model(cfg_dict, cls._solver)
-        NewtonManager._solver.set_neural_solver_model(neural_model)
-        NewtonManager._solver.eval()
+        if not cls._neural_model_loading_deferred:
+            neural_model = cls._load_nerd_neural_model(cfg_dict, cls._solver)
+            NewtonManager._solver.set_neural_solver_model(neural_model)
+            NewtonManager._solver.eval()
         cls._disable_cuda_graph_for_nerd()
         cls._sync_upstream_newton_state()
 

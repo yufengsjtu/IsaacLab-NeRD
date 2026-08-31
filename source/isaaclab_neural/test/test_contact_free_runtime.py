@@ -72,6 +72,37 @@ def test_runtime_requires_explicit_dynamics_checkpoint() -> None:
         NewtonNerdManager._load_nerd_neural_model({"neural_model_path": None})
 
 
+def test_training_can_defer_neural_model_loading(monkeypatch) -> None:
+    installed_models = []
+    fake_solver = SimpleNamespace(
+        set_neural_solver_model=lambda model: installed_models.append(model),
+        eval=lambda: pytest.fail("Deferred model must not enter evaluation mode."),
+    )
+
+    monkeypatch.setattr(isaaclab_neural.solvers, "create_neural_solver", lambda *_args, **_kwargs: fake_solver)
+    monkeypatch.setattr(NewtonManager, "_contacts", None)
+    monkeypatch.setattr(
+        NewtonNerdManager,
+        "_load_nerd_neural_model",
+        classmethod(lambda cls, cfg_dict, solver: pytest.fail("Deferred model must not be loaded.")),
+    )
+    monkeypatch.setattr(NewtonNerdManager, "_disable_cuda_graph_for_nerd", classmethod(lambda cls: None))
+    monkeypatch.setattr(NewtonNerdManager, "_sync_upstream_newton_state", classmethod(lambda cls: None))
+
+    with NewtonNerdManager._defer_neural_model_loading():
+        NewtonNerdManager._build_solver(
+            model=object(),
+            solver_cfg=NerdSolverCfg(
+                contact_mode="newton_native",
+                num_contacts_per_env=0,
+            ),
+        )
+
+    assert NewtonManager._solver is fake_solver
+    assert installed_models == []
+    assert NewtonNerdManager._neural_model_loading_deferred is False
+
+
 def test_cartpole_uses_contact_free_solver_config() -> None:
     cfg = NerdCartpoleEnvCfg()
 
