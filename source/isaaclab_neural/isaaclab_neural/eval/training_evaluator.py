@@ -42,6 +42,10 @@ class TrainingRolloutEvaluator:
         contact_context_tolerance: float = 1.0e-4,
         contact_context_normal_tolerance: float = 1.0e-3,
         contact_context_velocity_tolerance: float = 1.0e-3,
+        contact_representation: str | None = None,
+        num_contacts_per_env: int | None = None,
+        max_contact_tokens: int | None = None,
+        contact_packing_policy: str | None = None,
     ):
         self.neural_env = neural_env
         self.device = device
@@ -66,6 +70,10 @@ class TrainingRolloutEvaluator:
             self.trajectory_dataset = TrajectoryDataset(
                 hdf5_dataset_path=hdf5_dataset_path,
                 sample_sequence_length=eval_horizon + self.history_length - 1,
+                contact_representation=contact_representation,
+                num_contacts_per_env=num_contacts_per_env,
+                max_contact_tokens=max_contact_tokens,
+                contact_packing_policy=contact_packing_policy,
             )
 
     @torch.no_grad()

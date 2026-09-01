@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 
+from isaaclab_neural.contacts.contact_set_schema import CONTACT_FLAT_VALUE_FIELDS
 from isaaclab_neural.utils.running_mean_std import RunningMeanStd
 
 MIN_CONTACT_RMS_SAMPLES = 1024
@@ -101,9 +102,10 @@ def mask_inactive_contact_fields(input_dict: MutableMapping[str, torch.Tensor]) 
         return
 
     expanded_mask = contact_masks.bool().unsqueeze(-1)
-    for input_name, value in list(input_dict.items()):
-        if not input_name.startswith("contact_") or input_name == "contact_masks":
+    for input_name in CONTACT_FLAT_VALUE_FIELDS:
+        if input_name not in input_dict:
             continue
+        value = input_dict[input_name]
         reshaped = reshape_contact_field(value, contact_masks)
         input_dict[input_name] = torch.where(expanded_mask, reshaped, 0.0).reshape_as(value)
 

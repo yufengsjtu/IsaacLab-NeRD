@@ -232,15 +232,31 @@ def test_contact_free_hdf5_schema_accepts_no_contact_fields() -> None:
     _validate_rollout_arrays(arrays)
 
 
-def test_hdf5_schema_rejects_partial_flat_contacts() -> None:
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "contact_masks",
+        "contact_normals",
+        "contact_depths",
+        "contact_thicknesses_0",
+        "contact_thicknesses_1",
+        "contact_points_0",
+        "contact_points_1",
+        "contact_tokens",
+        "contact_token_overflow",
+        "contact_token_body_ids",
+        "contact_token_world_ids",
+    ],
+)
+def test_hdf5_schema_rejects_baked_contact_fields(field_name: str) -> None:
     arrays = {
         "states": np.zeros((2, 3, 4), dtype=np.float32),
         "next_states": np.zeros((2, 3, 4), dtype=np.float32),
         "joint_f": np.zeros((2, 3, 1), dtype=np.float32),
-        "contact_depths": np.zeros((2, 3, 2), dtype=np.float32),
+        field_name: np.zeros((2, 3, 1), dtype=np.float32),
     }
 
-    with pytest.raises(ValueError, match="contact_masks"):
+    with pytest.raises(ValueError, match=rf"baked contact fields are incompatible: \['{field_name}'\]"):
         _validate_rollout_arrays(arrays)
 
 

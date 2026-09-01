@@ -149,17 +149,18 @@ def main(env_cfg, agent_cfg=None) -> None:
 
     configure_env(env_cfg, args_cli)
     solver_cfg = build_solver_cfg(args_cli)
-    # Contact-token rollouts are large ((B, T, K, 17)). Staging them on CUDA and
-    # concatenating write chunks easily OOMs, while HDF5 serialization always
-    # moves tensors to CPU anyway.
+    # Ragged native contacts are serialized on CPU. Staging them there avoids
+    # retaining every frame's variable pair tensors on CUDA until a write chunk
+    # completes.
+    has_contacts = int(getattr(args_cli, "num_contacts_per_env", 0) or 0) > 0
     if args_cli.data_device is not None:
         data_device = args_cli.data_device
-    elif getattr(args_cli, "contact_representation", "flat") == "contact_tokens":
+    elif has_contacts:
         data_device = "cpu"
     else:
         data_device = args_cli.device
-    if str(data_device).startswith("cpu") and getattr(args_cli, "contact_representation", "flat") == "contact_tokens":
-        print("[dataset] staging contact_tokens rollouts on CPU to avoid GPU OOM during chunk merge.")
+    if str(data_device).startswith("cpu") and has_contacts:
+        print("[dataset] staging ragged native contacts on CPU to avoid GPU OOM during chunk merge.")
 
     with launch_simulation(env_cfg, args_cli):
         with newton_material_binding_api_autofix():

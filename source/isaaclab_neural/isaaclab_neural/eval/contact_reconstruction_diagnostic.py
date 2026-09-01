@@ -24,7 +24,13 @@ from isaaclab_neural.data import (
     set_terrain_seed,
     validate_terrain_context,
 )
-from isaaclab_neural.data.datasets import validate_contact_token_metadata
+from isaaclab_neural.data.datasets import validate_native_only_data_group
+from isaaclab_neural.data.native_contacts import (
+    NativeContactProjection,
+    read_and_project_frames,
+    resolve_native_projection,
+    validate_native_storage,
+)
 from isaaclab_neural.eval.contact_set_matching import (
     contact_set_matching_metrics,
     contact_set_tolerance_failures,
@@ -181,6 +187,28 @@ def build_launch_cfg(env_cfg):
     return launch_cfg
 
 
+def _resolve_diagnostic_native_projection(
+    dataset_file: h5py.File,
+    *,
+    contact_representation: str | None,
+    num_contacts_per_env: int | None,
+    max_contact_tokens: int | None,
+    contact_packing_policy: str | None,
+) -> NativeContactProjection | None:
+    """Resolve the fixed compute projection for an optional native-pair group."""
+    data_group = cast(h5py.Group, dataset_file["data"])
+    states = cast(h5py.Dataset, data_group["states"])
+    total_transitions = states.shape[0] * states.shape[1]
+    native_group = validate_native_storage(dataset_file, total_transitions)
+    return resolve_native_projection(
+        has_native_contacts=native_group is not None,
+        contact_representation=contact_representation,
+        num_contacts_per_env=num_contacts_per_env,
+        max_contact_tokens=max_contact_tokens,
+        contact_packing_policy=contact_packing_policy,
+    )
+
+
 def load_dataset_batch(
     dataset_path: str,
     *,
@@ -189,6 +217,10 @@ def load_dataset_batch(
     step: int,
     device: str,
     history_length: int = 1,
+    contact_representation: str | None = None,
+    num_contacts_per_env: int | None = None,
+    max_contact_tokens: int | None = None,
+    contact_packing_policy: str | None = None,
 ) -> dict[str, torch.Tensor]:
     """Load a history window ending at one timestep from consecutive trajectories."""
     if trajectory_start < 0:
@@ -199,22 +231,15 @@ def load_dataset_batch(
     path = Path(dataset_path).expanduser()
     with h5py.File(path, "r", swmr=True, libver="latest") as dataset_file:
         data_group = cast(h5py.Group, dataset_file["data"])
-        validate_contact_token_metadata(data_group)
+        validate_native_only_data_group(data_group)
         required = {"states", "next_states", "joint_f", "root_body_q", "root_body_qd", "gravity_dir"}
-        if "contact_tokens" in data_group:
-            required.update({"contact_tokens", "contact_token_overflow"})
-        else:
-            required.update(
-                {
-                    "contact_masks",
-                    "contact_normals",
-                    "contact_depths",
-                    "contact_points_0",
-                    "contact_points_1",
-                    "contact_thicknesses_0",
-                    "contact_thicknesses_1",
-                }
-            )
+        native_projection = _resolve_diagnostic_native_projection(
+            dataset_file,
+            contact_representation=contact_representation,
+            num_contacts_per_env=num_contacts_per_env,
+            max_contact_tokens=max_contact_tokens,
+            contact_packing_policy=contact_packing_policy,
+        )
         missing = sorted(required - set(data_group.keys()))
         if missing:
             raise ValueError(f"Dataset is missing required diagnostic fields: {missing}.")
@@ -244,6 +269,25 @@ def load_dataset_batch(
                 batch[key] = torch.as_tensor(array, dtype=torch.long, device=device)
             else:
                 batch[key] = torch.as_tensor(array, dtype=torch.float32, device=device)
+        if native_projection is not None:
+            steps_per_trajectory = states.shape[1]
+            frame_indices = np.concatenate(
+                [
+                    trajectory_index * steps_per_trajectory + np.arange(history_start, step + 1, dtype=np.int64)
+                    for trajectory_index in range(trajectory_start, trajectory_end)
+                ]
+            )
+            projected = read_and_project_frames(
+                cast(h5py.Group, dataset_file["contacts"]["native_pairs"]),
+                frame_indices,
+                native_projection,
+            )
+            history_count = step - history_start + 1
+            for key, array in projected.items():
+                batch[key] = torch.as_tensor(
+                    array.reshape(num_envs, history_count, *array.shape[1:]),
+                    device=device,
+                )
         if "context" in dataset_file:
             context_group = cast(h5py.Group, dataset_file["context"])
             if "trajectories" in context_group:
@@ -264,6 +308,10 @@ def load_random_dataset_batch(
     rng: np.random.Generator,
     device: str,
     excluded_trajectory_indices: set[int] | None = None,
+    contact_representation: str | None = None,
+    num_contacts_per_env: int | None = None,
+    max_contact_tokens: int | None = None,
+    contact_packing_policy: str | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, np.ndarray]]:
     """Load random evaluator-compatible history windows."""
     if num_envs <= 0:
@@ -276,7 +324,14 @@ def load_random_dataset_batch(
     path = Path(dataset_path).expanduser()
     with h5py.File(path, "r", swmr=True, libver="latest") as dataset_file:
         data_group = cast(h5py.Group, dataset_file["data"])
-        validate_contact_token_metadata(data_group)
+        validate_native_only_data_group(data_group)
+        native_projection = _resolve_diagnostic_native_projection(
+            dataset_file,
+            contact_representation=contact_representation,
+            num_contacts_per_env=num_contacts_per_env,
+            max_contact_tokens=max_contact_tokens,
+            contact_packing_policy=contact_packing_policy,
+        )
         states = cast(h5py.Dataset, data_group["states"])
         if "traj_lengths" in data_group:
             traj_lengths = np.asarray(cast(h5py.Dataset, data_group["traj_lengths"])).astype(np.int64)
@@ -325,6 +380,25 @@ def load_random_dataset_batch(
                 batch[key] = torch.as_tensor(array, dtype=torch.long, device=device)
             else:
                 batch[key] = torch.as_tensor(array, dtype=torch.float32, device=device)
+        if native_projection is not None:
+            steps_per_trajectory = states.shape[1]
+            frame_indices = np.concatenate(
+                [
+                    trajectory_index * steps_per_trajectory
+                    + np.arange(step - history_length + 1, step + 1, dtype=np.int64)
+                    for trajectory_index, step in zip(trajectory_indices, steps, strict=True)
+                ]
+            )
+            projected = read_and_project_frames(
+                cast(h5py.Group, dataset_file["contacts"]["native_pairs"]),
+                frame_indices,
+                native_projection,
+            )
+            for key, array in projected.items():
+                batch[key] = torch.as_tensor(
+                    array.reshape(num_envs, history_length, *array.shape[1:]),
+                    device=device,
+                )
         if "context" in dataset_file:
             context_group = cast(h5py.Group, dataset_file["context"])
             if "trajectories" in context_group:
@@ -599,122 +673,6 @@ def raw_token_frame_metrics(
         "world_point_delta_y_mean": float(point_delta[:, 1].mean()),
         "world_point_delta_z_mean": float(point_delta[:, 2].mean()),
     }
-
-
-def analyze_dataset_token_row_ownership(dataset_path: str, body_world: torch.Tensor) -> None:
-    """Validate recorded token owner ids against trajectory world-row metadata."""
-    with h5py.File(Path(dataset_path).expanduser(), "r", swmr=True, libver="latest") as dataset_file:
-        data_group = cast(h5py.Group, dataset_file["data"])
-        if "contact_tokens" not in data_group:
-            return
-        validate_contact_token_metadata(data_group)
-        tokens_dataset = cast(h5py.Dataset, data_group["contact_tokens"])
-        required_data = {"contact_token_body_ids", "contact_token_world_ids"}
-        missing_data = sorted(required_data - set(data_group.keys()))
-        if missing_data:
-            raise ValueError(f"Contact-token diagnostic requires identity fields: {missing_data}.")
-        if "context" not in dataset_file or "trajectories" not in cast(h5py.Group, dataset_file["context"]):
-            raise ValueError("Contact-token diagnostic requires per-trajectory world context.")
-        trajectory_group = cast(h5py.Group, cast(h5py.Group, dataset_file["context"])["trajectories"])
-        required_context = {"state_world_id", "root_world_id", "contact_world_id"}
-        missing_context = sorted(required_context - set(trajectory_group.keys()))
-        if missing_context:
-            raise ValueError(f"Contact-token diagnostic requires world context fields: {missing_context}.")
-
-        token_world_dataset = cast(h5py.Dataset, data_group["contact_token_world_ids"])
-        token_body_dataset = cast(h5py.Dataset, data_group["contact_token_body_ids"])
-        expected_world_ids = torch.as_tensor(
-            np.asarray(cast(h5py.Dataset, trajectory_group["contact_world_id"])), dtype=torch.long
-        )
-        counts = {
-            "active_token_count": 0,
-            "recorded_token_world_row_mismatch_count": 0,
-            "owner_body_world_mismatch_count": 0,
-            "owner_body_runtime_comparable_count": 0,
-            "owner_body_runtime_unavailable_count": 0,
-            "invalid_token_world_id_count": 0,
-            "missing_valid_owner_body_count": 0,
-            "invalid_owner_body_count": 0,
-        }
-        mismatch_examples = []
-        chunk_size = 64
-        for chunk_start in range(0, tokens_dataset.shape[0], chunk_size):
-            chunk_end = min(chunk_start + chunk_size, tokens_dataset.shape[0])
-            valid = torch.as_tensor(np.asarray(tokens_dataset[chunk_start:chunk_end, :, :, 0])) > 0.5
-            token_world_ids = torch.as_tensor(np.asarray(token_world_dataset[chunk_start:chunk_end]), dtype=torch.long)
-            token_body_ids = torch.as_tensor(np.asarray(token_body_dataset[chunk_start:chunk_end]), dtype=torch.long)
-            expected = expected_world_ids[chunk_start:chunk_end, None, None].expand_as(token_world_ids)
-            world_mismatch = (token_world_ids != expected) & valid
-            missing_valid_owner = valid & (token_body_ids < 0)
-            body_runtime_unavailable = valid & (token_body_ids >= body_world.shape[0])
-            runtime_comparable = valid & ~missing_valid_owner & ~body_runtime_unavailable
-            body_owner_world_mismatch = torch.zeros_like(valid)
-            body_owner_world_mismatch[runtime_comparable] = (
-                body_world[token_body_ids[runtime_comparable]].to(dtype=torch.long)
-                != token_world_ids[runtime_comparable]
-            )
-
-            counts["active_token_count"] += int(valid.sum())
-            counts["recorded_token_world_row_mismatch_count"] += int(world_mismatch.sum())
-            counts["owner_body_world_mismatch_count"] += int(body_owner_world_mismatch.sum())
-            counts["owner_body_runtime_comparable_count"] += int(runtime_comparable.sum())
-            counts["owner_body_runtime_unavailable_count"] += int(body_runtime_unavailable.sum())
-            counts["invalid_token_world_id_count"] += int(((token_world_ids >= 0) & ~valid).sum())
-            counts["missing_valid_owner_body_count"] += int(missing_valid_owner.sum())
-            counts["invalid_owner_body_count"] += int(((token_body_ids >= 0) & ~valid).sum())
-
-            identity_mismatch = world_mismatch | body_owner_world_mismatch | missing_valid_owner
-            if len(mismatch_examples) < 16 and identity_mismatch.any():
-                for row, step, slot in torch.nonzero(identity_mismatch, as_tuple=False).tolist():
-                    mismatch_examples.append(
-                        (
-                            chunk_start + row,
-                            step,
-                            slot,
-                            int(token_body_ids[row, step, slot]),
-                            int(token_world_ids[row, step, slot]),
-                            int(expected[row, step, slot]),
-                        )
-                    )
-                    if len(mismatch_examples) == 16:
-                        break
-
-        print_metrics("dataset_row_ownership", {name: float(value) for name, value in counts.items()})
-        for row, step, slot, body_id, recorded_world_id, expected_world_id in mismatch_examples:
-            print(
-                "owner_world_mismatch="
-                f"(trajectory={row}, step={step}, slot={slot}, body_id={body_id}, "
-                f"recorded_world_id={recorded_world_id}, expected_world_id={expected_world_id})"
-            )
-        world_id_arrays = {
-            name: np.asarray(cast(h5py.Dataset, trajectory_group[name]))
-            for name in ("state_world_id", "root_world_id", "contact_world_id")
-        }
-        state_world = world_id_arrays["state_world_id"]
-        state_root_mismatch_count = int(np.sum(state_world != world_id_arrays["root_world_id"]))
-        state_contact_mismatch_count = int(np.sum(state_world != world_id_arrays["contact_world_id"]))
-        print(f"state_root_world_mismatch_count={state_root_mismatch_count}")
-        print(f"state_contact_world_mismatch_count={state_contact_mismatch_count}")
-
-        failures = {
-            name: count
-            for name, count in (
-                (
-                    "recorded_token_world_row_mismatch_count",
-                    counts["recorded_token_world_row_mismatch_count"],
-                ),
-                ("owner_body_world_mismatch_count", counts["owner_body_world_mismatch_count"]),
-                ("missing_valid_owner_body_count", counts["missing_valid_owner_body_count"]),
-                ("invalid_token_world_id_count", counts["invalid_token_world_id_count"]),
-                ("invalid_owner_body_count", counts["invalid_owner_body_count"]),
-                ("state_root_world_mismatch_count", state_root_mismatch_count),
-                ("state_contact_world_mismatch_count", state_contact_mismatch_count),
-            )
-            if count
-        }
-        if failures:
-            details = ", ".join(f"{name}={count}" for name, count in failures.items())
-            raise ValueError(f"Contact-token ownership schema mismatch: {details}.")
 
 
 def input_difference_metrics(
@@ -1073,16 +1031,18 @@ def run_diagnostic(env, args: argparse.Namespace) -> None:
     solver = env.neural_adapter.solver
     history_length = int(getattr(solver, "num_states_history", 1))
     is_contact_tokens = getattr(solver, "contact_representation", "flat") == "contact_tokens"
+    contact_adapter = solver.contact_adapter
+    projection_args = {
+        "contact_representation": getattr(solver, "contact_representation", "flat"),
+        "num_contacts_per_env": int(getattr(solver, "num_contacts_per_env", args.num_contacts_per_env)),
+        "max_contact_tokens": int(getattr(solver, "max_contact_tokens", args.max_contact_tokens)),
+        "contact_packing_policy": getattr(contact_adapter, "packing_policy", args.contact_packing_policy),
+    }
     print(
         "[setup] "
         f"dataset={args.dataset}, checkpoint={args.checkpoint or 'none'}, num_envs={args.num_envs}, "
         f"history_length={history_length}, random_samples={args.random_samples}"
     )
-    if is_contact_tokens:
-        contact_adapter = solver.contact_adapter
-        if contact_adapter is None or contact_adapter.body_world is None:
-            raise ValueError("Contact-token diagnostic requires Newton body_world metadata.")
-        analyze_dataset_token_row_ownership(args.dataset, torch.as_tensor(contact_adapter.body_world, dtype=torch.long))
     if args.random_samples > 0:
         if args.random_samples % args.num_envs != 0:
             raise ValueError("--random-samples must be divisible by --num-envs.")
@@ -1098,6 +1058,7 @@ def run_diagnostic(env, args: argparse.Namespace) -> None:
                 rng=rng,
                 device=str(solver.torch_device),
                 excluded_trajectory_indices=sampled_trajectory_indices,
+                **projection_args,
             )
             sampled_trajectory_indices.update(int(index) for index in metadata["trajectory_index"])
             metrics = compare_diagnostic_batch(
@@ -1132,6 +1093,7 @@ def run_diagnostic(env, args: argparse.Namespace) -> None:
         step=args.step,
         device=str(solver.torch_device),
         history_length=history_length,
+        **projection_args,
     )
     metadata = {
         "trajectory_index": np.arange(args.trajectory_start, args.trajectory_start + args.num_envs),

@@ -219,8 +219,6 @@ class DataGenerationAdapter:
         if record_body_net_contact_forces:
             if self.contact_adapter is None:
                 raise ValueError("Body net contact-force labels require a positive contact capacity.")
-            if contact_representation != "contact_tokens":
-                raise ValueError("Body net contact-force labels require contact_representation='contact_tokens'.")
             scene = getattr(self.env, "scene", None)
             sensors = getattr(scene, "sensors", {})
             sensor = sensors.get("contact_forces") if sensors is not None else None
@@ -345,6 +343,12 @@ class DataGenerationAdapter:
         if self.contact_adapter is None:
             return None
         return self.contact_adapter.truncation_summary()
+
+    def native_contact_pairs(self) -> dict[str, torch.Tensor] | None:
+        """Return canonical native contact pairs before capacity packing."""
+        if self.contact_adapter is None:
+            return None
+        return self.contact_adapter.native_contact_pairs()
 
     def _action_shape(self) -> tuple[int, ...]:
         shape = tuple(self.env.action_space.shape)

@@ -20,6 +20,7 @@ import warp as wp
 from newton import Contacts, Control, JointType, Model, State
 from newton.solvers import SolverBase
 
+from isaaclab_neural.contacts.contact_set_schema import CONTACT_FLAT_VALUE_FIELDS
 from isaaclab_neural.contacts.newton_contact_adapter import NewtonContactAdapter
 from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 from isaaclab_neural.solvers.kernels import determine_angular_dofs
@@ -510,8 +511,8 @@ class NeuralSolver(SolverBase):
         # Apply contact mask: zero features for inactive anchors.
         if model_inputs.get("contact_points_1") is not None and "contact_masks" in model_inputs:
             mask = model_inputs["contact_masks"].unsqueeze(-1)  # (B, T, C, 1) bool
-            for key in model_inputs.keys():
-                if key.startswith("contact_") and key != "contact_masks":
+            for key in CONTACT_FLAT_VALUE_FIELDS:
+                if key in model_inputs:
                     shape = model_inputs[key].shape
                     model_inputs[key] = torch.where(
                         mask,

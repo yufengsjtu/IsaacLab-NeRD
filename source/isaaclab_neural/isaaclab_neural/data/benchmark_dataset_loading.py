@@ -17,12 +17,17 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from isaaclab_neural.contacts.contact_set_schema import (
+    NATIVE_CONTACT_INTEGER_FIELDS,
+    NATIVE_CONTACT_SCALAR_FIELDS,
+    NATIVE_CONTACT_VECTOR_FIELDS,
+)
 from isaaclab_neural.data import (
     create_batch_transition_dataset,
     create_trajectory_dataset,
@@ -53,27 +58,40 @@ def _make_synthetic_rollouts(
     trajectory_length: int,
     state_dim: int,
     joint_f_dim: int,
-    num_contacts_per_env: int,
+    native_contacts_per_frame: int,
     include_actions: bool,
-) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
+) -> dict[str, Any]:
     """Create rollout tensors with the same schema as NeRD trajectory datasets."""
     shape = (num_trajectories, trajectory_length)
-    rollouts: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {
+    world_ids = torch.arange(num_trajectories, dtype=torch.int64)
+    rollouts: dict[str, Any] = {
         "states": torch.randn(*shape, state_dim, dtype=torch.float32),
         "next_states": torch.randn(*shape, state_dim, dtype=torch.float32),
         "joint_f": torch.randn(*shape, joint_f_dim, dtype=torch.float32),
         "root_body_q": torch.randn(*shape, 7, dtype=torch.float32),
+        "root_body_qd": torch.randn(*shape, 6, dtype=torch.float32),
         "gravity_dir": torch.tensor([0.0, 0.0, -1.0], dtype=torch.float32).expand(*shape, 3).clone(),
-        "contacts": {
-            "contact_masks": torch.rand(*shape, num_contacts_per_env) > 0.5,
-            "contact_normals": torch.randn(*shape, num_contacts_per_env * 3, dtype=torch.float32),
-            "contact_depths": torch.rand(*shape, num_contacts_per_env, dtype=torch.float32),
-            "contact_points_0": torch.randn(*shape, num_contacts_per_env * 3, dtype=torch.float32),
-            "contact_points_1": torch.randn(*shape, num_contacts_per_env * 3, dtype=torch.float32),
-            "contact_thicknesses_0": torch.rand(*shape, num_contacts_per_env, dtype=torch.float32),
-            "contact_thicknesses_1": torch.rand(*shape, num_contacts_per_env, dtype=torch.float32),
+        "trajectory_context": {
+            "state_world_id": world_ids,
+            "root_world_id": world_ids,
+            "contact_world_id": world_ids,
         },
     }
+    pair_count = num_trajectories * trajectory_length * native_contacts_per_frame
+    native_contacts = {name: torch.zeros(pair_count, dtype=torch.int64) for name in NATIVE_CONTACT_INTEGER_FIELDS}
+    native_contacts.update(
+        {name: torch.randn(pair_count, 3, dtype=torch.float32) for name in NATIVE_CONTACT_VECTOR_FIELDS}
+    )
+    native_contacts.update(
+        {name: torch.randn(pair_count, dtype=torch.float32) for name in NATIVE_CONTACT_SCALAR_FIELDS}
+    )
+    native_contacts["frame_counts"] = torch.full(shape, native_contacts_per_frame, dtype=torch.int64)
+    native_contacts["world_ids"] = world_ids.repeat_interleave(trajectory_length * native_contacts_per_frame)
+    native_contacts["body_ids_0"] = torch.arange(pair_count, dtype=torch.int64) % 17
+    native_contacts["body_ids_1"].fill_(-1)
+    native_contacts["body_slots_0"] = native_contacts["body_ids_0"].clone()
+    native_contacts["body_slots_1"].fill_(-1)
+    rollouts["native_contacts"] = native_contacts
     if include_actions:
         rollouts["actions"] = torch.randn(*shape, 12, dtype=torch.float32)
     return rollouts
@@ -86,14 +104,14 @@ def _write_benchmark_dataset(
     trajectory_length: int,
     state_dim: int,
     joint_f_dim: int,
-    num_contacts_per_env: int,
+    native_contacts_per_frame: int,
 ) -> None:
     rollouts = _make_synthetic_rollouts(
         num_trajectories=num_trajectories,
         trajectory_length=trajectory_length,
         state_dim=state_dim,
         joint_f_dim=joint_f_dim,
-        num_contacts_per_env=num_contacts_per_env,
+        native_contacts_per_frame=native_contacts_per_frame,
         include_actions=True,
     )
     write_rollouts_to_hdf5(output_path, rollouts, env_name="Benchmark")
@@ -136,6 +154,7 @@ def _benchmark_trajectory_dataset(
     measure_epochs: int,
     rank: int = 0,
     world_size: int = 1,
+    projection_args: dict[str, Any] | None = None,
 ) -> dict[str, float]:
     gc.collect()
     rss_before = _rss_gib()
@@ -148,6 +167,7 @@ def _benchmark_trajectory_dataset(
         max_capacity=max_capacity,
         rank=rank,
         world_size=world_size,
+        **(projection_args or {}),
     )
     init_seconds = time.perf_counter() - init_start
     rss_after_init = _current_rss_gib()
@@ -202,6 +222,7 @@ def _benchmark_batch_transition_dataset(
     num_workers: int,
     warmup_epochs: int,
     measure_epochs: int,
+    projection_args: dict[str, Any] | None = None,
 ) -> dict[str, float]:
     from isaaclab_neural.data import collate_fn_BatchTransitionDataset
 
@@ -215,6 +236,7 @@ def _benchmark_batch_transition_dataset(
         hdf5_dataset_path=dataset_path,
         max_capacity=max_capacity,
         device="cpu",
+        **(projection_args or {}),
     )
     init_seconds = time.perf_counter() - init_start
     rss_after_init = _current_rss_gib()
@@ -275,6 +297,7 @@ def _run_worker(payload: dict[str, object]) -> dict[str, float]:
     dataset_path = Path(cast(str, payload["dataset_path"]))
     load_mode = cast(str, payload["load_mode"])
     dataset_kind = cast(str, payload["dataset_kind"])
+    projection_args = cast(dict[str, Any], payload.get("projection_args", {}))
     if dataset_kind == "trajectory":
         return _benchmark_trajectory_dataset(
             dataset_path,
@@ -287,6 +310,7 @@ def _run_worker(payload: dict[str, object]) -> dict[str, float]:
             measure_epochs=int(payload["measure_epochs"]),
             rank=0,
             world_size=int(payload["eager_world_size"]) if load_mode == "eager" else 1,
+            projection_args=projection_args,
         )
     return _benchmark_batch_transition_dataset(
         dataset_path,
@@ -296,6 +320,7 @@ def _run_worker(payload: dict[str, object]) -> dict[str, float]:
         num_workers=int(payload["num_workers"]),
         warmup_epochs=int(payload["warmup_epochs"]),
         measure_epochs=int(payload["measure_epochs"]),
+        projection_args=projection_args,
     )
 
 
@@ -321,6 +346,9 @@ def main() -> None:
     parser.add_argument("--state-dim", type=int, default=48)
     parser.add_argument("--joint-f-dim", type=int, default=12)
     parser.add_argument("--num-contacts-per-env", type=int, default=4)
+    parser.add_argument("--native-contacts-per-frame", type=int, default=2)
+    parser.add_argument("--contact-representation", choices=("flat", "contact_tokens"), default="flat")
+    parser.add_argument("--max-contact-tokens", type=int, default=64)
     parser.add_argument("--sample-sequence-length", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--max-capacity", type=int, default=1_000_000)
@@ -344,9 +372,11 @@ def main() -> None:
             trajectory_length=args.trajectory_length,
             state_dim=args.state_dim,
             joint_f_dim=args.joint_f_dim,
-            num_contacts_per_env=args.num_contacts_per_env,
+            native_contacts_per_frame=args.native_contacts_per_frame,
         )
-        print(f"[benchmark] wrote synthetic dataset to {dataset_path}")
+        print(
+            f"[benchmark] wrote synthetic dataset to {dataset_path} ({dataset_path.stat().st_size / (1024**2):.2f} MiB)"
+        )
     else:
         temp_dir = None
         dataset_path = Path(args.dataset_path).expanduser()
@@ -362,6 +392,16 @@ def main() -> None:
             "warmup_epochs": args.warmup_epochs,
             "measure_epochs": args.measure_epochs,
             "eager_world_size": args.eager_world_size,
+            "projection_args": {
+                "contact_representation": args.contact_representation,
+                "num_contacts_per_env": args.num_contacts_per_env,
+                "max_contact_tokens": args.max_contact_tokens,
+                "contact_packing_policy": (
+                    "body_round_robin_pair_atomic"
+                    if args.contact_representation == "contact_tokens"
+                    else "penetration_priority"
+                ),
+            },
         }
         eager = _benchmark_in_subprocess({**payload, "load_mode": "eager"})
         lazy = _benchmark_in_subprocess({**payload, "load_mode": "lazy"})

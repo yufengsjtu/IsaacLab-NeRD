@@ -10,29 +10,23 @@ import pytest
 import torch
 from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
 from isaaclab_neural.data import TrajectoryDataset, append_rollouts_to_hdf5, write_rollouts_to_hdf5
+from native_hdf5_samples import make_native_rollouts
 
 
 def _rollouts(num_trajectories: int = 2, num_steps: int = 3):
-    return {
-        "states": torch.arange(num_trajectories * num_steps * 4, dtype=torch.float32).reshape(
-            num_trajectories, num_steps, 4
-        ),
-        "next_states": torch.zeros(num_trajectories, num_steps, 4),
-        "joint_f": torch.zeros(num_trajectories, num_steps, 2),
-        "root_body_q": torch.zeros(num_trajectories, num_steps, 7),
-        "root_body_qd": torch.zeros(num_trajectories, num_steps, 6),
-        "gravity_dir": torch.zeros(num_trajectories, num_steps, 3),
-        "contacts": {
-            "contact_masks": torch.zeros(num_trajectories, num_steps, 2, dtype=torch.bool),
-            "contact_depths": torch.zeros(num_trajectories, num_steps, 2),
-        },
-        "trajectory_context": {
+    rollouts = make_native_rollouts(
+        num_trajectories=num_trajectories,
+        num_steps=num_steps,
+    )
+    rollouts["trajectory_context"].update(
+        {
             "source_env_id": torch.arange(num_trajectories, dtype=torch.int64),
             "terrain_level": torch.arange(num_trajectories, dtype=torch.int64),
             "terrain_type": torch.arange(num_trajectories, dtype=torch.int64) + 4,
             "env_origin": torch.arange(num_trajectories * 3, dtype=torch.float32).reshape(num_trajectories, 3),
-        },
-    }
+        }
+    )
+    return rollouts
 
 
 def _terrain_context(seed: int = 40):
@@ -95,20 +89,6 @@ def test_history_and_rollout_window_stays_within_trajectory(tmp_path):
 def test_rank_sharded_contact_tokens_keep_matching_trajectory_context(tmp_path):
     dataset_path = tmp_path / "tokens.hdf5"
     rollouts = _rollouts(num_trajectories=4)
-    rollouts["contacts"] = {
-        "contact_tokens": torch.zeros(4, 3, 2, CONTACT_TOKEN_DIM),
-        "contact_token_overflow": torch.zeros(4, 3, dtype=torch.long),
-    }
-    rollouts["contact_token_body_ids"] = torch.full((4, 3, 2), -1, dtype=torch.long)
-    rollouts["contact_token_world_ids"] = torch.full((4, 3, 2), -1, dtype=torch.long)
-    world_ids = torch.arange(4, dtype=torch.long)
-    rollouts["trajectory_context"].update(
-        {
-            "state_world_id": world_ids,
-            "root_world_id": world_ids,
-            "contact_world_id": world_ids,
-        }
-    )
     write_rollouts_to_hdf5(dataset_path, rollouts, "rough-tokens", terrain_context=_terrain_context())
 
     dataset = TrajectoryDataset(
@@ -116,10 +96,15 @@ def test_rank_sharded_contact_tokens_keep_matching_trajectory_context(tmp_path):
         sample_sequence_length=2,
         rank=1,
         world_size=2,
+        contact_representation="contact_tokens",
+        max_contact_tokens=2,
+        contact_packing_policy="body_round_robin_pair_atomic",
     )
     sample = dataset[0]
 
     assert dataset.global_trajectory_indices.tolist() == [1, 3]
     assert sample["contact_tokens"].shape == (2, 2, CONTACT_TOKEN_DIM)
+    assert int(sample["contact_tokens"][..., 0].sum()) == 2
+    assert sample["contact_token_world_ids"][:, 0].tolist() == [1, 1]
     assert sample["source_env_id"].item() == 1
     assert sample["terrain_type"].item() == 5

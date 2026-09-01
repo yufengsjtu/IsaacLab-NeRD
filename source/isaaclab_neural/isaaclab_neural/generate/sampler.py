@@ -13,8 +13,58 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from isaaclab_neural.contacts.contact_set_schema import CONTACT_REPRESENTATION_TOKENS, CONTACT_TOKEN_DIM
+from isaaclab_neural.contacts.contact_set_schema import (
+    NATIVE_CONTACT_FRAME_COUNTS,
+    NATIVE_CONTACT_VALUE_FIELDS,
+)
 from isaaclab_neural.generate.adapter import DataGenerationAdapter
+
+
+def build_native_contact_rollout(
+    frames: list[dict[str, torch.Tensor]],
+    valid_trajectories: torch.Tensor,
+    trajectory_world_ids: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Build trajectory-major/frame-major ragged native contact tensors.
+
+    Args:
+        frames: Per-frame native pair mappings.
+        valid_trajectories: Boolean mask selecting trajectory rows.
+        trajectory_world_ids: Newton world id represented by each trajectory.
+
+    Returns:
+        A mapping containing ``frame_counts`` and concatenated pair values.
+    """
+    if not frames:
+        raise ValueError("At least one native contact frame is required.")
+    if valid_trajectories.ndim != 1 or trajectory_world_ids.shape != valid_trajectories.shape:
+        raise ValueError("Trajectory validity and world ids must be one-dimensional and have matching shapes.")
+    missing = [name for name in NATIVE_CONTACT_VALUE_FIELDS if name not in frames[0]]
+    if missing:
+        raise KeyError(f"Native contact frame is missing fields: {missing}.")
+
+    valid_indices = torch.nonzero(valid_trajectories, as_tuple=False).reshape(-1)
+    frame_counts = torch.zeros(
+        (valid_indices.numel(), len(frames)),
+        dtype=torch.int64,
+        device=valid_trajectories.device,
+    )
+    chunks = {name: [] for name in NATIVE_CONTACT_VALUE_FIELDS}
+    for trajectory_index, source_index in enumerate(valid_indices.tolist()):
+        world_id = trajectory_world_ids[source_index]
+        for frame_index, frame in enumerate(frames):
+            pair_mask = frame["world_ids"] == world_id.to(frame["world_ids"].device)
+            frame_counts[trajectory_index, frame_index] = pair_mask.sum().to(frame_counts.device)
+            for name in NATIVE_CONTACT_VALUE_FIELDS:
+                chunks[name].append(frame[name][pair_mask])
+
+    result = {NATIVE_CONTACT_FRAME_COUNTS: frame_counts}
+    for name in NATIVE_CONTACT_VALUE_FIELDS:
+        if chunks[name]:
+            result[name] = torch.cat(chunks[name], dim=0)
+        else:
+            result[name] = frames[0][name].new_empty((0, *frames[0][name].shape[1:]))
+    return result
 
 
 class ActionTrajectorySampler:
@@ -48,10 +98,6 @@ class ActionTrajectorySampler:
         """Allocate per-rollout batch buffers."""
         num_envs = self.adapter.num_envs
         trajectory_length = self.trajectory_length
-        num_contacts_per_env = self.adapter.num_contacts_per_env
-        use_contact_tokens = (
-            getattr(self.adapter.solver, "contact_representation", "flat") == CONTACT_REPRESENTATION_TOKENS
-        )
         buffers: dict[str, Any] = {
             "states": torch.empty((num_envs, trajectory_length, self.adapter.state_dim), device=self.data_device),
             "next_states": torch.empty((num_envs, trajectory_length, self.adapter.state_dim), device=self.data_device),
@@ -59,63 +105,15 @@ class ActionTrajectorySampler:
             "root_body_q": torch.empty((num_envs, trajectory_length, 7), device=self.data_device),
             "root_body_qd": torch.empty((num_envs, trajectory_length, 6), device=self.data_device),
             "gravity_dir": torch.zeros((num_envs, trajectory_length, 3), device=self.data_device),
+            "contacts": {},
         }
-        if use_contact_tokens:
-            max_tokens = int(getattr(self.adapter.solver, "max_contact_tokens", num_contacts_per_env))
-            buffers["contacts"] = {
-                "contact_tokens": torch.empty(
-                    (num_envs, trajectory_length, max_tokens, CONTACT_TOKEN_DIM),
-                    device=self.data_device,
-                ),
-                "contact_token_overflow": torch.empty(
-                    (num_envs, trajectory_length),
-                    dtype=torch.long,
-                    device=self.data_device,
-                ),
-            }
-            buffers["contact_token_body_ids"] = torch.empty(
-                (num_envs, trajectory_length, max_tokens),
-                dtype=torch.long,
+        if getattr(self.adapter, "contact_adapter", None) is not None:
+            buffers["_native_contact_frames"] = []
+        if getattr(self.adapter, "body_net_contact_force_recorder", None) is not None:
+            buffers["body_net_contact_forces_w"] = torch.empty(
+                (num_envs, trajectory_length, self.adapter.num_primary_bodies, 3),
                 device=self.data_device,
             )
-            buffers["contact_token_world_ids"] = torch.empty(
-                (num_envs, trajectory_length, max_tokens),
-                dtype=torch.long,
-                device=self.data_device,
-            )
-            if getattr(self.adapter, "body_net_contact_force_recorder", None) is not None:
-                buffers["body_net_contact_forces_w"] = torch.empty(
-                    (num_envs, trajectory_length, self.adapter.num_primary_bodies, 3),
-                    device=self.data_device,
-                )
-        elif num_contacts_per_env > 0:
-            buffers["contacts"] = {
-                "contact_masks": torch.empty(
-                    (num_envs, trajectory_length, num_contacts_per_env),
-                    dtype=torch.bool,
-                    device=self.data_device,
-                ),
-                "contact_normals": torch.empty(
-                    (num_envs, trajectory_length, num_contacts_per_env * 3), device=self.data_device
-                ),
-                "contact_depths": torch.empty(
-                    (num_envs, trajectory_length, num_contacts_per_env), device=self.data_device
-                ),
-                "contact_points_0": torch.empty(
-                    (num_envs, trajectory_length, num_contacts_per_env * 3), device=self.data_device
-                ),
-                "contact_points_1": torch.empty(
-                    (num_envs, trajectory_length, num_contacts_per_env * 3), device=self.data_device
-                ),
-                "contact_thicknesses_0": torch.empty(
-                    (num_envs, trajectory_length, num_contacts_per_env), device=self.data_device
-                ),
-                "contact_thicknesses_1": torch.empty(
-                    (num_envs, trajectory_length, num_contacts_per_env), device=self.data_device
-                ),
-            }
-        else:
-            buffers["contacts"] = {}
         buffers["trajectory_context"] = self._trajectory_context()
         if record_actions:
             buffers["actions"] = torch.empty(
@@ -167,28 +165,13 @@ class ActionTrajectorySampler:
         self._copy_input(buffers["states"][:, step], inputs["states"])
         self._copy_input(buffers["root_body_q"][:, step], inputs["root_body_q"])
         self._copy_input(buffers["root_body_qd"][:, step], inputs["root_body_qd"])
-        if "contact_token_body_ids" in buffers:
-            body_ids = self.adapter.contact_token_body_ids
-            if body_ids is None:
-                raise RuntimeError("Contact-token generation is missing owner-body ids.")
-            self._copy_input(buffers["contact_token_body_ids"][:, step], body_ids)
-            token_valid = inputs["contact_tokens"][..., 0] > 0.5
-            token_world_ids = self.adapter.contact_token_world_ids
-            if token_world_ids is None:
-                raise RuntimeError("Contact-token generation is missing owner-world ids.")
-            expected_world_ids = self.adapter.contact_world_ids.unsqueeze(-1).expand_as(body_ids)
-            mismatched = token_valid.squeeze(1) & (token_world_ids != expected_world_ids)
-            if mismatched.any():
-                rows, slots = torch.nonzero(mismatched, as_tuple=True)
-                raise RuntimeError(
-                    "Packed contact-token rows do not match owner Newton worlds: "
-                    f"rows={rows[:8].tolist()}, slots={slots[:8].tolist()}, "
-                    f"owners={token_world_ids[mismatched][:8].tolist()}."
-                )
-            self._copy_input(buffers["contact_token_world_ids"][:, step], token_world_ids)
-        contacts = buffers["contacts"]
-        for key in contacts:
-            self._copy_input(contacts[key][:, step], inputs[key])
+        if "_native_contact_frames" in buffers:
+            pairs = self.adapter.native_contact_pairs()
+            if pairs is None:
+                raise RuntimeError("Native contact collection is unavailable.")
+            buffers["_native_contact_frames"].append(
+                {name: value.detach().to(self.data_device).clone() for name, value in pairs.items()}
+            )
 
     def _copy_after_step(self, buffers: dict[str, Any], step: int, action: torch.Tensor) -> None:
         inputs = self.adapter.raw_neural_inputs()
@@ -218,7 +201,20 @@ class ActionTrajectorySampler:
             | (batch["next_states"] < -1e5).any(dim=(1, 2))
         )
         valid_masks = ~invalid_masks
+        native_frames = batch.get("_native_contact_frames")
+        if native_frames is not None:
+            native_contacts = build_native_contact_rollout(
+                native_frames,
+                valid_masks,
+                batch["trajectory_context"]["state_world_id"],
+            )
+            rollout_batches.setdefault("native_contacts", {})
+            for sub_key, sub_value in native_contacts.items():
+                rollout_batches["native_contacts"].setdefault(sub_key, [])
+                rollout_batches["native_contacts"][sub_key].append(sub_value.clone())
         for key, value in batch.items():
+            if key == "_native_contact_frames":
+                continue
             if key not in rollout_batches:
                 rollout_batches[key] = {} if isinstance(value, dict) else []
             if isinstance(value, dict):

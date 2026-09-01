@@ -16,8 +16,14 @@ from isaaclab_neural.contacts.contact_set_encoder import (
     _segment_rank,
     transform_contact_tokens_to_body_frame,
 )
-from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
+from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_TOKEN_DIM,
+    NATIVE_CONTACT_INTEGER_FIELDS,
+    NATIVE_CONTACT_SCALAR_FIELDS,
+    NATIVE_CONTACT_VECTOR_FIELDS,
+)
 from isaaclab_neural.contacts.tensor_utils import ContactTokenMoments
+from isaaclab_neural.data.hdf5 import write_rollouts_to_hdf5
 from isaaclab_neural.models.contact_set_model import ContactSetEncoderBlock
 
 
@@ -346,29 +352,50 @@ def test_contact_env_ids_accepts_int32_body_world():
 
 
 def test_eager_trajectory_dataset_preserves_contact_token_rank(tmp_path):
-    import h5py
-    import numpy as np
     from isaaclab_neural.data.datasets import TrajectoryDataset
 
     path = tmp_path / "tokens.hdf5"
-    tokens = np.zeros((2, 4, 3, CONTACT_TOKEN_DIM), dtype=np.float32)
-    tokens[..., 0] = 1.0
-    with h5py.File(path, "w") as handle:
-        group = handle.create_group("data")
-        group.attrs["mode"] = "trajectory"
-        group.attrs["contact_token_frame"] = "world_v1"
-        group.attrs["contact_identity_schema"] = "world_owner_v1"
-        group.create_dataset("states", data=np.zeros((2, 4, 8), dtype=np.float32))
-        group.create_dataset("next_states", data=np.zeros((2, 4, 8), dtype=np.float32))
-        group.create_dataset("joint_f", data=np.zeros((2, 4, 3), dtype=np.float32))
-        group.create_dataset("contact_tokens", data=tokens)
-        group.create_dataset("contact_token_body_ids", data=np.zeros((2, 4, 3), dtype=np.int64))
-        token_world_ids = np.broadcast_to(np.arange(2, dtype=np.int64)[:, None, None], (2, 4, 3))
-        group.create_dataset("contact_token_world_ids", data=token_world_ids)
-        group.create_dataset("root_body_q", data=np.zeros((2, 4, 7), dtype=np.float32))
-        group.create_dataset("root_body_qd", data=np.zeros((2, 4, 6), dtype=np.float32))
-        group.create_dataset("gravity_dir", data=np.zeros((2, 4, 3), dtype=np.float32))
+    pair_count = 2 * 4 * 3
+    native_contacts = {name: torch.zeros(pair_count, dtype=torch.int64) for name in NATIVE_CONTACT_INTEGER_FIELDS}
+    native_contacts.update(
+        {name: torch.zeros((pair_count, 3), dtype=torch.float32) for name in NATIVE_CONTACT_VECTOR_FIELDS}
+    )
+    native_contacts.update(
+        {name: torch.zeros(pair_count, dtype=torch.float32) for name in NATIVE_CONTACT_SCALAR_FIELDS}
+    )
+    native_contacts["frame_counts"] = torch.full((2, 4), 3, dtype=torch.int64)
+    native_contacts["body_ids_1"].fill_(-1)
+    native_contacts["body_slots_1"].fill_(-1)
+    native_contacts["world_ids"] = torch.arange(2, dtype=torch.int64).repeat_interleave(4 * 3)
+    native_contacts["normal_w"][:, 2] = 1.0
+    world_ids = torch.arange(2, dtype=torch.int64)
+    write_rollouts_to_hdf5(
+        path,
+        {
+            "states": torch.zeros((2, 4, 8), dtype=torch.float32),
+            "next_states": torch.zeros((2, 4, 8), dtype=torch.float32),
+            "joint_f": torch.zeros((2, 4, 3), dtype=torch.float32),
+            "root_body_q": torch.zeros((2, 4, 7), dtype=torch.float32),
+            "root_body_qd": torch.zeros((2, 4, 6), dtype=torch.float32),
+            "gravity_dir": torch.zeros((2, 4, 3), dtype=torch.float32),
+            "contacts": {},
+            "native_contacts": native_contacts,
+            "trajectory_context": {
+                "state_world_id": world_ids,
+                "root_world_id": world_ids,
+                "contact_world_id": world_ids,
+            },
+        },
+        env_name="Test-Env",
+    )
 
-    dataset = TrajectoryDataset(path, sample_sequence_length=2, max_capacity=100)
+    dataset = TrajectoryDataset(
+        path,
+        sample_sequence_length=2,
+        max_capacity=100,
+        contact_representation="contact_tokens",
+        max_contact_tokens=3,
+        contact_packing_policy="body_round_robin_pair_atomic",
+    )
     sample = dataset[0]
     assert sample["contact_tokens"].shape == (2, 3, CONTACT_TOKEN_DIM)

@@ -5,7 +5,7 @@
 
 workflow:
   base_name: anymal-c-rough-formal-shared-per-body-rope
-  dataset_subdir: anymal-c-rough-formal-shared-per-body
+  dataset_subdir: anymal-c-rough-native-v2
 
 resources:
   num_gpu: 8
@@ -15,7 +15,7 @@ resources:
   platform: ovx-l40s
 
 experiment:
-  env_name: Anymal-C-Rough-Native-ContactTokens
+  env_name: Anymal-C-Rough-Native-v2
   robot_name: Anymal-C
   data_gen_task: Isaac-Velocity-Rough-Anymal-C-Dataset-Gen-v0
   deployment_task: Isaac-Velocity-Rough-Anymal-C-v0

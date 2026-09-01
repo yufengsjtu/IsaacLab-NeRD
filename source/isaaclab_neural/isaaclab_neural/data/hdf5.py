@@ -15,6 +15,17 @@ import h5py
 import numpy as np
 import torch
 
+from isaaclab_neural.contacts.contact_set_schema import (
+    NATIVE_CONTACT_DATASET_SCHEMA_VERSION,
+    NATIVE_CONTACT_FRAME,
+    NATIVE_CONTACT_STORAGE_SCHEMA,
+)
+from isaaclab_neural.data.native_contacts import (
+    NATIVE_PAIR_FIELDS,
+    prepare_native_contacts,
+    validate_native_group,
+)
+
 
 def _to_numpy(value: torch.Tensor):
     """Convert a tensor-like rollout value to a CPU numpy array."""
@@ -43,11 +54,13 @@ def write_rollouts_to_hdf5(
     dataset_path = Path(dataset_path).expanduser()
     dataset_path.parent.mkdir(parents=True, exist_ok=True)
     arrays = _flatten_rollouts(rollouts)
+    native_contacts = _prepare_native_rollouts(rollouts, arrays)
     trajectory_context = _trajectory_context_arrays(rollouts, arrays["states"].shape[0])
-    _validate_rollout_arrays(arrays)
+    _validate_rollout_arrays(arrays, has_native_contacts=native_contacts is not None)
     _validate_data_context_keys(arrays, trajectory_context)
-    _validate_contact_token_identity(arrays, trajectory_context)
+    _validate_native_contact_identity(native_contacts, trajectory_context, arrays["states"].shape[:2])
     _validate_replay_context(arrays, terrain_context)
+    _validate_requested_body_net_contact_force_body_names(arrays, body_net_contact_force_body_names)
 
     with h5py.File(dataset_path, "w") as dataset_file:
         data_group = dataset_file.create_group("data")
@@ -58,10 +71,13 @@ def write_rollouts_to_hdf5(
                 maxshape=(None, *data.shape[1:]),
                 chunks=True,
             )
+        if native_contacts is not None:
+            _create_native_contact_group(dataset_file, *native_contacts)
         _create_context_groups(dataset_file, trajectory_context, terrain_context)
         data_group.attrs["env"] = env_name
         data_group.attrs["mode"] = "trajectory"
         _update_metadata(data_group)
+        _update_native_metadata(dataset_file, native_contacts is not None)
         _write_body_net_contact_force_body_names(data_group, body_net_contact_force_body_names)
 
 
@@ -81,11 +97,13 @@ def append_rollouts_to_hdf5(
     dataset_path = Path(dataset_path).expanduser()
     dataset_path.parent.mkdir(parents=True, exist_ok=True)
     arrays = _flatten_rollouts(rollouts)
+    native_contacts = _prepare_native_rollouts(rollouts, arrays)
     trajectory_context = _trajectory_context_arrays(rollouts, arrays["states"].shape[0])
-    _validate_rollout_arrays(arrays)
+    _validate_rollout_arrays(arrays, has_native_contacts=native_contacts is not None)
     _validate_data_context_keys(arrays, trajectory_context)
-    _validate_contact_token_identity(arrays, trajectory_context)
+    _validate_native_contact_identity(native_contacts, trajectory_context, arrays["states"].shape[:2])
     _validate_replay_context(arrays, terrain_context)
+    _validate_requested_body_net_contact_force_body_names(arrays, body_net_contact_force_body_names)
 
     with h5py.File(dataset_path, "a") as dataset_file:
         data_group = dataset_file.require_group("data")
@@ -102,18 +120,37 @@ def append_rollouts_to_hdf5(
             terrain_context,
             is_new=is_new,
         )
+        _validate_native_append_target(dataset_file, native_contacts, is_new=is_new)
         if is_new:
-            _create_appendable_datasets(data_group, arrays)
-            _create_context_groups(dataset_file, trajectory_context, terrain_context)
-            data_group.attrs["env"] = env_name
-            data_group.attrs["mode"] = "trajectory"
+            try:
+                _create_appendable_datasets(data_group, arrays)
+                if native_contacts is not None:
+                    _create_native_contact_group(dataset_file, *native_contacts)
+                _create_context_groups(dataset_file, trajectory_context, terrain_context)
+                data_group.attrs["env"] = env_name
+                data_group.attrs["mode"] = "trajectory"
+            except Exception:
+                for name in tuple(data_group.keys()):
+                    del data_group[name]
+                for name in ("contacts", "context"):
+                    if name in dataset_file:
+                        del dataset_file[name]
+                raise
         else:
             _validate_body_net_contact_force_body_names(data_group, body_net_contact_force_body_names)
             trajectory_group = (
                 cast(h5py.Group, dataset_file["context"]["trajectories"]) if "context" in dataset_file else None
             )
-            _append_arrays_atomically(data_group, arrays, trajectory_group, trajectory_context)
+            _append_arrays_atomically(
+                data_group,
+                arrays,
+                trajectory_group,
+                trajectory_context,
+                dataset_file=dataset_file,
+                native_contacts=native_contacts,
+            )
         _update_metadata(data_group)
+        _update_native_metadata(dataset_file, native_contacts is not None)
         _write_body_net_contact_force_body_names(data_group, body_net_contact_force_body_names)
 
 
@@ -121,7 +158,7 @@ def _flatten_rollouts(rollouts: Mapping) -> dict[str, Any]:
     """Flatten rollout tensors and nested contact tensors into numpy arrays."""
     arrays = {}
     for key, value in rollouts.items():
-        if key == "trajectory_context":
+        if key in {"trajectory_context", "native_contacts"}:
             continue
         if isinstance(value, Mapping):
             for sub_key, sub_value in value.items():
@@ -133,6 +170,20 @@ def _flatten_rollouts(rollouts: Mapping) -> dict[str, Any]:
                 raise ValueError(f"Duplicate rollout dataset key: {key!r}.")
             arrays[key] = _to_numpy(value)
     return arrays
+
+
+def _prepare_native_rollouts(
+    rollouts: Mapping,
+    arrays: Mapping[str, Any],
+) -> tuple[np.ndarray, dict[str, np.ndarray]] | None:
+    """Validate the optional top-level native-contact mapping."""
+    native_contacts = rollouts.get("native_contacts")
+    if native_contacts is None:
+        return None
+    if not isinstance(native_contacts, Mapping):
+        raise TypeError("native_contacts must be a mapping.")
+    states = arrays["states"]
+    return prepare_native_contacts(native_contacts, states.shape[:2])
 
 
 def _trajectory_context_arrays(rollouts: Mapping, trajectory_count: int) -> dict[str, Any]:
@@ -158,40 +209,28 @@ def _validate_data_context_keys(arrays: Mapping[str, Any], trajectory_context: M
         raise ValueError(f"Rollout data and trajectory context keys overlap: {collisions}.")
 
 
-def _validate_contact_token_identity(
-    arrays: Mapping[str, Any],
+def _validate_native_contact_identity(
+    native_contacts: tuple[np.ndarray, dict[str, np.ndarray]] | None,
     trajectory_context: Mapping[str, Any],
+    trajectory_shape: tuple[int, int],
 ) -> None:
-    """Validate packed token identity shapes, padding, and row-world ownership."""
-    if "contact_tokens" not in arrays:
+    """Validate that each ragged contact pair belongs to its trajectory world."""
+    if native_contacts is None:
         return
-    tokens = arrays["contact_tokens"]
-    expected_shape = tokens.shape[:-1]
-    body_ids = arrays["contact_token_body_ids"]
-    world_ids = arrays["contact_token_world_ids"]
-    if body_ids.shape != expected_shape or world_ids.shape != expected_shape:
-        raise ValueError(
-            "Contact-token identity fields must have shape "
-            f"{expected_shape}, got body_ids={body_ids.shape}, world_ids={world_ids.shape}."
-        )
-    valid = tokens[..., 0] > 0.5
-    if np.any(valid & ((body_ids < 0) | (world_ids < 0))):
-        raise ValueError("Every valid contact token must have nonnegative owner body and world ids.")
-    if np.any(~valid & ((body_ids != -1) | (world_ids != -1))):
-        raise ValueError("Every padded contact token must use owner body and world id -1.")
-
     required_context = {"state_world_id", "root_world_id", "contact_world_id"}
     missing_context = sorted(required_context - set(trajectory_context))
     if missing_context:
-        raise ValueError(f"Contact-token rollouts are missing trajectory world context: {missing_context}.")
+        raise ValueError(f"Native-contact rollouts are missing trajectory world context: {missing_context}.")
     state_world_ids = trajectory_context["state_world_id"]
     root_world_ids = trajectory_context["root_world_id"]
     contact_world_ids = trajectory_context["contact_world_id"]
     if not np.array_equal(state_world_ids, root_world_ids) or not np.array_equal(state_world_ids, contact_world_ids):
         raise ValueError("State, root, and contact trajectory rows must map to the same Newton worlds.")
-    expected_world_ids = np.broadcast_to(contact_world_ids[:, None, None], world_ids.shape)
-    if np.any(valid & (world_ids != expected_world_ids)):
-        raise ValueError("Contact-token owner world ids do not match their trajectory rows.")
+    offsets, native_arrays = native_contacts
+    frame_world_ids = np.broadcast_to(contact_world_ids[:, None], trajectory_shape).reshape(-1)
+    expected_pair_world_ids = np.repeat(frame_world_ids, np.diff(offsets))
+    if not np.array_equal(native_arrays["world_ids"], expected_pair_world_ids):
+        raise ValueError("Native contact-pair world ids do not match their trajectory rows.")
 
 
 def _validate_replay_context(
@@ -206,34 +245,32 @@ def _validate_replay_context(
         raise ValueError(f"Terrain-context rollouts are missing root kinematics: {missing}.")
 
 
-def _validate_rollout_arrays(arrays: Mapping[str, Any]) -> None:
+def _validate_rollout_arrays(arrays: Mapping[str, Any], *, has_native_contacts: bool = False) -> None:
     """Validate required fields and common trajectory dimensions."""
     required = {"states", "next_states", "joint_f"}
-    if "contact_tokens" in arrays:
+    baked_contact_fields = sorted(name for name in arrays if name.startswith("contact_"))
+    if baked_contact_fields:
+        raise ValueError(
+            "Contact-enabled rollouts must store only top-level native_contacts CSR data; "
+            f"baked contact fields are incompatible: {baked_contact_fields}."
+        )
+    if has_native_contacts:
         # Replay needs maximal root kinematics in addition to generalized states.
         required.update(
             {
-                "contact_tokens",
-                "contact_token_body_ids",
-                "contact_token_world_ids",
                 "root_body_q",
                 "root_body_qd",
                 "gravity_dir",
             }
         )
-    elif "contact_depths" in arrays or "contact_masks" in arrays:
-        required.update({"contact_depths", "contact_masks"})
     missing = sorted(required - set(arrays))
     if missing:
         raise ValueError(f"Rollout data is missing required fields: {missing}.")
-    for name in ("contact_token_body_ids", "contact_token_world_ids"):
-        if name in arrays and not np.issubdtype(arrays[name].dtype, np.integer):
-            raise ValueError(f"Rollout field {name!r} must use an integer dtype, got {arrays[name].dtype}.")
 
     force_key = "body_net_contact_forces_w"
     if force_key in arrays:
-        if "contact_tokens" not in arrays:
-            raise ValueError(f"Rollout field {force_key!r} is only supported with contact_tokens.")
+        if not has_native_contacts:
+            raise ValueError(f"Rollout field {force_key!r} requires top-level native_contacts.")
         forces = arrays[force_key]
         if forces.ndim != 4 or forces.shape[-1] != 3 or forces.shape[-2] <= 0:
             raise ValueError(
@@ -271,14 +308,6 @@ def _validate_append_target(
         raise ValueError(f"Dataset env mismatch: existing={data_group.attrs.get('env')!r}, new={env_name!r}.")
     if data_group.attrs.get("mode") != "trajectory":
         raise ValueError(f"Cannot append trajectories to dataset mode {data_group.attrs.get('mode')!r}.")
-    if "contact_tokens" in arrays:
-        token_frame = data_group.attrs.get("contact_token_frame")
-        identity_schema = data_group.attrs.get("contact_identity_schema")
-        if token_frame != "world_v1" or identity_schema != "world_owner_v1":
-            raise ValueError(
-                "Cannot append contact tokens unless contact_token_frame='world_v1' and "
-                "contact_identity_schema='world_owner_v1'."
-            )
     if "body_net_contact_forces_w" in arrays:
         expected_attrs = {
             "body_net_contact_force_schema": "per_primary_body_v1",
@@ -389,16 +418,116 @@ def _create_appendable_datasets(data_group: h5py.Group, arrays: Mapping[str, Any
         raise
 
 
+def _create_native_contact_group(
+    dataset_file: h5py.File,
+    frame_offsets: np.ndarray,
+    arrays: Mapping[str, np.ndarray],
+) -> None:
+    """Create appendable native-pair CSR datasets."""
+    contacts_group = dataset_file.create_group("contacts")
+    native_group = contacts_group.create_group("native_pairs")
+    try:
+        native_group.create_dataset(
+            "frame_offsets",
+            data=frame_offsets,
+            maxshape=(None,),
+            chunks=True,
+            compression="lzf",
+            shuffle=True,
+        )
+        for name in NATIVE_PAIR_FIELDS:
+            data = arrays[name]
+            native_group.create_dataset(
+                name,
+                data=data,
+                maxshape=(None, *data.shape[1:]),
+                chunks=True,
+                compression="lzf",
+                shuffle=True,
+            )
+    except Exception:
+        del dataset_file["contacts"]
+        raise
+
+
+def _validate_native_append_target(
+    dataset_file: h5py.File,
+    native_contacts: tuple[np.ndarray, dict[str, np.ndarray]] | None,
+    *,
+    is_new: bool,
+) -> None:
+    """Validate native-pair schema compatibility before append mutation."""
+    if is_new:
+        return
+    has_native_group = "contacts" in dataset_file and "native_pairs" in dataset_file["contacts"]
+    if has_native_group != (native_contacts is not None):
+        raise ValueError("Native-contact storage presence does not match the existing dataset.")
+    if not has_native_group:
+        return
+    data_group = cast(h5py.Group, dataset_file["data"])
+    expected_attrs = {
+        "dataset_schema_version": NATIVE_CONTACT_DATASET_SCHEMA_VERSION,
+        "contact_storage_schema": NATIVE_CONTACT_STORAGE_SCHEMA,
+        "contact_frame": NATIVE_CONTACT_FRAME,
+    }
+    native_group = cast(h5py.Group, dataset_file["contacts"]["native_pairs"])
+    metadata_owners = {
+        "/": dataset_file.attrs,
+        "/data": data_group.attrs,
+        "/contacts/native_pairs": native_group.attrs,
+    }
+    mismatched = {
+        f"{owner}:{name}": attrs.get(name)
+        for owner, attrs in metadata_owners.items()
+        for name, expected in expected_attrs.items()
+        if attrs.get(name) != expected
+    }
+    if mismatched:
+        raise ValueError(f"Cannot append native contacts with incompatible metadata: {mismatched}.")
+    expected_frames = int(data_group.attrs["total_transitions"])
+    validate_native_group(native_group, expected_frames)
+    assert native_contacts is not None
+    _offsets, arrays = native_contacts
+    for name in NATIVE_PAIR_FIELDS:
+        dataset = cast(h5py.Dataset, native_group[name])
+        data = arrays[name]
+        if dataset.shape[1:] != data.shape[1:] or dataset.dtype != data.dtype:
+            raise ValueError(
+                f"Native-contact field {name!r} is incompatible: "
+                f"existing={dataset.shape[1:]} {dataset.dtype}, new={data.shape[1:]} {data.dtype}."
+            )
+
+
+def _update_native_metadata(dataset_file: h5py.File, has_native_contacts: bool) -> None:
+    """Write schema attributes for native-pair storage."""
+    if not has_native_contacts:
+        return
+    data_group = cast(h5py.Group, dataset_file["data"])
+    attrs = {
+        "dataset_schema_version": NATIVE_CONTACT_DATASET_SCHEMA_VERSION,
+        "contact_storage_schema": NATIVE_CONTACT_STORAGE_SCHEMA,
+        "contact_frame": NATIVE_CONTACT_FRAME,
+    }
+    for name, value in attrs.items():
+        data_group.attrs[name] = value
+        dataset_file.attrs[name] = value
+        cast(h5py.Group, dataset_file["contacts"]["native_pairs"]).attrs[name] = value
+
+
 def _append_arrays_atomically(
     data_group: h5py.Group,
     arrays: Mapping[str, Any],
     trajectory_group: h5py.Group | None,
     trajectory_context: Mapping[str, Any],
+    *,
+    dataset_file: h5py.File,
+    native_contacts: tuple[np.ndarray, dict[str, np.ndarray]] | None,
 ) -> None:
     """Append all fields and roll back their sizes if any write fails."""
     old_count = cast(h5py.Dataset, data_group["states"]).shape[0]
     append_count = arrays["states"].shape[0]
     resized: list[h5py.Dataset] = []
+    native_old_sizes: dict[h5py.Dataset, int] = {}
     try:
         datasets_and_arrays = [
             *((cast(h5py.Dataset, data_group[name]), data) for name, data in arrays.items()),
@@ -413,7 +542,24 @@ def _append_arrays_atomically(
             resized.append(dataset)
         for dataset, data in datasets_and_arrays:
             dataset[old_count : old_count + append_count] = data
+        if native_contacts is not None:
+            new_offsets, native_arrays = native_contacts
+            native_group = cast(h5py.Group, dataset_file["contacts"]["native_pairs"])
+            offsets_dataset = cast(h5py.Dataset, native_group["frame_offsets"])
+            old_offset_count = offsets_dataset.shape[0]
+            old_pair_count = int(offsets_dataset[-1])
+            native_old_sizes[offsets_dataset] = old_offset_count
+            offsets_dataset.resize((old_offset_count + new_offsets.shape[0] - 1,))
+            offsets_dataset[old_offset_count:] = new_offsets[1:] + old_pair_count
+            for name in NATIVE_PAIR_FIELDS:
+                dataset = cast(h5py.Dataset, native_group[name])
+                data = native_arrays[name]
+                native_old_sizes[dataset] = dataset.shape[0]
+                dataset.resize((old_pair_count + data.shape[0], *dataset.shape[1:]))
+                dataset[old_pair_count:] = data
     except Exception:
+        for dataset, old_size in native_old_sizes.items():
+            dataset.resize((old_size, *dataset.shape[1:]))
         for dataset in resized:
             dataset.resize((old_count, *dataset.shape[1:]))
         raise
@@ -422,6 +568,27 @@ def _append_arrays_atomically(
 def _decode_body_names(value: Any) -> tuple[str, ...]:
     """Decode an HDF5 string-array attribute into body names."""
     return tuple(item.decode() if isinstance(item, bytes) else str(item) for item in np.asarray(value).reshape(-1))
+
+
+def _validate_requested_body_net_contact_force_body_names(
+    arrays: Mapping[str, Any],
+    body_names: Sequence[str] | None,
+) -> None:
+    """Validate force-label body names before creating or resizing datasets."""
+    if body_names is None:
+        return
+    force_key = "body_net_contact_forces_w"
+    if force_key not in arrays:
+        raise ValueError("Body net contact-force body names require body_net_contact_forces_w labels.")
+    names = tuple(str(name) for name in body_names)
+    expected_count = arrays[force_key].shape[-2]
+    if len(names) != expected_count:
+        raise ValueError(
+            "Body net contact-force body-name count must match the force-label body axis: "
+            f"names={len(names)}, labels={expected_count}."
+        )
+    if any(not name for name in names) or len(set(names)) != len(names):
+        raise ValueError(f"Body net contact-force body names must be non-empty and unique, got {names}.")
 
 
 def _validate_body_net_contact_force_body_names(
@@ -473,19 +640,6 @@ def _update_metadata(data_group: h5py.Group) -> None:
     data_group.attrs["total_transitions"] = states.shape[0] * states.shape[1]
     data_group.attrs["state_dim"] = states.shape[-1]
     data_group.attrs["next_state_dim"] = cast(h5py.Dataset, data_group["next_states"]).shape[-1]
-    if "contact_depths" in data_group:
-        data_group.attrs["num_contacts_per_env"] = cast(h5py.Dataset, data_group["contact_depths"]).shape[-1]
-    if "contact_tokens" in data_group:
-        tokens = cast(h5py.Dataset, data_group["contact_tokens"])
-        # Token capacity is max_contact_tokens; keep num_contacts_per_env only if already set
-        # (e.g. from the generator config) so it is not silently overwritten by K.
-        data_group.attrs["max_contact_tokens"] = tokens.shape[-2]
-        data_group.attrs["contact_token_dim"] = tokens.shape[-1]
-        data_group.attrs["contact_representation"] = "contact_tokens"
-        data_group.attrs["contact_identity_schema"] = "world_owner_v1"
-        data_group.attrs["contact_token_frame"] = "world_v1"
-        if "num_contacts_per_env" not in data_group.attrs:
-            data_group.attrs["num_contacts_per_env"] = tokens.shape[-2]
     if "body_net_contact_forces_w" in data_group:
         forces = cast(h5py.Dataset, data_group["body_net_contact_forces_w"])
         data_group.attrs["body_net_contact_force_schema"] = "per_primary_body_v1"

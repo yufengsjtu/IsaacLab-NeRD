@@ -12,52 +12,96 @@ import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
-from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
+from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_TOKEN_DIM,
+    NATIVE_CONTACT_INTEGER_FIELDS,
+    NATIVE_CONTACT_SCALAR_FIELDS,
+    NATIVE_CONTACT_VECTOR_FIELDS,
+)
 from isaaclab_neural.contacts.tensor_utils import ContactTokenMoments, MaskedContactMoments
 from isaaclab_neural.data.datasets import LazyBatchTransitionDataset, LazyTrajectoryDataset, TrajectoryDataset
+from isaaclab_neural.data.hdf5 import write_rollouts_to_hdf5
 from isaaclab_neural.train.trainers import _reset_validation_iterators, _synchronize_running_mean_std
 from isaaclab_neural.utils.running_mean_std import RunningMeanStd
 from torch.utils.data import DataLoader
 
 
 def _write_token_dataset(path, *, num_trajectories: int = 5, trajectory_length: int = 4) -> None:
-    tokens = np.zeros((num_trajectories, trajectory_length, 3, CONTACT_TOKEN_DIM), dtype=np.float32)
-    tokens[..., 0] = 1.0
-    states = np.zeros((num_trajectories, trajectory_length, 2), dtype=np.float32)
-    states[..., 0] = np.arange(num_trajectories, dtype=np.float32).reshape(-1, 1)
-    with h5py.File(path, "w") as handle:
-        group = handle.create_group("data")
-        group.attrs["mode"] = "trajectory"
-        group.attrs["total_transitions"] = num_trajectories * trajectory_length
-        group.attrs["contact_token_frame"] = "world_v1"
-        group.attrs["contact_identity_schema"] = "world_owner_v1"
-        group.create_dataset("states", data=states)
-        group.create_dataset("next_states", data=states)
-        group.create_dataset("joint_f", data=np.zeros((num_trajectories, trajectory_length, 1), dtype=np.float32))
-        group.create_dataset("contact_tokens", data=tokens)
-        group.create_dataset(
-            "contact_token_overflow",
-            data=np.zeros((num_trajectories, trajectory_length), dtype=np.int64),
-        )
-        group.create_dataset(
-            "contact_token_body_ids",
-            data=np.zeros((num_trajectories, trajectory_length, 3), dtype=np.int64),
-        )
-        group.create_dataset(
-            "contact_token_world_ids",
-            data=np.zeros((num_trajectories, trajectory_length, 3), dtype=np.int64),
-        )
-        group.create_dataset("root_body_q", data=np.zeros((num_trajectories, trajectory_length, 7), dtype=np.float32))
-        group.create_dataset("gravity_dir", data=np.zeros((num_trajectories, trajectory_length, 3), dtype=np.float32))
+    pairs_per_frame = 3
+    pair_count = num_trajectories * trajectory_length * pairs_per_frame
+    native_contacts = {name: torch.zeros(pair_count, dtype=torch.int64) for name in NATIVE_CONTACT_INTEGER_FIELDS}
+    native_contacts.update(
+        {name: torch.zeros((pair_count, 3), dtype=torch.float32) for name in NATIVE_CONTACT_VECTOR_FIELDS}
+    )
+    native_contacts.update(
+        {name: torch.zeros(pair_count, dtype=torch.float32) for name in NATIVE_CONTACT_SCALAR_FIELDS}
+    )
+    native_contacts["frame_counts"] = torch.full(
+        (num_trajectories, trajectory_length),
+        pairs_per_frame,
+        dtype=torch.int64,
+    )
+    native_contacts["body_ids_1"].fill_(-1)
+    native_contacts["body_slots_1"].fill_(-1)
+    native_contacts["world_ids"] = torch.arange(num_trajectories, dtype=torch.int64).repeat_interleave(
+        trajectory_length * pairs_per_frame
+    )
+    native_contacts["normal_w"][:, 2] = 1.0
+    native_contacts["separation"] = -torch.arange(1, pair_count + 1, dtype=torch.float32)
+
+    states = torch.zeros((num_trajectories, trajectory_length, 2), dtype=torch.float32)
+    states[..., 0] = torch.arange(num_trajectories, dtype=torch.float32).reshape(-1, 1)
+    world_ids = torch.arange(num_trajectories, dtype=torch.int64)
+    write_rollouts_to_hdf5(
+        path,
+        {
+            "states": states,
+            "next_states": states.clone(),
+            "joint_f": torch.zeros((num_trajectories, trajectory_length, 1), dtype=torch.float32),
+            "root_body_q": torch.zeros((num_trajectories, trajectory_length, 7), dtype=torch.float32),
+            "root_body_qd": torch.zeros((num_trajectories, trajectory_length, 6), dtype=torch.float32),
+            "gravity_dir": torch.zeros((num_trajectories, trajectory_length, 3), dtype=torch.float32),
+            "contacts": {},
+            "native_contacts": native_contacts,
+            "trajectory_context": {
+                "state_world_id": world_ids,
+                "root_world_id": world_ids,
+                "contact_world_id": world_ids,
+            },
+        },
+        env_name="Test-Env",
+    )
 
 
 def test_eager_trajectory_rank_shards_are_disjoint_and_complete(tmp_path) -> None:
     path = tmp_path / "tokens.hdf5"
     _write_token_dataset(path)
 
-    full = TrajectoryDataset(path, sample_sequence_length=2)
-    shard0 = TrajectoryDataset(path, sample_sequence_length=2, rank=0, world_size=2)
-    shard1 = TrajectoryDataset(path, sample_sequence_length=2, rank=1, world_size=2)
+    full = TrajectoryDataset(
+        path,
+        sample_sequence_length=2,
+        contact_representation="contact_tokens",
+        max_contact_tokens=3,
+        contact_packing_policy="body_round_robin_pair_atomic",
+    )
+    shard0 = TrajectoryDataset(
+        path,
+        sample_sequence_length=2,
+        rank=0,
+        world_size=2,
+        contact_representation="contact_tokens",
+        max_contact_tokens=3,
+        contact_packing_policy="body_round_robin_pair_atomic",
+    )
+    shard1 = TrajectoryDataset(
+        path,
+        sample_sequence_length=2,
+        rank=1,
+        world_size=2,
+        contact_representation="contact_tokens",
+        max_contact_tokens=3,
+        contact_packing_policy="body_round_robin_pair_atomic",
+    )
 
     assert shard0.global_trajectory_indices.tolist() == [0, 2, 4]
     assert shard1.global_trajectory_indices.tolist() == [1, 3]
@@ -71,24 +115,66 @@ def test_eager_trajectory_rank_shards_are_disjoint_and_complete(tmp_path) -> Non
     assert shard0[0]["contact_token_world_ids"].dtype == torch.long
 
 
-def test_contact_token_loader_rejects_ambiguous_frame_metadata(tmp_path) -> None:
-    path = tmp_path / "legacy_tokens.hdf5"
+@pytest.mark.parametrize("metadata_value", [None, "wrong_schema"])
+def test_contact_token_loader_rejects_invalid_native_schema_metadata(tmp_path, metadata_value) -> None:
+    path = tmp_path / "native_contacts.hdf5"
     _write_token_dataset(path)
     with h5py.File(path, "r+") as handle:
-        del handle["data"].attrs["contact_token_frame"]
+        if metadata_value is None:
+            del handle["data"].attrs["contact_storage_schema"]
+        else:
+            handle["data"].attrs["contact_storage_schema"] = metadata_value
 
-    with pytest.raises(ValueError, match="contact_token_frame='world_v1'"):
-        TrajectoryDataset(path, sample_sequence_length=2)
+    with pytest.raises(ValueError, match="native_pairs schema v2"):
+        TrajectoryDataset(
+            path,
+            sample_sequence_length=2,
+            contact_representation="contact_tokens",
+            max_contact_tokens=3,
+            contact_packing_policy="body_round_robin_pair_atomic",
+        )
 
 
 def test_eager_sharding_applies_global_max_capacity_before_rank_split(tmp_path) -> None:
     path = tmp_path / "tokens.hdf5"
     _write_token_dataset(path)
 
-    full = TrajectoryDataset(path, sample_sequence_length=2, max_capacity=20)
-    limited = TrajectoryDataset(path, sample_sequence_length=2, max_capacity=12)
-    shard0 = TrajectoryDataset(path, sample_sequence_length=2, max_capacity=12, rank=0, world_size=2)
-    shard1 = TrajectoryDataset(path, sample_sequence_length=2, max_capacity=12, rank=1, world_size=2)
+    full = TrajectoryDataset(
+        path,
+        sample_sequence_length=2,
+        max_capacity=20,
+        contact_representation="contact_tokens",
+        max_contact_tokens=3,
+        contact_packing_policy="body_round_robin_pair_atomic",
+    )
+    limited = TrajectoryDataset(
+        path,
+        sample_sequence_length=2,
+        max_capacity=12,
+        contact_representation="contact_tokens",
+        max_contact_tokens=3,
+        contact_packing_policy="body_round_robin_pair_atomic",
+    )
+    shard0 = TrajectoryDataset(
+        path,
+        sample_sequence_length=2,
+        max_capacity=12,
+        rank=0,
+        world_size=2,
+        contact_representation="contact_tokens",
+        max_contact_tokens=3,
+        contact_packing_policy="body_round_robin_pair_atomic",
+    )
+    shard1 = TrajectoryDataset(
+        path,
+        sample_sequence_length=2,
+        max_capacity=12,
+        rank=1,
+        world_size=2,
+        contact_representation="contact_tokens",
+        max_contact_tokens=3,
+        contact_packing_policy="body_round_robin_pair_atomic",
+    )
 
     assert full.global_trajectory_indices.tolist() == [0, 1, 2, 3, 4]
     assert limited.global_trajectory_indices.tolist() == [0, 1, 2]
@@ -100,7 +186,13 @@ def test_eager_sharding_applies_global_max_capacity_before_rank_split(tmp_path) 
 def test_lazy_trajectory_preserves_tokens_with_persistent_workers(tmp_path) -> None:
     path = tmp_path / "tokens.hdf5"
     _write_token_dataset(path)
-    dataset = LazyTrajectoryDataset(path, sample_sequence_length=2)
+    dataset = LazyTrajectoryDataset(
+        path,
+        sample_sequence_length=2,
+        contact_representation="contact_tokens",
+        max_contact_tokens=3,
+        contact_packing_policy="body_round_robin_pair_atomic",
+    )
     loader = DataLoader(dataset, batch_size=2, num_workers=2, persistent_workers=True)
     iterator = None
     try:
@@ -118,7 +210,13 @@ def test_lazy_trajectory_preserves_tokens_with_persistent_workers(tmp_path) -> N
 def test_lazy_batch_transition_preserves_contact_token_axes(tmp_path) -> None:
     path = tmp_path / "tokens.hdf5"
     _write_token_dataset(path)
-    dataset = LazyBatchTransitionDataset(batch_size=2, hdf5_dataset_path=path)
+    dataset = LazyBatchTransitionDataset(
+        batch_size=2,
+        hdf5_dataset_path=path,
+        contact_representation="contact_tokens",
+        max_contact_tokens=3,
+        contact_packing_policy="body_round_robin_pair_atomic",
+    )
     try:
         sample = dataset[0]
     finally:

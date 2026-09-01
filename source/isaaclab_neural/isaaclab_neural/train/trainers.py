@@ -322,6 +322,13 @@ class VanillaTrainer:
         self.valid_datasets = {}
         self.collate_fn = None
         self.train_dataset_rank_sharded = False
+        solver_cfg = cfg["env"]["neural_solver_cfg"]
+        self.dataset_contact_projection = {
+            "contact_representation": getattr(self.neural_solver, "contact_representation", None),
+            "num_contacts_per_env": int(getattr(self.neural_solver, "num_contacts_per_env", 0)),
+            "max_contact_tokens": int(getattr(self.neural_solver, "max_contact_tokens", 0)),
+            "contact_packing_policy": solver_cfg.get("contact_packing_policy"),
+        }
         self.get_datasets(algo_cfg["dataset"].get("train_dataset_path"), algo_cfg["dataset"].get("valid_datasets"))
         self._validate_force_label_datasets()
 
@@ -594,6 +601,7 @@ class VanillaTrainer:
             contact_context_tolerance=self.eval_contact_context_tolerance,
             contact_context_normal_tolerance=self.eval_contact_context_normal_tolerance,
             contact_context_velocity_tolerance=self.eval_contact_context_velocity_tolerance,
+            **self.dataset_contact_projection,
         )
 
     def _init_optimizer(self, algo_cfg: dict[str, Any]) -> None:
@@ -634,6 +642,7 @@ class VanillaTrainer:
             hdf5_dataset_path=train_dataset_path,
             max_capacity=self.dataset_max_capacity,
             device=self.device,
+            **self.dataset_contact_projection,
         )
         if valid_datasets_cfg is not None and (not self.is_distributed or self.is_main_process):
             for valid_dataset_name, valid_dataset_path in valid_datasets_cfg.items():
@@ -642,6 +651,7 @@ class VanillaTrainer:
                     batch_size=self.batch_size,
                     hdf5_dataset_path=valid_dataset_path,
                     device=self.device,
+                    **self.dataset_contact_projection,
                 )
         self.batch_size = 1
         self.collate_fn = collate_fn_BatchTransitionDataset
@@ -1239,6 +1249,7 @@ class SequenceModelTrainer(VanillaTrainer):
             max_capacity=self.dataset_max_capacity,
             rank=self.rank if self.train_dataset_rank_sharded else 0,
             world_size=self.world_size if self.train_dataset_rank_sharded else 1,
+            **self.dataset_contact_projection,
         )
         if valid_datasets_cfg is not None and (not self.is_distributed or self.is_main_process):
             for valid_dataset_name, valid_dataset_path in valid_datasets_cfg.items():
@@ -1246,5 +1257,6 @@ class SequenceModelTrainer(VanillaTrainer):
                     load_mode=self.dataset_load_mode,
                     sample_sequence_length=self.sample_sequence_length,
                     hdf5_dataset_path=valid_dataset_path,
+                    **self.dataset_contact_projection,
                 )
         self.collate_fn = None

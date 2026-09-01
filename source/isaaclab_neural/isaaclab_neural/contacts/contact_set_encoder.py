@@ -14,10 +14,12 @@ import torch
 import warp as wp
 
 from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_REPRESENTATION_TOKENS,
     CONTACT_TOKEN_DIM,
     CONTACT_TOKEN_GEOMETRY_SLICE,
     CONTACT_TOKEN_VALID_INDEX,
 )
+from isaaclab_neural.contacts.native_pair_projector import project_native_pairs
 from isaaclab_neural.utils import torch_utils
 
 
@@ -337,6 +339,7 @@ class ContactSetEncoder:
         overflow: torch.Tensor | None = None,
         packed_body_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Pack directed rows through the shared native-pair projector."""
         worlds = self.num_envs
         capacity = self.max_contact_tokens
         device = self.device
@@ -346,108 +349,39 @@ class ContactSetEncoder:
             overflow = torch.zeros(worlds, dtype=torch.long, device=device)
         if packed_body_ids is None:
             packed_body_ids = torch.full((worlds, capacity), -1, dtype=torch.long, device=device)
-        if rows.valid.numel() == 0:
-            packed.zero_()
-            overflow.zero_()
-            packed_body_ids.fill_(-1)
-            return packed, overflow, packed_body_ids
-
-        pairs = rows.valid.shape[0] // 2
         if rows.valid.shape[0] % 2 != 0:
             raise RuntimeError("Directed contact rows must contain an even number of sides.")
-
+        pairs = rows.valid.shape[0] // 2
+        first = slice(0, pairs)
+        second = slice(pairs, 2 * pairs)
         valid0 = rows.valid[:pairs]
         valid1 = rows.valid[pairs:]
-        pair_valid = valid0 | valid1
-        sides = valid0.long() + valid1.long()
-        # Unknown / invalid env ids are routed to dump world ``worlds``.
-        pair_world = torch.where(
-            (rows.world_id[:pairs] >= 0) & (rows.world_id[:pairs] < worlds),
-            rows.world_id[:pairs],
-            torch.full_like(rows.world_id[:pairs], worlds),
+        invalid_slot = torch.full((pairs,), -1, dtype=torch.long, device=device)
+        native_pairs = {
+            "body_ids_0": rows.body_id[first],
+            "body_ids_1": rows.body_id[second],
+            "body_slots_0": torch.where(valid0, self._body_slot(rows.body_id[first]), invalid_slot),
+            "body_slots_1": torch.where(valid1, self._body_slot(rows.body_id[second]), invalid_slot),
+            "world_ids": rows.world_id[first],
+            "surface_points_0_w": rows.point_world[first],
+            "surface_points_1_w": rows.point_world[second],
+            "normal_w": rows.normal_world[first],
+            "separation": rows.gap[first],
+            "lever_arms_0_w": rows.lever_world[first],
+            "lever_arms_1_w": rows.lever_world[second],
+            "relative_velocities_0_w": rows.velocity_world[first],
+            "relative_velocities_1_w": rows.velocity_world[second],
+        }
+        projected = project_native_pairs(
+            native_pairs,
+            num_frames=worlds,
+            representation=CONTACT_REPRESENTATION_TOKENS,
+            packing_policy="body_round_robin_pair_atomic",
+            max_contact_tokens=capacity,
         )
-        pair_gap = torch.where(pair_valid, rows.gap[:pairs], torch.full_like(rows.gap[:pairs], float("inf")))
-
-        body_key = torch.where(
-            rows.valid,
-            rows.body_id,
-            torch.full_like(rows.body_id, worlds * self.bodies_per_env),
-        )
-        gap_key = torch.where(rows.valid, rows.gap, torch.full_like(rows.gap, float("inf")))
-        order = torch.argsort(gap_key, stable=True)
-        order = order.index_select(0, torch.argsort(body_key.index_select(0, order), stable=True))
-        rank = torch.empty_like(rows.gap, dtype=torch.long)
-        rank.index_copy_(0, order, _segment_rank(body_key.index_select(0, order), rows.gap.new_zeros(rows.gap.shape)))
-        rank = torch.where(rows.valid, rank, torch.full_like(rank, 2 * pairs))
-
-        pair_rank = torch.minimum(rank[:pairs], rank[pairs:])
-        pair_order = torch.argsort(pair_gap, stable=True)
-        pair_order = pair_order.index_select(0, torch.argsort(pair_rank.index_select(0, pair_order), stable=True))
-        pair_order = pair_order.index_select(0, torch.argsort(pair_world.index_select(0, pair_order), stable=True))
-
-        world_sorted = pair_world.index_select(0, pair_order)
-        sides_sorted = sides.index_select(0, pair_order)
-        offset_sorted = _segment_exclusive_sum(world_sorted, sides_sorted, sides.new_zeros(sides.shape))
-        keep_sorted = (world_sorted < worlds) & (offset_sorted + sides_sorted <= capacity)
-        offset = torch.empty_like(offset_sorted)
-        offset.index_copy_(0, pair_order, offset_sorted)
-        keep_pair = torch.zeros_like(keep_sorted)
-        keep_pair.index_copy_(0, pair_order, keep_sorted)
-
-        keep_row = torch.cat((keep_pair, keep_pair)) & rows.valid
-        within = torch.cat((torch.zeros_like(valid0, dtype=torch.long), valid0.long()))
-        # Rejected/invalid rows write into one extra dump row so they cannot
-        # overwrite the next environment's first packed slot.
-        dump_row = worlds * capacity
-        world_row = torch.where(
-            (rows.world_id >= 0) & (rows.world_id < worlds),
-            rows.world_id,
-            torch.full_like(rows.world_id, worlds),
-        )
-        destination = torch.where(
-            keep_row,
-            world_row * capacity + torch.cat((offset, offset)) + within,
-            dump_row,
-        )
-
-        body_slot = self._body_slot(rows.body_id)
-        other_slot = self._body_slot(rows.other_body_id)
-        other_slot = torch.where(rows.other_dynamic, other_slot, torch.full_like(other_slot, -1))
-
-        candidates = torch.stack(
-            (
-                rows.valid.to(torch.float32),
-                body_slot.to(torch.float32),
-                other_slot.to(torch.float32),
-                rows.other_dynamic.to(torch.float32),
-                rows.point_world[:, 0],
-                rows.point_world[:, 1],
-                rows.point_world[:, 2],
-                rows.normal_world[:, 0],
-                rows.normal_world[:, 1],
-                rows.normal_world[:, 2],
-                rows.lever_world[:, 0],
-                rows.lever_world[:, 1],
-                rows.lever_world[:, 2],
-                rows.gap,
-                rows.velocity_world[:, 0],
-                rows.velocity_world[:, 1],
-                rows.velocity_world[:, 2],
-            ),
-            dim=-1,
-        )
-        flat = candidates.new_zeros((dump_row + 1, CONTACT_TOKEN_DIM))
-        flat.index_copy_(0, destination, candidates)
-        packed.copy_(flat[:dump_row].reshape(worlds, capacity, CONTACT_TOKEN_DIM))
-        flat_body_ids = torch.full((dump_row + 1,), -1, dtype=torch.long, device=device)
-        flat_body_ids.index_copy_(0, destination, rows.body_id)
-        packed_body_ids.copy_(flat_body_ids[:dump_row].reshape(worlds, capacity))
-        packed[..., CONTACT_TOKEN_VALID_INDEX] = (packed[..., CONTACT_TOKEN_VALID_INDEX] > 0.5).to(torch.float32)
-
-        dropped = rows.valid & ~keep_row
-        dropped_counts = torch.zeros(worlds + 1, dtype=torch.long, device=device)
-        dropped_counts.scatter_add_(0, world_row, dropped.to(dtype=torch.long))
-        overflow.copy_(dropped_counts[:worlds])
+        packed.copy_(projected["contact_tokens"])
+        overflow.copy_(projected["contact_token_overflow"])
+        packed_body_ids.copy_(projected["contact_token_body_ids"])
         return packed, overflow, packed_body_ids
 
     def _shape_body_ids(self, shapes: torch.Tensor) -> torch.Tensor:

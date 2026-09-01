@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TextIO, cast
 
 import h5py
+import numpy as np
 from lib.simple_yaml import load_yaml
 
 
@@ -89,6 +90,66 @@ def required_dataset_files(experiment: dict, specs: list[DatasetSpec]) -> list[s
     return required_files
 
 
+def _native_contact_cache_complete(native_group: h5py.Group, total_transitions: int, dataset_path: Path) -> bool:
+    """Validate native-pair CSR structure without importing the training package."""
+    integer_fields = {
+        "shape_ids_0",
+        "shape_ids_1",
+        "body_ids_0",
+        "body_ids_1",
+        "body_slots_0",
+        "body_slots_1",
+        "world_ids",
+    }
+    vector_fields = {
+        "points_0_local",
+        "points_1_local",
+        "points_0_w",
+        "points_1_w",
+        "surface_points_0_w",
+        "surface_points_1_w",
+        "normal_w",
+        "offsets_0",
+        "offsets_1",
+        "lever_arms_0_w",
+        "lever_arms_1_w",
+        "relative_velocities_0_w",
+        "relative_velocities_1_w",
+    }
+    scalar_fields = {"separation", "thickness_0", "thickness_1"}
+    required = {"frame_offsets", *integer_fields, *vector_fields, *scalar_fields}
+    if set(native_group.keys()) != required:
+        print(f"Rejected cached native-contact dataset with field mismatch: {dataset_path}")
+        return False
+    offsets = cast(h5py.Dataset, native_group["frame_offsets"])
+    pair_count = int(cast(h5py.Dataset, native_group["world_ids"]).shape[0])
+    if (
+        offsets.ndim != 1
+        or offsets.shape != (total_transitions + 1,)
+        or offsets.dtype != np.dtype("int64")
+        or int(offsets[0]) != 0
+        or int(offsets[-1]) != pair_count
+    ):
+        print(f"Rejected cached native-contact dataset with invalid CSR offsets: {dataset_path}")
+        return False
+    previous = 0
+    for start in range(0, offsets.shape[0], 1_000_000):
+        chunk = np.asarray(offsets[start : min(start + 1_000_000, offsets.shape[0])], dtype=np.int64)
+        if chunk.size and (chunk[0] < previous or np.any(chunk[1:] < chunk[:-1])):
+            print(f"Rejected cached native-contact dataset with non-monotonic offsets: {dataset_path}")
+            return False
+        if chunk.size:
+            previous = int(chunk[-1])
+    for name in integer_fields | vector_fields | scalar_fields:
+        dataset = cast(h5py.Dataset, native_group[name])
+        expected_tail = (3,) if name in vector_fields else ()
+        expected_dtype = np.dtype("int64") if name in integer_fields else np.dtype("float32")
+        if dataset.shape != (pair_count, *expected_tail) or dataset.dtype != expected_dtype:
+            print(f"Rejected cached native-contact dataset with invalid field {name!r}: {dataset_path}")
+            return False
+    return True
+
+
 def dataset_cache_complete(
     candidate_dir: Path,
     required_files: list[str],
@@ -137,16 +198,30 @@ def dataset_cache_complete(
                     f"{sorted(inconsistent_fields)}: {dataset_path}"
                 )
                 return False
-            if require_tokens:
-                expected_capacity = int(experiment.get("max_contact_tokens", 64))
-                representation = str(data_group.attrs.get("contact_representation", ""))
-                capacity = int(data_group.attrs.get("max_contact_tokens", -1))
-                identity_schema = str(data_group.attrs.get("contact_identity_schema", ""))
-                token_frame = str(data_group.attrs.get("contact_token_frame", ""))
-                required_token_fields = {
-                    "contact_tokens",
-                    "contact_token_body_ids",
-                    "contact_token_world_ids",
+            native_group = (
+                cast(h5py.Group, handle["contacts"]["native_pairs"])
+                if "contacts" in handle and "native_pairs" in handle["contacts"]
+                else None
+            )
+            if native_group is not None:
+                native_metadata_matches = (
+                    int(data_group.attrs.get("dataset_schema_version", -1)) == 2
+                    and data_group.attrs.get("contact_storage_schema") == "native_pairs_csr_v1"
+                    and data_group.attrs.get("contact_frame") == "world_v1"
+                )
+                if not native_metadata_matches or not _native_contact_cache_complete(
+                    native_group,
+                    int(data_group.attrs["total_transitions"]),
+                    dataset_path,
+                ):
+                    print(f"Rejected cached native-contact dataset with incompatible metadata: {dataset_path}")
+                    return False
+            has_contacts = int(experiment.get("num_contacts_per_env", 0)) > 0
+            if has_contacts and native_group is None:
+                print(f"Rejected cached dataset without native contact pairs: {dataset_path}")
+                return False
+            if has_contacts:
+                required_projection_context = {
                     "root_body_q",
                     "root_body_qd",
                     "gravity_dir",
@@ -154,19 +229,11 @@ def dataset_cache_complete(
                     "next_states",
                     "joint_f",
                 }
-                missing_token_fields = sorted(required_token_fields - set(data_group.keys()))
-                if (
-                    representation != "contact_tokens"
-                    or capacity != expected_capacity
-                    or identity_schema != "world_owner_v1"
-                    or token_frame != "world_v1"
-                    or missing_token_fields
-                ):
+                missing_projection_context = sorted(required_projection_context - set(data_group.keys()))
+                if missing_projection_context:
                     print(
-                        f"Rejected cached dataset {dataset_path}: expected contact_tokens capacity "
-                        f"{expected_capacity} with root kinematics, found representation={representation!r}, "
-                        f"capacity={capacity}, identity_schema={identity_schema!r}, token_frame={token_frame!r}, "
-                        f"missing_fields={missing_token_fields}."
+                        f"Rejected cached dataset {dataset_path}: contact projection requires "
+                        f"{missing_projection_context}."
                     )
                     return False
             if experiment.get("record_body_net_contact_forces", False):

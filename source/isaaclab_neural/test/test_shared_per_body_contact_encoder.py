@@ -9,7 +9,13 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
+from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_TOKEN_DIM,
+    NATIVE_CONTACT_INTEGER_FIELDS,
+    NATIVE_CONTACT_SCALAR_FIELDS,
+    NATIVE_CONTACT_VECTOR_FIELDS,
+)
+from isaaclab_neural.data.hdf5 import write_rollouts_to_hdf5
 from isaaclab_neural.models.contact_set_model import ContactSetEncoderBlock
 from isaaclab_neural.models.models import ModelMixedInput
 from isaaclab_neural.models.shared_per_body_contact_encoder import SharedPerBodyContactEncoder
@@ -228,30 +234,48 @@ def test_checkpoint_reconstruction_rejects_primary_body_count_mismatch():
 
 
 def test_shared_per_body_model_forwards_contact_token_trajectory_dataset(tmp_path):
-    import h5py
-    import numpy as np
     from isaaclab_neural.data.datasets import TrajectoryDataset
 
     dataset_path = tmp_path / "contact_tokens.hdf5"
-    tokens = np.zeros((2, 4, 5, CONTACT_TOKEN_DIM), dtype=np.float32)
-    tokens[0, 0, 0] = _token(body_slot=2).numpy()
-    token_body_ids = np.full((2, 4, 5), -1, dtype=np.int64)
-    token_body_ids[0, 0, 0] = 2
-    token_world_ids = np.zeros((2, 4, 5), dtype=np.int64)
-    with h5py.File(dataset_path, "w") as handle:
-        group = handle.create_group("data")
-        group.attrs["mode"] = "trajectory"
-        group.attrs["contact_token_frame"] = "world_v1"
-        group.attrs["contact_identity_schema"] = "world_owner_v1"
-        group.create_dataset("states", data=np.zeros((2, 4, 4), dtype=np.float32))
-        group.create_dataset("next_states", data=np.zeros((2, 4, 4), dtype=np.float32))
-        group.create_dataset("joint_f", data=np.zeros((2, 4, 2), dtype=np.float32))
-        group.create_dataset("gravity_dir", data=np.zeros((2, 4, 3), dtype=np.float32))
-        group.create_dataset("contact_tokens", data=tokens)
-        group.create_dataset("contact_token_body_ids", data=token_body_ids)
-        group.create_dataset("contact_token_world_ids", data=token_world_ids)
+    native_contacts = {name: torch.zeros(1, dtype=torch.int64) for name in NATIVE_CONTACT_INTEGER_FIELDS}
+    native_contacts.update({name: torch.zeros((1, 3), dtype=torch.float32) for name in NATIVE_CONTACT_VECTOR_FIELDS})
+    native_contacts.update({name: torch.zeros(1, dtype=torch.float32) for name in NATIVE_CONTACT_SCALAR_FIELDS})
+    native_contacts["frame_counts"] = torch.tensor([[1, 0, 0, 0], [0, 0, 0, 0]], dtype=torch.int64)
+    native_contacts["body_ids_0"][0] = 2
+    native_contacts["body_ids_1"][0] = -1
+    native_contacts["body_slots_0"][0] = 2
+    native_contacts["body_slots_1"][0] = -1
+    native_contacts["surface_points_0_w"][0, 0] = 0.1
+    native_contacts["normal_w"][0, 2] = 1.0
+    native_contacts["separation"][0] = -0.01
+    world_ids = torch.arange(2, dtype=torch.int64)
+    write_rollouts_to_hdf5(
+        dataset_path,
+        {
+            "states": torch.zeros((2, 4, 4), dtype=torch.float32),
+            "next_states": torch.zeros((2, 4, 4), dtype=torch.float32),
+            "joint_f": torch.zeros((2, 4, 2), dtype=torch.float32),
+            "root_body_q": torch.zeros((2, 4, 7), dtype=torch.float32),
+            "root_body_qd": torch.zeros((2, 4, 6), dtype=torch.float32),
+            "gravity_dir": torch.zeros((2, 4, 3), dtype=torch.float32),
+            "contacts": {},
+            "native_contacts": native_contacts,
+            "trajectory_context": {
+                "state_world_id": world_ids,
+                "root_world_id": world_ids,
+                "contact_world_id": world_ids,
+            },
+        },
+        env_name="Test-Env",
+    )
 
-    dataset = TrajectoryDataset(dataset_path, sample_sequence_length=3)
+    dataset = TrajectoryDataset(
+        dataset_path,
+        sample_sequence_length=3,
+        contact_representation="contact_tokens",
+        max_contact_tokens=5,
+        contact_packing_policy="body_round_robin_pair_atomic",
+    )
     sample = {key: value.unsqueeze(0) for key, value in dataset[0].items()}
     sample["states_embedding"] = sample["states"]
     input_cfg = {

@@ -70,7 +70,7 @@ def test_force_variants_preserve_shared_per_body_contract() -> None:
         assert cfg["algorithm"]["batch_size"] == batch_size
 
         experiment = preset["experiment"]
-        assert preset["workflow"]["dataset_subdir"].endswith("-v1")
+        assert preset["workflow"]["dataset_subdir"] == "anymal-c-rough-native-force-v2"
         assert experiment["record_body_net_contact_forces"] is True
         assert experiment["contact_representation"] == "contact_tokens"
         assert experiment["max_contact_tokens"] == 64

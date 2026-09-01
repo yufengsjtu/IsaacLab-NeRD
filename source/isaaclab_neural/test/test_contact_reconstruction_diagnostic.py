@@ -14,16 +14,17 @@ import torch
 from isaaclab_neural.eval.contact_reconstruction_diagnostic import (
     aggregate_contact_metrics,
     aggregate_contact_token_metrics,
-    analyze_dataset_token_row_ownership,
     contact_metrics,
     contact_token_metrics,
     input_difference_metrics,
     load_random_dataset_batch,
+    preprocess_inputs,
     raw_token_frame_metrics,
     root_replay_metrics,
     validate_contact_metrics,
     validate_contact_token_metrics,
 )
+from isaaclab_neural.solvers.neural_solver import NeuralSolver
 
 
 def _inputs(mask: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -50,6 +51,30 @@ def _token_inputs(tokens: torch.Tensor, overflow: torch.Tensor | None = None) ->
         "contact_tokens": tokens.unsqueeze(1),
         "contact_token_overflow": overflow,
     }
+
+
+def test_flat_preprocessing_ignores_contact_world_metadata() -> None:
+    solver = NeuralSolver.__new__(NeuralSolver)
+    solver.num_contacts_per_env = 2
+    solver.states_frame = "world"
+    solver.convert_coordinate_frame = lambda root, states, next_states, point0, point1, normal, gravity: (
+        states,
+        next_states,
+        point0,
+        point1,
+        normal,
+        gravity,
+    )
+    solver.wrap2PI = lambda value: None
+    solver.embed_states = lambda states, output=None: states if output is None else output.copy_(states)
+    inputs = _inputs(torch.tensor([[True, False]]))
+    inputs["next_states"] = torch.zeros_like(inputs["states"])
+    inputs["contact_world_id"] = torch.tensor([0])
+
+    processed = preprocess_inputs(solver, inputs)
+
+    assert processed["contact_world_id"].tolist() == [0]
+    assert processed["contact_points_0"].shape == (1, 1, 6)
 
 
 def test_root_replay_metrics_report_maximal_state_errors():
@@ -84,32 +109,6 @@ def test_raw_token_frame_metrics_remove_common_root_translation():
 
     assert metrics["world_point_delta_l2_max"] == pytest.approx(float(torch.linalg.vector_norm(translation)))
     assert metrics["point_minus_root_delta_l2_max"] == pytest.approx(0.0)
-
-
-def test_analyze_dataset_token_row_ownership_reports_swapped_rows(tmp_path, capsys):
-    path = tmp_path / "tokens.hdf5"
-    tokens = np.zeros((2, 1, 1, 17), dtype=np.float32)
-    tokens[..., 0] = 1.0
-    with h5py.File(path, "w") as dataset_file:
-        data_group = dataset_file.create_group("data")
-        data_group.attrs["contact_token_frame"] = "world_v1"
-        data_group.attrs["contact_identity_schema"] = "world_owner_v1"
-        data_group.create_dataset("contact_tokens", data=tokens)
-        data_group.create_dataset("contact_token_body_ids", data=np.asarray([[[4]], [[70]]], dtype=np.int64))
-        data_group.create_dataset("contact_token_world_ids", data=np.asarray([[[1]], [[0]]], dtype=np.int64))
-        trajectory_group = dataset_file.create_group("context").create_group("trajectories")
-        trajectory_group.create_dataset("state_world_id", data=np.asarray([0, 1], dtype=np.int64))
-        trajectory_group.create_dataset("root_world_id", data=np.asarray([0, 1], dtype=np.int64))
-        trajectory_group.create_dataset("contact_world_id", data=np.asarray([0, 1], dtype=np.int64))
-
-    with pytest.raises(ValueError, match="ownership schema mismatch"):
-        analyze_dataset_token_row_ownership(str(path), torch.tensor([0, 0, 0, 0, 1, 1, 1, 0]))
-
-    output = capsys.readouterr().out
-    assert "recorded_token_world_row_mismatch_count=2" in output
-    assert "owner_body_runtime_unavailable_count=1" in output
-    assert "missing_valid_owner_body_count=0" in output
-    assert "state_contact_world_mismatch_count=0" in output
 
 
 def test_contact_token_metrics_report_geometry_and_validity_mismatch():
@@ -353,7 +352,6 @@ def test_load_random_dataset_batch_respects_history_and_horizon(tmp_path):
     with h5py.File(dataset_path, "w") as dataset_file:
         data_group = dataset_file.create_group("data")
         data_group.create_dataset("states", data=np.zeros((3, 20, 4), dtype=np.float32))
-        data_group.create_dataset("contact_masks", data=np.zeros((3, 20, 2), dtype=bool))
         data_group.create_dataset("traj_lengths", data=np.asarray([20, 12, 6], dtype=np.int32))
         context_group = dataset_file.create_group("context").create_group("trajectories")
         context_group.create_dataset("terrain_level", data=np.asarray([1, 2, 3], dtype=np.int64))
@@ -368,7 +366,7 @@ def test_load_random_dataset_batch_respects_history_and_horizon(tmp_path):
     )
 
     assert batch["states"].shape == (8, 3, 4)
-    assert batch["contact_masks"].shape == (8, 3, 2)
+    assert "contact_masks" not in batch
     assert set(metadata["trajectory_index"].tolist()).issubset({0, 1})
     for trajectory_index, step in zip(metadata["trajectory_index"], metadata["step"], strict=True):
         assert 2 <= step <= (19 if trajectory_index == 0 else 11) - 5 + 1

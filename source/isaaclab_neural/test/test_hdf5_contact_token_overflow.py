@@ -3,91 +3,91 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Regression tests for HDF5 contact-token rollout serialization."""
+"""Native-only HDF5 schema and append regression tests."""
 
 from __future__ import annotations
 
 import h5py
+import numpy as np
 import pytest
 import torch
-from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
 from isaaclab_neural.data.hdf5 import append_rollouts_to_hdf5, write_rollouts_to_hdf5
+from native_hdf5_samples import make_native_rollouts
 
 
-def _token_rollouts(*, num_envs: int = 4, trajectory_length: int = 3, max_tokens: int = 5) -> dict:
-    world_ids = torch.arange(num_envs, dtype=torch.long)
-    return {
-        "states": torch.zeros((num_envs, trajectory_length, 2)),
-        "next_states": torch.zeros((num_envs, trajectory_length, 2)),
-        "joint_f": torch.zeros((num_envs, trajectory_length, 1)),
-        "root_body_q": torch.zeros((num_envs, trajectory_length, 7)),
-        "root_body_qd": torch.zeros((num_envs, trajectory_length, 6)),
-        "gravity_dir": torch.zeros((num_envs, trajectory_length, 3)),
-        "contact_token_body_ids": torch.full((num_envs, trajectory_length, max_tokens), -1, dtype=torch.long),
-        "contact_token_world_ids": torch.full((num_envs, trajectory_length, max_tokens), -1, dtype=torch.long),
-        "trajectory_context": {
-            "state_world_id": world_ids,
-            "root_world_id": world_ids,
-            "contact_world_id": world_ids,
-        },
-        "contacts": {
-            "contact_tokens": torch.zeros((num_envs, trajectory_length, max_tokens, CONTACT_TOKEN_DIM)),
-            # Per-step scalar overflow counts are intentionally rank-2 [N, T].
-            "contact_token_overflow": torch.zeros((num_envs, trajectory_length), dtype=torch.long),
-        },
-    }
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("contact_masks", torch.zeros((2, 3, 1), dtype=torch.bool)),
+        ("contact_tokens", torch.zeros((2, 3, 1, 14), dtype=torch.float32)),
+    ],
+)
+def test_native_schema_rejects_baked_contact_fields(tmp_path, field_name, field_value) -> None:
+    rollouts = make_native_rollouts()
+    rollouts["contacts"][field_name] = field_value
+
+    with pytest.raises(ValueError, match="baked contact fields are incompatible"):
+        write_rollouts_to_hdf5(tmp_path / "native.hdf5", rollouts, env_name="Test-Env")
 
 
-def test_write_and_append_accept_2d_contact_token_overflow(tmp_path) -> None:
-    path = tmp_path / "tokens.hdf5"
-    write_rollouts_to_hdf5(path, _token_rollouts(), env_name="Test-Env")
-    append_rollouts_to_hdf5(path, _token_rollouts(), env_name="Test-Env")
+def test_native_rollout_rejects_mismatched_trajectory_world_identity(tmp_path) -> None:
+    rollouts = make_native_rollouts()
+    rollouts["trajectory_context"]["contact_world_id"][0] = 7
 
-    with h5py.File(path, "r") as handle:
-        overflow = handle["data"]["contact_token_overflow"]
-        assert overflow.shape == (8, 3)
-        assert overflow.dtype == "int64"
-        assert handle["data"].attrs["contact_token_frame"] == "world_v1"
+    with pytest.raises(ValueError, match="State, root, and contact trajectory rows"):
+        write_rollouts_to_hdf5(tmp_path / "native.hdf5", rollouts, env_name="Test-Env")
 
 
-def test_contact_token_rollout_requires_root_velocity(tmp_path) -> None:
-    path = tmp_path / "tokens.hdf5"
-    rollouts = _token_rollouts()
+def test_native_rollout_rejects_pair_world_identity_mismatch(tmp_path) -> None:
+    rollouts = make_native_rollouts()
+    rollouts["native_contacts"]["world_ids"][0] = 7
+
+    with pytest.raises(ValueError, match="pair world ids do not match"):
+        write_rollouts_to_hdf5(tmp_path / "native.hdf5", rollouts, env_name="Test-Env")
+
+
+def test_native_rollout_requires_root_velocity(tmp_path) -> None:
+    rollouts = make_native_rollouts()
     del rollouts["root_body_qd"]
 
     with pytest.raises(ValueError, match="root_body_qd"):
-        write_rollouts_to_hdf5(path, rollouts, env_name="Test-Env")
+        write_rollouts_to_hdf5(tmp_path / "native.hdf5", rollouts, env_name="Test-Env")
 
 
-def test_contact_token_rollout_rejects_float_identity_fields(tmp_path) -> None:
-    rollouts = _token_rollouts()
-    rollouts["contact_token_world_ids"] = rollouts["contact_token_world_ids"].float()
-
-    with pytest.raises(ValueError, match="must use an integer dtype"):
-        write_rollouts_to_hdf5(tmp_path / "tokens.hdf5", rollouts, env_name="Test-Env")
-
-
-def test_contact_token_rollout_rejects_missing_valid_owner_ids(tmp_path) -> None:
-    rollouts = _token_rollouts()
-    rollouts["contacts"]["contact_tokens"][0, 0, 0, 0] = 1.0
-
-    with pytest.raises(ValueError, match="nonnegative owner"):
-        write_rollouts_to_hdf5(tmp_path / "tokens.hdf5", rollouts, env_name="Test-Env")
-
-
-def test_contact_token_rollout_rejects_owner_world_row_mismatch(tmp_path) -> None:
-    rollouts = _token_rollouts()
-    rollouts["contacts"]["contact_tokens"][0, 0, 0, 0] = 1.0
-    rollouts["contact_token_body_ids"][0, 0, 0] = 1
-    rollouts["contact_token_world_ids"][0, 0, 0] = 1
-
-    with pytest.raises(ValueError, match="do not match their trajectory rows"):
-        write_rollouts_to_hdf5(tmp_path / "tokens.hdf5", rollouts, env_name="Test-Env")
+def _assert_hdf5_groups_equal(actual: h5py.Group, expected: h5py.Group) -> None:
+    assert set(actual.keys()) == set(expected.keys())
+    assert set(actual.attrs.keys()) == set(expected.attrs.keys())
+    for name in actual.attrs:
+        np.testing.assert_equal(actual.attrs[name], expected.attrs[name])
+    for name in actual:
+        actual_item = actual[name]
+        expected_item = expected[name]
+        assert isinstance(actual_item, h5py.Group) == isinstance(expected_item, h5py.Group)
+        if isinstance(actual_item, h5py.Group):
+            _assert_hdf5_groups_equal(actual_item, expected_item)
+        else:
+            np.testing.assert_equal(actual_item[()], expected_item[()])
 
 
-def test_rollout_rejects_data_context_key_overlap(tmp_path) -> None:
-    rollouts = _token_rollouts()
-    rollouts["trajectory_context"] = {"states": torch.zeros(4, dtype=torch.long)}
+def test_native_append_matches_single_write(tmp_path) -> None:
+    appended_path = tmp_path / "appended.hdf5"
+    single_write_path = tmp_path / "single_write.hdf5"
 
-    with pytest.raises(ValueError, match="keys overlap"):
-        write_rollouts_to_hdf5(tmp_path / "tokens.hdf5", rollouts, env_name="Test-Env")
+    append_rollouts_to_hdf5(
+        appended_path,
+        make_native_rollouts(num_trajectories=2, trajectory_start=0),
+        env_name="Test-Env",
+    )
+    append_rollouts_to_hdf5(
+        appended_path,
+        make_native_rollouts(num_trajectories=2, trajectory_start=2),
+        env_name="Test-Env",
+    )
+    write_rollouts_to_hdf5(
+        single_write_path,
+        make_native_rollouts(num_trajectories=4, trajectory_start=0),
+        env_name="Test-Env",
+    )
+
+    with h5py.File(appended_path, "r") as appended, h5py.File(single_write_path, "r") as single:
+        _assert_hdf5_groups_equal(appended, single)

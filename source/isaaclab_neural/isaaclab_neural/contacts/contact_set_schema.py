@@ -43,3 +43,52 @@ DEFAULT_MAX_CONTACT_TOKENS = 64
 
 CONTACT_REPRESENTATION_FLAT = "flat"
 CONTACT_REPRESENTATION_TOKENS = "contact_tokens"
+
+CONTACT_FLAT_VALUE_FIELDS: tuple[str, ...] = (
+    "contact_normals",
+    "contact_depths",
+    "contact_thicknesses_0",
+    "contact_thicknesses_1",
+    "contact_points_0",
+    "contact_points_1",
+)
+
+NATIVE_CONTACT_FRAME_COUNTS = "frame_counts"
+NATIVE_CONTACT_DATASET_SCHEMA_VERSION = 2
+NATIVE_CONTACT_STORAGE_SCHEMA = "native_pairs_csr_v1"
+NATIVE_CONTACT_FRAME = "world_v1"
+
+NATIVE_CONTACT_INTEGER_FIELDS: tuple[str, ...] = (
+    "shape_ids_0",
+    "shape_ids_1",
+    "body_ids_0",
+    "body_ids_1",
+    "body_slots_0",
+    "body_slots_1",
+    "world_ids",
+)
+
+NATIVE_CONTACT_VECTOR_FIELDS: tuple[str, ...] = (
+    "points_0_local",
+    "points_1_local",
+    "points_0_w",
+    "points_1_w",
+    "surface_points_0_w",
+    "surface_points_1_w",
+    "normal_w",
+    "offsets_0",
+    "offsets_1",
+    "lever_arms_0_w",
+    "lever_arms_1_w",
+    "relative_velocities_0_w",
+    "relative_velocities_1_w",
+)
+
+NATIVE_CONTACT_SCALAR_FIELDS: tuple[str, ...] = (
+    "separation",
+    "thickness_0",
+    "thickness_1",
+)
+
+NATIVE_CONTACT_FLOAT_FIELDS: tuple[str, ...] = NATIVE_CONTACT_VECTOR_FIELDS + NATIVE_CONTACT_SCALAR_FIELDS
+NATIVE_CONTACT_VALUE_FIELDS: tuple[str, ...] = NATIVE_CONTACT_INTEGER_FIELDS + NATIVE_CONTACT_FLOAT_FIELDS

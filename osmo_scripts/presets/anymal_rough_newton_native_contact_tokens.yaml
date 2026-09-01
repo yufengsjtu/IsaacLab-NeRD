@@ -5,7 +5,7 @@
 
 workflow:
   base_name: anymal-c-rough-newton-native-contact-tokens
-  dataset_subdir: anymal-c-rough-newton-native-contact-tokens
+  dataset_subdir: anymal-c-rough-native-v2
 
 resources:
   num_gpu: 8
@@ -15,7 +15,7 @@ resources:
   platform: ovx-l40s
 
 experiment:
-  env_name: Anymal-C-Rough-Native-ContactTokens
+  env_name: Anymal-C-Rough-Native-v2
   robot_name: Anymal-C
   data_gen_task: Isaac-Velocity-Rough-Anymal-C-Dataset-Gen-v0
   deployment_task: Isaac-Velocity-Rough-Anymal-C-v0
@@ -32,7 +32,7 @@ experiment:
   sample_mode: action
   initial_states_source: env
   randomize_pd_gains: true
-  train_transitions: 20000000
+  train_transitions: 10000000
   valid_transitions: 1000000
   data_gen_num_envs: 1024
   train_num_envs: 64

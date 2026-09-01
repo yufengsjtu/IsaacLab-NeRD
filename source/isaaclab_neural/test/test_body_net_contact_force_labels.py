@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import h5py
 import pytest
 import torch
-from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
 from isaaclab_neural.data import (
     BatchTransitionDataset,
     TrajectoryDataset,
@@ -19,6 +18,7 @@ from isaaclab_neural.data import (
 )
 from isaaclab_neural.generate.adapter import BodyNetContactForceRecorder, build_primary_body_sensor_indices
 from isaaclab_neural.generate.sampler import ActionTrajectorySampler
+from native_hdf5_samples import make_native_rollouts
 
 
 def test_sensor_names_map_to_primary_body_slot_order():
@@ -92,35 +92,19 @@ def test_sampler_allocates_and_copies_labels_only_after_step():
     )
 
 
-def _token_rollouts(num_primary_bodies: int = 5):
-    num_trajectories, num_steps, max_tokens = 2, 3, 4
-    return {
-        "states": torch.zeros(num_trajectories, num_steps, 4),
-        "next_states": torch.zeros(num_trajectories, num_steps, 4),
-        "joint_f": torch.zeros(num_trajectories, num_steps, 2),
-        "root_body_q": torch.zeros(num_trajectories, num_steps, 7),
-        "root_body_qd": torch.zeros(num_trajectories, num_steps, 6),
-        "gravity_dir": torch.zeros(num_trajectories, num_steps, 3),
-        "contacts": {
-            "contact_tokens": torch.zeros(num_trajectories, num_steps, max_tokens, CONTACT_TOKEN_DIM),
-            "contact_token_overflow": torch.zeros(num_trajectories, num_steps, dtype=torch.long),
-        },
-        "contact_token_body_ids": torch.full((num_trajectories, num_steps, max_tokens), -1, dtype=torch.long),
-        "contact_token_world_ids": torch.full((num_trajectories, num_steps, max_tokens), -1, dtype=torch.long),
-        "body_net_contact_forces_w": torch.arange(
-            num_trajectories * num_steps * num_primary_bodies * 3, dtype=torch.float32
-        ).reshape(num_trajectories, num_steps, num_primary_bodies, 3),
-        "trajectory_context": {
-            "state_world_id": torch.arange(num_trajectories, dtype=torch.long),
-            "root_world_id": torch.arange(num_trajectories, dtype=torch.long),
-            "contact_world_id": torch.arange(num_trajectories, dtype=torch.long),
-        },
-    }
+def _native_rollouts(num_primary_bodies: int = 5):
+    rollouts = make_native_rollouts()
+    num_trajectories, num_steps = rollouts["states"].shape[:2]
+    rollouts["body_net_contact_forces_w"] = torch.arange(
+        num_trajectories * num_steps * num_primary_bodies * 3,
+        dtype=torch.float32,
+    ).reshape(num_trajectories, num_steps, num_primary_bodies, 3)
+    return rollouts
 
 
 def test_hdf5_round_trip_and_missing_label_rejection(tmp_path):
     dataset_path = tmp_path / "force_labels.hdf5"
-    rollouts = _token_rollouts(num_primary_bodies=5)
+    rollouts = _native_rollouts(num_primary_bodies=5)
     body_names = [f"body_{index}" for index in range(5)]
     write_rollouts_to_hdf5(
         dataset_path,
@@ -129,10 +113,17 @@ def test_hdf5_round_trip_and_missing_label_rejection(tmp_path):
         body_net_contact_force_body_names=body_names,
     )
 
-    dataset = TrajectoryDataset(dataset_path, sample_sequence_length=2)
+    dataset = TrajectoryDataset(
+        dataset_path,
+        sample_sequence_length=2,
+        contact_representation="flat",
+        num_contacts_per_env=1,
+        contact_packing_policy="penetration_priority",
+    )
     sample = dataset[0]
     assert "body_net_contact_forces_w" in dataset.data_keys
     assert sample["body_net_contact_forces_w"].shape == (2, 5, 3)
+    assert sample["contact_masks"].tolist() == [[True], [True]]
     torch.testing.assert_close(
         sample["body_net_contact_forces_w"],
         rollouts["body_net_contact_forces_w"][0, :2],
@@ -149,8 +140,15 @@ def test_hdf5_round_trip_and_missing_label_rejection(tmp_path):
         ]
         assert stored_body_names == body_names
 
-    transition_dataset = BatchTransitionDataset(batch_size=2, hdf5_dataset_path=dataset_path)
+    transition_dataset = BatchTransitionDataset(
+        batch_size=2,
+        hdf5_dataset_path=dataset_path,
+        contact_representation="contact_tokens",
+        max_contact_tokens=2,
+        contact_packing_policy="body_round_robin_pair_atomic",
+    )
     assert "body_net_contact_forces_w" in transition_dataset.data_keys
+    assert "contact_tokens" in transition_dataset.data_keys
 
     with h5py.File(dataset_path, "a") as dataset_file:
         del dataset_file["data"]["body_net_contact_forces_w"]
@@ -163,7 +161,7 @@ def test_hdf5_rejects_missing_or_invalid_body_name_order(tmp_path):
     body_names = [f"body_{index}" for index in range(5)]
     write_rollouts_to_hdf5(
         dataset_path,
-        _token_rollouts(num_primary_bodies=5),
+        _native_rollouts(num_primary_bodies=5),
         "rough-anymal",
         body_net_contact_force_body_names=body_names,
     )
@@ -181,7 +179,7 @@ def test_hdf5_rejects_missing_or_invalid_body_name_order(tmp_path):
 
 def test_hdf5_append_preserves_body_name_order(tmp_path):
     dataset_path = tmp_path / "force_labels_append.hdf5"
-    rollouts = _token_rollouts(num_primary_bodies=5)
+    rollouts = _native_rollouts(num_primary_bodies=5)
     body_names = [f"body_{index}" for index in range(5)]
 
     append_rollouts_to_hdf5(

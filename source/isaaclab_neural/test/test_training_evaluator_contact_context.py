@@ -10,7 +10,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from isaaclab_neural.data.hdf5 import write_rollouts_to_hdf5
 from isaaclab_neural.eval.training_evaluator import TrainingRolloutEvaluator
+from isaaclab_neural.train import trainers as trainers_module
+from native_hdf5_samples import make_native_rollouts
 
 
 def _contacts(mask: torch.Tensor, points: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
@@ -374,6 +377,71 @@ def test_strict_history_context_requires_preload_support():
             end=2,
             history_offset=1,
         )
+
+
+def test_strict_eval_projects_flat_contact_history_from_native_dataset(tmp_path):
+    dataset_path = tmp_path / "native.hdf5"
+    write_rollouts_to_hdf5(
+        dataset_path,
+        make_native_rollouts(num_trajectories=2, num_steps=6),
+        env_name="Test-Env",
+    )
+    neural_env = SimpleNamespace(
+        solver_neural=SimpleNamespace(
+            contact_mode="newton_native",
+            num_states_history=3,
+            contacts=_contacts(torch.zeros(1, 2, dtype=torch.bool)),
+        )
+    )
+
+    evaluator = TrainingRolloutEvaluator(
+        neural_env,
+        hdf5_dataset_path=str(dataset_path),
+        eval_horizon=2,
+        require_terrain_context=True,
+        contact_representation="flat",
+        num_contacts_per_env=2,
+        contact_packing_policy="penetration_priority",
+    )
+    trajectories = evaluator._sample_dataset_trajectories(1)
+
+    assert set(neural_env.solver_neural.contacts).issubset(trajectories)
+    assert evaluator._history_offset(trajectories) == 2
+
+
+def test_trainer_forwards_native_contact_projection_to_evaluator(monkeypatch):
+    captured_kwargs = {}
+
+    class FakeEvaluator:
+        def __init__(self, *_args, **kwargs):
+            captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(trainers_module, "TrainingRolloutEvaluator", FakeEvaluator)
+    trainer = object.__new__(trainers_module.VanillaTrainer)
+    trainer.neural_env = SimpleNamespace(num_envs=1)
+    trainer.device = "cpu"
+    trainer.dataset_contact_projection = {
+        "contact_representation": "flat",
+        "num_contacts_per_env": 64,
+        "max_contact_tokens": 0,
+        "contact_packing_policy": "penetration_priority",
+    }
+
+    trainer._init_evaluator(
+        {
+            "eval": {
+                "interval": 1,
+                "mode": "dataset",
+                "action_mode": "joint_f",
+                "dataset_path": "native.hdf5",
+            }
+        },
+        {},
+    )
+
+    assert {
+        key: captured_kwargs[key] for key in trainer.dataset_contact_projection
+    } == trainer.dataset_contact_projection
 
 
 def test_sampled_trajectories_include_source_window_coordinates(monkeypatch):

@@ -49,7 +49,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--write-chunk-transitions",
         type=int,
-        default=10000000,
+        default=250_000,
         help="Append generated rollouts to HDF5 every N transitions. Disabled when 0.",
     )
     parser.add_argument("--zero-actions", action="store_true", help="Generate passive trajectories with zero actions.")
@@ -73,25 +73,25 @@ def get_parser() -> argparse.ArgumentParser:
         "--num-contacts-per-env",
         type=int,
         default=0,
-        help="Native contact capacity per environment. Use zero for the default contact-free Cartpole task.",
+        help="Flat runtime projection capacity. Use zero for the default contact-free Cartpole task.",
     )
     parser.add_argument(
         "--contact-packing-policy",
         choices=["stable_index", "penetration_priority", "random", "force_priority", "body_round_robin_pair_atomic"],
         default=None,
-        help="Contact slot ordering. Defaults to penetration_priority for newton_native and stable_index otherwise.",
+        help="Projection ordering. Defaults to penetration_priority for flat and pair-atomic round robin for tokens.",
     )
     parser.add_argument(
         "--contact-representation",
         choices=["flat", "contact_tokens"],
         default="flat",
-        help="Contact encoding stored in generated HDF5 datasets.",
+        help="Runtime contact projection; generated datasets store reusable native pairs.",
     )
     parser.add_argument(
         "--max-contact-tokens",
         type=int,
         default=DEFAULT_MAX_CONTACT_TOKENS,
-        help="Directed contact token capacity when --contact-representation=contact_tokens.",
+        help="Directed runtime token capacity when --contact-representation=contact_tokens.",
     )
     parser.add_argument(
         "--record-body-net-contact-forces",

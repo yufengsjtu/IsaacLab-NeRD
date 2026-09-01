@@ -18,9 +18,14 @@ from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_REPRESENTATION_TOKENS,
     CONTACT_TOKEN_DIM,
     DEFAULT_MAX_CONTACT_TOKENS,
+    NATIVE_CONTACT_FLOAT_FIELDS,
+    NATIVE_CONTACT_INTEGER_FIELDS,
+    NATIVE_CONTACT_SCALAR_FIELDS,
+    NATIVE_CONTACT_VECTOR_FIELDS,
 )
 from isaaclab_neural.contacts.kernels import transform_native_contact_geometry
-from isaaclab_neural.contacts.packing import ContactPackingPolicy, get_contact_order
+from isaaclab_neural.contacts.native_pair_projector import project_native_pairs
+from isaaclab_neural.contacts.packing import ContactPackingPolicy
 from isaaclab_neural.utils import step_profile, torch_utils
 
 logger = logging.getLogger(__name__)
@@ -185,18 +190,17 @@ class NewtonContactAdapter:
             dtype=torch.long,
             device=self.device,
         )
-        self._token_encoder: ContactSetEncoder | None = None
-        if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
-            self._token_encoder = ContactSetEncoder(
-                model=model,
-                primary_body_mask=self.primary_body_mask,
-                shape_body_torch=self.shape_body_torch,
-                bodies_per_env=self.bodies_per_env,
-                num_envs=self.num_envs,
-                max_contact_tokens=self.max_contact_tokens,
-                device=self.device,
-                primary_body_ids_by_world=self.primary_body_ids_by_world,
-            )
+        self._native_pair_encoder = ContactSetEncoder(
+            model=model,
+            primary_body_mask=self.primary_body_mask,
+            shape_body_torch=self.shape_body_torch,
+            bodies_per_env=self.bodies_per_env,
+            num_envs=self.num_envs,
+            max_contact_tokens=self.max_contact_tokens,
+            device=self.device,
+            primary_body_ids_by_world=self.primary_body_ids_by_world,
+        )
+        self._native_contact_pairs = self._empty_native_contact_pairs()
 
     def reset_buffers(self) -> None:
         """Clear all fixed-size contact buffers before packing a new frame."""
@@ -227,6 +231,7 @@ class NewtonContactAdapter:
         contact_count = self._contact_count(contacts)
         self._contact_frames += 1
         if contact_count == 0:
+            self._native_contact_pairs = self._empty_native_contact_pairs()
             self.reset_buffers()
             return
         if self.contact_representation != CONTACT_REPRESENTATION_TOKENS:
@@ -234,19 +239,21 @@ class NewtonContactAdapter:
 
         with step_profile.section("adapter_read_raw"):
             raw = self._read_raw_contacts(contacts, contact_count, state)
+        self._native_contact_pairs = self._build_native_contact_pairs(raw, state)
         if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
-            assert self._token_encoder is not None
             if state is None:
                 raise ValueError("Contact token encoding requires the current Newton State.")
             with step_profile.section("adapter_encode_tokens"):
-                self._token_encoder._encode_into(
-                    raw,
-                    state,
-                    self.contact_tokens,
-                    self.contact_token_overflow,
-                    self.contact_token_body_ids,
+                projected = project_native_pairs(
+                    self._native_contact_pairs,
+                    num_frames=self.num_envs,
+                    representation=self.contact_representation,
+                    packing_policy="body_round_robin_pair_atomic",
+                    max_contact_tokens=self.max_contact_tokens,
                 )
-            self._token_encoder.record_frame()
+                self.contact_tokens.copy_(projected["contact_tokens"])
+                self.contact_token_overflow.copy_(projected["contact_token_overflow"])
+                self.contact_token_body_ids.copy_(projected["contact_token_body_ids"])
             valid_tokens = (self.contact_tokens[..., 0] > 0.5).sum()
             overflow_sum = self.contact_token_overflow.sum()
             self._raw_contacts_total += contact_count
@@ -263,53 +270,49 @@ class NewtonContactAdapter:
                 self._truncation_warning_emitted = True
             return
 
-        self._pack_flat_contacts(raw)
-
-    def _pack_flat_contacts(self, raw: dict[str, torch.Tensor]) -> None:
-        """Vectorized flat packing matching sequential penetration/slot semantics."""
-        if not hasattr(self, "_packed_contacts_gpu"):
-            self._packed_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
-            self._dropped_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
-            self._truncated_frames_gpu = torch.zeros((), dtype=torch.long, device=self.device)
-
-        order = get_contact_order(raw, self.packing_policy)
-        shape0 = raw["shape0"][order]
-        shape1 = raw["shape1"][order]
-        normals = raw["normal"][order]
-        depths = raw["surface_separation"][order]
-        thickness0 = raw["thickness0"][order]
-        thickness1 = raw["thickness1"][order]
-        points0 = raw["point0_world"][order]
-        points1 = raw["point1_world"][order]
-
-        env_ids = self._contact_env_ids(shape0, shape1)
-        valid = (env_ids >= 0) & (env_ids < self.num_envs)
-        frame_raw = int(valid.sum().item())
+        with step_profile.section("adapter_pack_flat"):
+            projected = project_native_pairs(
+                self._native_contact_pairs,
+                num_frames=self.num_envs,
+                representation=self.contact_representation,
+                packing_policy=self.packing_policy,
+                flat_capacity=self.num_contacts_per_env,
+                return_pair_indices=True,
+            )
+            self.contact_masks.copy_(projected["contact_masks"])
+            self.contact_normals.copy_(
+                projected["contact_normals"].reshape(self.num_envs, self.num_contacts_per_env, 3)
+            )
+            self.contact_depths.copy_(projected["contact_depths"])
+            self.contact_thicknesses_0.copy_(projected["contact_thicknesses_0"])
+            self.contact_thicknesses_1.copy_(projected["contact_thicknesses_1"])
+            self.contact_points_0.copy_(
+                projected["contact_points_0"].reshape(self.num_envs, self.num_contacts_per_env, 3)
+            )
+            self.contact_points_1.copy_(
+                projected["contact_points_1"].reshape(self.num_envs, self.num_contacts_per_env, 3)
+            )
+            pair_indices = projected["_pair_indices"]
+            selected = pair_indices >= 0
+            if hasattr(self, "contact_body_ids_0") and hasattr(self, "body_local_ids") and selected.any():
+                source = pair_indices[selected]
+                body0 = self._native_contact_pairs["body_ids_0"][source]
+                body1 = self._native_contact_pairs["body_ids_1"][source]
+                valid_body0 = body0 >= 0
+                valid_body1 = body1 >= 0
+                selected0 = selected.clone()
+                selected1 = selected.clone()
+                selected0[selected] = valid_body0
+                selected1[selected] = valid_body1
+                self.contact_body_ids_0[selected0] = self.body_local_ids[body0[valid_body0]]
+                self.contact_body_ids_1[selected1] = self.body_local_ids[body1[valid_body1]]
+        frame_raw = self._native_contact_pairs["world_ids"].shape[0]
+        packed = self.contact_masks.sum()
+        dropped = torch.as_tensor(frame_raw, device=self.device, dtype=torch.long) - packed
         self._raw_contacts_total += frame_raw
-        if frame_raw == 0:
-            return
-
-        env_ids_v = env_ids[valid]
-        n_valid = env_ids_v.shape[0]
-        # Rank contacts within each env in encounter (priority) order.
-        positions = torch.arange(n_valid, device=self.device, dtype=torch.long)
-        sorted_env, sort_idx = torch.sort(env_ids_v, stable=True)
-        is_start = torch.ones(n_valid, dtype=torch.bool, device=self.device)
-        if n_valid > 1:
-            is_start[1:] = sorted_env[1:] != sorted_env[:-1]
-        group_start_ids = torch.cumsum(is_start.to(dtype=torch.long), dim=0) - 1
-        start_pos = positions[is_start]
-        rank_sorted = positions - start_pos[group_start_ids]
-        rank = torch.empty_like(rank_sorted)
-        rank[sort_idx] = rank_sorted
-
-        keep = rank < self.num_contacts_per_env
-        dropped = (~keep).sum()
-        packed = keep.sum()
         self._packed_contacts_gpu += packed.to(dtype=torch.long)
-        self._dropped_contacts_gpu += dropped.to(dtype=torch.long)
+        self._dropped_contacts_gpu += dropped
         self._truncated_frames_gpu += (dropped > 0).to(dtype=torch.long)
-
         if self.device.type == "cpu" and not self._truncation_warning_emitted and int(dropped.item()) > 0:
             logger.warning(
                 "Newton-native contact packing dropped %d contacts because num_contacts_per_env=%d. "
@@ -319,72 +322,101 @@ class NewtonContactAdapter:
             )
             self._truncation_warning_emitted = True
 
-        ordered_valid_idx = torch.nonzero(valid, as_tuple=False).squeeze(-1)
-        keep_local = torch.nonzero(keep, as_tuple=False).squeeze(-1)
-        src = ordered_valid_idx[keep_local]
-        env_keep = env_ids_v[keep_local]
-        slot_keep = rank[keep_local]
+    def native_contact_pairs(self) -> dict[str, torch.Tensor]:
+        """Return the current canonical native contact-pair tensors.
 
-        self.contact_masks[env_keep, slot_keep] = True
-        self.contact_normals[env_keep, slot_keep] = normals[src]
-        self.contact_depths[env_keep, slot_keep] = depths[src]
-        if hasattr(self, "contact_body_ids_0"):
-            body0 = self._shape_body_ids(shape0[src])
-            body1 = self._shape_body_ids(shape1[src])
-            valid_body0 = body0 >= 0
-            valid_body1 = body1 >= 0
-            self.contact_body_ids_0[env_keep[valid_body0], slot_keep[valid_body0]] = self.body_local_ids[
-                body0[valid_body0]
-            ]
-            self.contact_body_ids_1[env_keep[valid_body1], slot_keep[valid_body1]] = self.body_local_ids[
-                body1[valid_body1]
-            ]
-        self.contact_thicknesses_0[env_keep, slot_keep] = thickness0[src]
-        self.contact_thicknesses_1[env_keep, slot_keep] = thickness1[src]
-        self.contact_points_0[env_keep, slot_keep] = points0[src]
-        self.contact_points_1[env_keep, slot_keep] = points1[src]
+        The returned tensors contain only pairs whose Newton world can be
+        resolved. They are collected before fixed-capacity contact packing.
+        Callers retaining a frame must clone the tensors before the next
+        :meth:`update`.
+        """
+        return self._native_contact_pairs
 
-    def _pack_flat_contacts_sequential(self, raw: dict[str, torch.Tensor]) -> None:
-        """Reference Python packing used by equivalence tests."""
-        order = get_contact_order(raw, self.packing_policy)
-        write_counts = torch.zeros(
-            self.num_envs,
-            dtype=torch.long,
-            device=self.device,
+    def _empty_native_contact_pairs(self) -> dict[str, torch.Tensor]:
+        """Return a schema-complete empty native contact-pair mapping."""
+        pairs: dict[str, torch.Tensor] = {
+            name: torch.empty(0, dtype=torch.int64, device=self.device) for name in NATIVE_CONTACT_INTEGER_FIELDS
+        }
+        pairs.update(
+            {
+                name: torch.empty((0, 3), dtype=torch.float32, device=self.device)
+                for name in NATIVE_CONTACT_VECTOR_FIELDS
+            }
         )
-        frame_raw_contacts = 0
-        frame_packed_contacts = 0
-        frame_dropped_contacts = 0
+        pairs.update(
+            {name: torch.empty(0, dtype=torch.float32, device=self.device) for name in NATIVE_CONTACT_SCALAR_FIELDS}
+        )
+        return pairs
 
-        for contact_idx in order.tolist():
-            shape0 = int(raw["shape0"][contact_idx].item())
-            shape1 = int(raw["shape1"][contact_idx].item())
-            env_id = self._contact_env_id(shape0, shape1)
-            if env_id < 0 or env_id >= self.num_envs:
-                continue
+    def _build_native_contact_pairs(
+        self,
+        raw: dict[str, torch.Tensor],
+        state: newton.State | None,
+    ) -> dict[str, torch.Tensor]:
+        """Build the unresolved-capacity canonical native pair view."""
+        pair_count = raw["shape0"].shape[0]
+        body_ids_0 = self._shape_body_ids(raw["shape0"])
+        body_ids_1 = self._shape_body_ids(raw["shape1"])
+        world_ids = self._contact_env_ids(raw["shape0"], raw["shape1"])
+        if state is not None:
+            rows = self._native_pair_encoder._directed_rows(raw, state)
+            first = slice(0, pair_count)
+            second = slice(pair_count, 2 * pair_count)
+            body_ids_0 = rows.body_id[first]
+            body_ids_1 = rows.body_id[second]
+            world_ids = rows.world_id[first]
+            body_slots_0 = self._native_pair_encoder._body_slot(body_ids_0)
+            body_slots_1 = self._native_pair_encoder._body_slot(body_ids_1)
+            lever_arms_0_w = rows.lever_world[first]
+            lever_arms_1_w = rows.lever_world[second]
+            relative_velocities_0_w = rows.velocity_world[first]
+            relative_velocities_1_w = rows.velocity_world[second]
+        else:
+            body_slots_0 = torch.full_like(body_ids_0, -1)
+            body_slots_1 = torch.full_like(body_ids_1, -1)
+            vector_zeros = torch.zeros((pair_count, 3), dtype=torch.float32, device=self.device)
+            lever_arms_0_w = vector_zeros
+            lever_arms_1_w = vector_zeros
+            relative_velocities_0_w = vector_zeros
+            relative_velocities_1_w = vector_zeros
+        valid = (world_ids >= 0) & (world_ids < self.num_envs)
 
-            frame_raw_contacts += 1
-            slot_id = int(write_counts[env_id].item())
-            if slot_id >= self.num_contacts_per_env:
-                frame_dropped_contacts += 1
-                continue
-
-            self.contact_masks[env_id, slot_id] = True
-            self.contact_normals[env_id, slot_id].copy_(raw["normal"][contact_idx])
-            self.contact_depths[env_id, slot_id] = raw["surface_separation"][contact_idx]
-            self.contact_thicknesses_0[env_id, slot_id] = raw["thickness0"][contact_idx]
-            self.contact_thicknesses_1[env_id, slot_id] = raw["thickness1"][contact_idx]
-            self.contact_points_0[env_id, slot_id].copy_(raw["point0_world"][contact_idx])
-            self.contact_points_1[env_id, slot_id].copy_(raw["point1_world"][contact_idx])
-
-            write_counts[env_id] += 1
-            frame_packed_contacts += 1
-
-        self._raw_contacts_total += frame_raw_contacts
-        self._packed_contacts_total += frame_packed_contacts
-        self._dropped_contacts_total += frame_dropped_contacts
-        if frame_dropped_contacts > 0:
-            self._truncated_frames += 1
+        point0_world = raw["point0_world"]
+        point1_world = raw["point1_world"]
+        point0_local = raw.get("point0", point0_world)
+        point1_local = raw.get("point1", point1_world)
+        surface0_world = raw.get("surface0_world", point0_world)
+        surface1_world = raw.get("surface1_world", point1_world)
+        offset0 = raw.get("offset0", torch.zeros_like(point0_local))
+        offset1 = raw.get("offset1", torch.zeros_like(point1_local))
+        pairs = {
+            "shape_ids_0": raw["shape0"][valid].to(dtype=torch.int64),
+            "shape_ids_1": raw["shape1"][valid].to(dtype=torch.int64),
+            "body_ids_0": body_ids_0[valid].to(dtype=torch.int64),
+            "body_ids_1": body_ids_1[valid].to(dtype=torch.int64),
+            "body_slots_0": body_slots_0[valid].to(dtype=torch.int64),
+            "body_slots_1": body_slots_1[valid].to(dtype=torch.int64),
+            "world_ids": world_ids[valid].to(dtype=torch.int64),
+            "points_0_local": point0_local[valid].to(dtype=torch.float32),
+            "points_1_local": point1_local[valid].to(dtype=torch.float32),
+            "points_0_w": point0_world[valid].to(dtype=torch.float32),
+            "points_1_w": point1_world[valid].to(dtype=torch.float32),
+            "surface_points_0_w": surface0_world[valid].to(dtype=torch.float32),
+            "surface_points_1_w": surface1_world[valid].to(dtype=torch.float32),
+            "normal_w": raw["normal"][valid].to(dtype=torch.float32),
+            "separation": raw["surface_separation"][valid].to(dtype=torch.float32),
+            "thickness_0": raw["thickness0"][valid].to(dtype=torch.float32),
+            "thickness_1": raw["thickness1"][valid].to(dtype=torch.float32),
+            "offsets_0": offset0[valid].to(dtype=torch.float32),
+            "offsets_1": offset1[valid].to(dtype=torch.float32),
+            "lever_arms_0_w": lever_arms_0_w[valid].to(dtype=torch.float32),
+            "lever_arms_1_w": lever_arms_1_w[valid].to(dtype=torch.float32),
+            "relative_velocities_0_w": relative_velocities_0_w[valid].to(dtype=torch.float32),
+            "relative_velocities_1_w": relative_velocities_1_w[valid].to(dtype=torch.float32),
+        }
+        if set(pairs) != set(NATIVE_CONTACT_INTEGER_FIELDS + NATIVE_CONTACT_FLOAT_FIELDS):
+            raise RuntimeError("Native contact-pair fields do not match the schema.")
+        return pairs
 
     def to_neural_inputs(self) -> dict[str, torch.Tensor]:
         """Return contact tensors shaped like fixed-ground neural inputs.
@@ -433,8 +465,13 @@ class NewtonContactAdapter:
             "truncated_frames": truncated,
             "truncated_frame_ratio": truncated / max(self._contact_frames, 1),
         }
-        if self._token_encoder is not None:
-            summary.update(self._token_encoder.overflow_summary())
+        if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
+            summary.update(
+                {
+                    "overflow_tokens_total": dropped,
+                    "overflow_frames": int((self.contact_token_overflow > 0).sum().item()),
+                }
+            )
         return summary
 
     def _contact_count(self, contacts: newton.Contacts) -> int:
@@ -491,6 +528,9 @@ class NewtonContactAdapter:
                 state,
             )
         )
+        if offset0 is None:
+            offset0 = torch.zeros_like(point0)
+            offset1 = torch.zeros_like(point1)
 
         raw = {
             "shape0": shape0,
@@ -505,6 +545,8 @@ class NewtonContactAdapter:
             "surface_separation": surface_separation,
             "thickness0": thickness0,
             "thickness1": thickness1,
+            "offset0": offset0,
+            "offset1": offset1,
         }
         if state is not None:
             if state.body_q is not None:

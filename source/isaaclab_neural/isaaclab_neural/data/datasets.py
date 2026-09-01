@@ -15,6 +15,12 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from isaaclab_neural.data.native_contacts import (
+    NativeContactProjection,
+    read_and_project_frames,
+    resolve_native_projection,
+    validate_native_storage,
+)
 from isaaclab_neural.utils.commons import DATASET_MODES
 
 BOOL_DATASET_KEYS = {"contact_masks"}
@@ -26,6 +32,41 @@ INTEGER_DATASET_KEYS = {
 }
 DatasetLoadMode = Literal["eager", "lazy"]
 STRUCTURED_DATASET_KEYS = {"contact_tokens", "body_net_contact_forces_w"}
+
+
+def validate_native_only_data_group(data_group: h5py.Group) -> None:
+    """Reject fixed-capacity contact arrays persisted in a dataset data group."""
+    baked_fields = sorted(name for name in data_group if name.startswith("contact_"))
+    if baked_fields:
+        raise ValueError(
+            "Baked flat/contact-token fields are incompatible with native-only datasets; "
+            f"regenerate or migrate this dataset: {baked_fields}."
+        )
+
+
+def _resolve_file_native_projection(
+    dataset_file: h5py.File,
+    *,
+    total_transitions: int,
+    contact_representation: str | None,
+    num_contacts_per_env: int | None,
+    max_contact_tokens: int | None,
+    contact_packing_policy: str | None,
+) -> NativeContactProjection | None:
+    """Validate native storage and resolve the requested read-boundary projection."""
+    data_group = cast(h5py.Group, dataset_file["data"])
+    validate_native_only_data_group(data_group)
+    native_group = validate_native_storage(dataset_file, total_transitions)
+    has_native = native_group is not None
+    if "body_net_contact_forces_w" in data_group and not has_native:
+        raise ValueError("body_net_contact_forces_w labels require /contacts/native_pairs schema v2.")
+    return resolve_native_projection(
+        has_native_contacts=has_native,
+        contact_representation=contact_representation,
+        num_contacts_per_env=num_contacts_per_env,
+        max_contact_tokens=max_contact_tokens,
+        contact_packing_policy=contact_packing_policy,
+    )
 
 
 def _decode_attr(value: Any) -> Any:
@@ -61,30 +102,6 @@ def _resolve_dataset_path(hdf5_dataset_path: str | Path) -> Path:
     if not dataset_path.exists():
         raise FileNotFoundError(f"Dataset file {dataset_path.resolve()} not found.")
     return dataset_path
-
-
-def validate_contact_token_metadata(data_group: h5py.Group) -> None:
-    """Reject contact-token datasets with ambiguous frame or identity metadata."""
-    if "contact_tokens" not in data_group:
-        return
-    token_frame = _decode_attr(data_group.attrs.get("contact_token_frame", ""))
-    identity_schema = _decode_attr(data_group.attrs.get("contact_identity_schema", ""))
-    if token_frame != "world_v1" or identity_schema != "world_owner_v1":
-        raise ValueError(
-            "Contact-token dataset requires contact_token_frame='world_v1' and "
-            "contact_identity_schema='world_owner_v1'; regenerate this dataset."
-        )
-    required_ids = {"contact_token_body_ids", "contact_token_world_ids"}
-    missing_ids = sorted(required_ids - set(data_group.keys()))
-    if missing_ids:
-        raise ValueError(f"Contact-token dataset is missing identity fields: {missing_ids}.")
-    invalid_dtypes = {
-        key: str(cast(h5py.Dataset, data_group[key]).dtype)
-        for key in required_ids
-        if not np.issubdtype(cast(h5py.Dataset, data_group[key]).dtype, np.integer)
-    }
-    if invalid_dtypes:
-        raise ValueError(f"Contact-token identity fields must use integer dtypes: {invalid_dtypes}.")
 
 
 def validate_body_net_contact_force_metadata(data_group: h5py.Group) -> tuple[str, ...] | None:
@@ -135,18 +152,29 @@ def _read_hdf5_metadata(
     *,
     max_capacity: int,
     batch_size: int | None = None,
+    contact_representation: str | None = None,
+    num_contacts_per_env: int | None = None,
+    max_contact_tokens: int | None = None,
+    contact_packing_policy: str | None = None,
 ) -> dict[str, Any]:
     """Read dataset metadata without materializing rollout arrays."""
     dataset_path = _resolve_dataset_path(hdf5_dataset_path)
     with h5py.File(dataset_path, "r", swmr=True, libver="latest") as dataset_file:
         data_group = cast(h5py.Group, dataset_file["data"])
-        validate_contact_token_metadata(data_group)
-        body_net_contact_force_body_names = validate_body_net_contact_force_metadata(data_group)
         mode = _decode_attr(data_group.attrs["mode"])
         if mode not in DATASET_MODES:
             raise ValueError(f"Unsupported dataset mode: {mode!r}. Expected one of {DATASET_MODES}.")
 
         total_transitions = int(cast(Any, data_group.attrs["total_transitions"]))
+        native_projection = _resolve_file_native_projection(
+            dataset_file,
+            total_transitions=total_transitions,
+            contact_representation=contact_representation,
+            num_contacts_per_env=num_contacts_per_env,
+            max_contact_tokens=max_contact_tokens,
+            contact_packing_policy=contact_packing_policy,
+        )
+        body_net_contact_force_body_names = validate_body_net_contact_force_metadata(data_group)
         data_keys = [key for key in data_group.keys() if key != "traj_lengths"]
         states_dataset = cast(h5py.Dataset, data_group["states"])
         num_transitions_per_trajectory = int(states_dataset.shape[1]) if states_dataset.ndim == 3 else 1
@@ -161,6 +189,7 @@ def _read_hdf5_metadata(
             "num_trajectories": num_trajectories,
             "traj_lengths": None,
             "body_net_contact_force_body_names": body_net_contact_force_body_names,
+            "native_projection": native_projection,
         }
 
         if mode == "trajectory":
@@ -207,6 +236,16 @@ class _LazyHdf5Accessor:
         """Return one per-trajectory context dataset from the open file."""
         self._ensure_open()
         return cast(h5py.Dataset, cast(h5py.File, self._file)["context"]["trajectories"][key])
+
+    def project_native_frames(
+        self,
+        frame_indices: np.ndarray,
+        projection: NativeContactProjection,
+    ) -> dict[str, np.ndarray]:
+        """Project selected native CSR frames from the open file."""
+        self._ensure_open()
+        native_group = cast(h5py.Group, cast(h5py.File, self._file)["contacts"]["native_pairs"])
+        return read_and_project_frames(native_group, frame_indices, projection)
 
     def close(self) -> None:
         if self._file is not None:
@@ -268,6 +307,10 @@ class BatchTransitionDataset:
         hdf5_dataset_path: str | Path,
         max_capacity: int = 100_000_000,
         device: str | torch.device = "cpu",
+        contact_representation: str | None = None,
+        num_contacts_per_env: int | None = None,
+        max_contact_tokens: int | None = None,
+        contact_packing_policy: str | None = None,
     ):
         self.batch_size = batch_size
         self.max_capacity = max_capacity
@@ -277,6 +320,12 @@ class BatchTransitionDataset:
         self.data_keys: list[str] = []
         self.body_net_contact_force_body_names: tuple[str, ...] | None = None
         self.dataset_length = 0
+        self._projection_args = {
+            "contact_representation": contact_representation,
+            "num_contacts_per_env": num_contacts_per_env,
+            "max_contact_tokens": max_contact_tokens,
+            "contact_packing_policy": contact_packing_policy,
+        }
 
         self.load_dataset(hdf5_dataset_path)
 
@@ -286,27 +335,36 @@ class BatchTransitionDataset:
 
         with h5py.File(dataset_path, "r", swmr=True, libver="latest") as dataset_file:
             data_group = cast(h5py.Group, dataset_file["data"])
-            validate_contact_token_metadata(data_group)
-            self.body_net_contact_force_body_names = validate_body_net_contact_force_metadata(data_group)
             mode = _decode_attr(data_group.attrs["mode"])
             if mode not in DATASET_MODES:
                 raise ValueError(f"Unsupported dataset mode: {mode!r}. Expected one of {DATASET_MODES}.")
 
             total_transitions = int(cast(Any, data_group.attrs["total_transitions"]))
+            native_projection = _resolve_file_native_projection(
+                dataset_file,
+                total_transitions=total_transitions,
+                **self._projection_args,
+            )
+            self.body_net_contact_force_body_names = validate_body_net_contact_force_metadata(data_group)
             self.dataset_length = min(self.max_capacity, total_transitions) // self.batch_size
             self.dataset = {}
             self.data_keys = [key for key in data_group.keys() if key != "traj_lengths"]
+            if native_projection is not None:
+                collisions = set(self.data_keys).intersection(native_projection.output_keys)
+                if collisions:
+                    raise ValueError(f"Stored and projected contact fields overlap: {sorted(collisions)}.")
+                self.data_keys.extend(native_projection.output_keys)
 
             if mode == "trajectory":
                 self.traj_lengths = None
 
+            usable = self.dataset_length * self.batch_size
             for key in data_group.keys():
                 if mode == "trajectory" and key == "traj_lengths":
                     self.traj_lengths = np.asarray(cast(h5py.Dataset, data_group[key])[()]).astype("int32")
                     continue
 
                 data = _read_dataset_array(data_group, key)
-                usable = self.dataset_length * self.batch_size
                 if key in STRUCTURED_DATASET_KEYS and data.ndim >= 4:
                     # Preserve set/body axes for structured contact fields.
                     tail_shape = data.shape[-2:]
@@ -319,6 +377,17 @@ class BatchTransitionDataset:
                     data = data.reshape(total_transitions, -1)
                     self.dataset[key] = _torch_tensor(
                         data[:usable].reshape(self.dataset_length, self.batch_size, -1),
+                        device=self.device,
+                    )
+            if native_projection is not None:
+                projected = read_and_project_frames(
+                    cast(h5py.Group, dataset_file["contacts"]["native_pairs"]),
+                    np.arange(usable, dtype=np.int64),
+                    native_projection,
+                )
+                for key, data in projected.items():
+                    self.dataset[key] = _torch_tensor(
+                        data.reshape(self.dataset_length, self.batch_size, *data.shape[1:]),
                         device=self.device,
                     )
 
@@ -349,6 +418,10 @@ class LazyBatchTransitionDataset:
         hdf5_dataset_path: str | Path,
         max_capacity: int = 100_000_000,
         device: str | torch.device = "cpu",
+        contact_representation: str | None = None,
+        num_contacts_per_env: int | None = None,
+        max_contact_tokens: int | None = None,
+        contact_packing_policy: str | None = None,
     ):
         self.batch_size = batch_size
         self.max_capacity = max_capacity
@@ -362,11 +435,22 @@ class LazyBatchTransitionDataset:
             hdf5_dataset_path,
             max_capacity=max_capacity,
             batch_size=batch_size,
+            contact_representation=contact_representation,
+            num_contacts_per_env=num_contacts_per_env,
+            max_contact_tokens=max_contact_tokens,
+            contact_packing_policy=contact_packing_policy,
         )
         self.dataset_path = metadata["dataset_path"]
         self.dataset_length = int(metadata["dataset_length"])
         self.total_transitions = int(metadata["total_transitions"])
-        self.data_keys = list(metadata["data_keys"])
+        self.storage_data_keys = list(metadata["data_keys"])
+        self.native_projection = cast(NativeContactProjection | None, metadata["native_projection"])
+        self.data_keys = list(self.storage_data_keys)
+        if self.native_projection is not None:
+            collisions = set(self.data_keys).intersection(self.native_projection.output_keys)
+            if collisions:
+                raise ValueError(f"Stored and projected contact fields overlap: {sorted(collisions)}.")
+            self.data_keys.extend(self.native_projection.output_keys)
         self.body_net_contact_force_body_names = metadata["body_net_contact_force_body_names"]
         self.num_transitions_per_trajectory = int(metadata["num_transitions_per_trajectory"])
         self._hdf5 = _LazyHdf5Accessor(self.dataset_path)
@@ -416,8 +500,12 @@ class LazyBatchTransitionDataset:
         """Return one pre-batched sample read from HDF5."""
         batch_indices = self._resolve_batch_indices(index)
         sample: dict[str, torch.Tensor] = {}
-        for key in self.data_keys:
+        for key in self.storage_data_keys:
             sample[key] = self._read_batch_key(key, batch_indices)
+        if self.native_projection is not None:
+            frame_indices = batch_indices * self.batch_size + np.arange(self.batch_size, dtype=np.int64)
+            projected = self._hdf5.project_native_frames(frame_indices, self.native_projection)
+            sample.update({key: _torch_tensor(value) for key, value in projected.items()})
         return sample
 
     def shuffle(self) -> None:
@@ -455,6 +543,10 @@ class TrajectoryDataset(Dataset):
         max_capacity: int = 100_000_000,
         rank: int = 0,
         world_size: int = 1,
+        contact_representation: str | None = None,
+        num_contacts_per_env: int | None = None,
+        max_contact_tokens: int | None = None,
+        contact_packing_policy: str | None = None,
     ):
         if world_size <= 0:
             raise ValueError("world_size must be positive.")
@@ -473,6 +565,12 @@ class TrajectoryDataset(Dataset):
         self.sample_sequence_length = sample_sequence_length
         self.mapping_index2traj = np.zeros((0, 2), dtype=int)
         self.length = 0
+        self._projection_args = {
+            "contact_representation": contact_representation,
+            "num_contacts_per_env": num_contacts_per_env,
+            "max_contact_tokens": max_contact_tokens,
+            "contact_packing_policy": contact_packing_policy,
+        }
 
         self.load_dataset(hdf5_dataset_path)
         self.update_sample_sequence_length(sample_sequence_length)
@@ -481,13 +579,20 @@ class TrajectoryDataset(Dataset):
         """Load a trajectory HDF5 dataset into memory."""
         with h5py.File(_resolve_dataset_path(hdf5_dataset_path), "r", swmr=True, libver="latest") as dataset_file:
             data_group = cast(h5py.Group, dataset_file["data"])
-            validate_contact_token_metadata(data_group)
-            self.body_net_contact_force_body_names = validate_body_net_contact_force_metadata(data_group)
             mode = _decode_attr(data_group.attrs["mode"])
             if mode != "trajectory":
                 raise ValueError(f"TrajectoryDataset requires dataset mode 'trajectory', got {mode!r}.")
-
             states_dataset = cast(h5py.Dataset, data_group["states"])
+            total_transitions = int(
+                data_group.attrs.get("total_transitions", states_dataset.shape[0] * states_dataset.shape[1])
+            )
+            native_projection = _resolve_file_native_projection(
+                dataset_file,
+                total_transitions=total_transitions,
+                **self._projection_args,
+            )
+            self.body_net_contact_force_body_names = validate_body_net_contact_force_metadata(data_group)
+
             num_transitions_per_trajectory = int(states_dataset.shape[1])
             num_trajectories = min(
                 int(np.ceil(self.max_capacity / num_transitions_per_trajectory)),
@@ -503,6 +608,11 @@ class TrajectoryDataset(Dataset):
 
             self.dataset = {}
             self.data_keys = [key for key in data_group.keys() if key != "traj_lengths"]
+            if native_projection is not None:
+                collisions = set(self.data_keys).intersection(native_projection.output_keys)
+                if collisions:
+                    raise ValueError(f"Stored and projected contact fields overlap: {sorted(collisions)}.")
+                self.data_keys.extend(native_projection.output_keys)
             self.trajectory_context = {}
             traj_lengths = None
             for key in data_group.keys():
@@ -516,6 +626,22 @@ class TrajectoryDataset(Dataset):
                     self.dataset[key] = data
                 else:
                     self.dataset[key] = data.reshape(data.shape[0], data.shape[1], -1)
+            if native_projection is not None:
+                frame_indices = (
+                    self.global_trajectory_indices[:, None] * num_transitions_per_trajectory
+                    + np.arange(num_transitions_per_trajectory, dtype=np.int64)[None, :]
+                ).reshape(-1)
+                projected = read_and_project_frames(
+                    cast(h5py.Group, dataset_file["contacts"]["native_pairs"]),
+                    frame_indices,
+                    native_projection,
+                )
+                for key, data in projected.items():
+                    self.dataset[key] = data.reshape(
+                        self.global_trajectory_indices.size,
+                        num_transitions_per_trajectory,
+                        *data.shape[1:],
+                    )
             if "context" in dataset_file and "trajectories" in dataset_file["context"]:
                 trajectory_group = cast(h5py.Group, dataset_file["context"]["trajectories"])
                 collisions = set(self.dataset).intersection(trajectory_group.keys())
@@ -583,6 +709,10 @@ class LazyTrajectoryDataset(Dataset):
         hdf5_dataset_path: str | Path,
         sample_sequence_length: int = 10,
         max_capacity: int = 100_000_000,
+        contact_representation: str | None = None,
+        num_contacts_per_env: int | None = None,
+        max_contact_tokens: int | None = None,
+        contact_packing_policy: str | None = None,
     ):
         self.max_capacity = max_capacity
         self.sample_sequence_length = sample_sequence_length
@@ -591,12 +721,27 @@ class LazyTrajectoryDataset(Dataset):
         self.length = 0
         self._sample_permutation: np.ndarray | None = None
 
-        metadata = _read_hdf5_metadata(hdf5_dataset_path, max_capacity=max_capacity)
+        metadata = _read_hdf5_metadata(
+            hdf5_dataset_path,
+            max_capacity=max_capacity,
+            contact_representation=contact_representation,
+            num_contacts_per_env=num_contacts_per_env,
+            max_contact_tokens=max_contact_tokens,
+            contact_packing_policy=contact_packing_policy,
+        )
         if metadata["mode"] != "trajectory":
             raise ValueError(f"LazyTrajectoryDataset requires dataset mode 'trajectory', got {metadata['mode']!r}.")
 
         self.dataset_path = metadata["dataset_path"]
-        self.data_keys = list(metadata["data_keys"])
+        self.storage_data_keys = list(metadata["data_keys"])
+        self.native_projection = cast(NativeContactProjection | None, metadata["native_projection"])
+        self.data_keys = list(self.storage_data_keys)
+        if self.native_projection is not None:
+            collisions = set(self.data_keys).intersection(self.native_projection.output_keys)
+            if collisions:
+                raise ValueError(f"Stored and projected contact fields overlap: {sorted(collisions)}.")
+            self.data_keys.extend(self.native_projection.output_keys)
+        self.num_transitions_per_trajectory = int(metadata["num_transitions_per_trajectory"])
         self.body_net_contact_force_body_names = metadata["body_net_contact_force_body_names"]
         self.traj_lengths = cast(np.ndarray, metadata["traj_lengths"])
         self._hdf5 = _LazyHdf5Accessor(self.dataset_path)
@@ -647,7 +792,7 @@ class LazyTrajectoryDataset(Dataset):
         traj_index, traj_step_index = self.mapping_index2traj[sample_index]
         step_slice = slice(traj_step_index, traj_step_index + self.sample_sequence_length)
         sample: dict[str, torch.Tensor] = {}
-        for key in self.data_keys:
+        for key in self.storage_data_keys:
             data = np.asarray(self._hdf5.dataset(key)[traj_index, step_slice])
             if key in BOOL_DATASET_KEYS:
                 sample[key] = torch.as_tensor(data.astype(bool), dtype=torch.bool)
@@ -655,6 +800,11 @@ class LazyTrajectoryDataset(Dataset):
                 sample[key] = torch.as_tensor(data.astype("int64"), dtype=torch.long)
             else:
                 sample[key] = torch.as_tensor(data.astype("float32"), dtype=torch.float32)
+        if self.native_projection is not None:
+            frame_start = int(traj_index) * self.num_transitions_per_trajectory + int(traj_step_index)
+            frame_indices = np.arange(frame_start, frame_start + self.sample_sequence_length, dtype=np.int64)
+            projected = self._hdf5.project_native_frames(frame_indices, self.native_projection)
+            sample.update({key: _torch_tensor(value) for key, value in projected.items()})
         for key in self.trajectory_context_keys:
             sample[key] = _torch_tensor(np.asarray(self._hdf5.trajectory_context_dataset(key)[traj_index]))
         return sample
@@ -678,6 +828,10 @@ def create_batch_transition_dataset(
     hdf5_dataset_path: str | Path,
     max_capacity: int = 100_000_000,
     device: str | torch.device = "cpu",
+    contact_representation: str | None = None,
+    num_contacts_per_env: int | None = None,
+    max_contact_tokens: int | None = None,
+    contact_packing_policy: str | None = None,
 ) -> BatchTransitionDataset | LazyBatchTransitionDataset:
     """Create an eager or lazy batched transition dataset."""
     if load_mode == "lazy":
@@ -686,6 +840,10 @@ def create_batch_transition_dataset(
             hdf5_dataset_path=hdf5_dataset_path,
             max_capacity=max_capacity,
             device=device,
+            contact_representation=contact_representation,
+            num_contacts_per_env=num_contacts_per_env,
+            max_contact_tokens=max_contact_tokens,
+            contact_packing_policy=contact_packing_policy,
         )
     if load_mode == "eager":
         return BatchTransitionDataset(
@@ -693,6 +851,10 @@ def create_batch_transition_dataset(
             hdf5_dataset_path=hdf5_dataset_path,
             max_capacity=max_capacity,
             device=device,
+            contact_representation=contact_representation,
+            num_contacts_per_env=num_contacts_per_env,
+            max_contact_tokens=max_contact_tokens,
+            contact_packing_policy=contact_packing_policy,
         )
     raise ValueError(f"Unsupported dataset load_mode: {load_mode!r}. Expected 'eager' or 'lazy'.")
 
@@ -705,6 +867,10 @@ def create_trajectory_dataset(
     max_capacity: int = 100_000_000,
     rank: int = 0,
     world_size: int = 1,
+    contact_representation: str | None = None,
+    num_contacts_per_env: int | None = None,
+    max_contact_tokens: int | None = None,
+    contact_packing_policy: str | None = None,
 ) -> TrajectoryDataset | LazyTrajectoryDataset:
     """Create an eager or lazy trajectory-window dataset."""
     if load_mode == "lazy":
@@ -712,6 +878,10 @@ def create_trajectory_dataset(
             hdf5_dataset_path=hdf5_dataset_path,
             sample_sequence_length=sample_sequence_length,
             max_capacity=max_capacity,
+            contact_representation=contact_representation,
+            num_contacts_per_env=num_contacts_per_env,
+            max_contact_tokens=max_contact_tokens,
+            contact_packing_policy=contact_packing_policy,
         )
     if load_mode == "eager":
         return TrajectoryDataset(
@@ -720,5 +890,9 @@ def create_trajectory_dataset(
             max_capacity=max_capacity,
             rank=rank,
             world_size=world_size,
+            contact_representation=contact_representation,
+            num_contacts_per_env=num_contacts_per_env,
+            max_contact_tokens=max_contact_tokens,
+            contact_packing_policy=contact_packing_policy,
         )
     raise ValueError(f"Unsupported dataset load_mode: {load_mode!r}. Expected 'eager' or 'lazy'.")

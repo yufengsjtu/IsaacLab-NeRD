@@ -46,10 +46,10 @@ algorithm:
     betas: [0.9, 0.999]
 
   dataset:
-    train_dataset_path: ./data/datasets/Anymal-C-Rough-Native-ContactTokens/dataset_train.hdf5
+    train_dataset_path: ./data/datasets/Anymal-C-Rough-Native-v2/dataset_train.hdf5
     valid_datasets:
-      exp_trajectory: ./data/datasets/Anymal-C-Rough-Native-ContactTokens/dataset_valid.hdf5
-      zero_action_trajectory: ./data/datasets/Anymal-C-Rough-Native-ContactTokens/dataset_zero_action_valid.hdf5
+      exp_trajectory: ./data/datasets/Anymal-C-Rough-Native-v2/dataset_valid.hdf5
+      zero_action_trajectory: ./data/datasets/Anymal-C-Rough-Native-v2/dataset_zero_action_valid.hdf5
     max_capacity: 1000000
     load_mode: eager
     num_data_workers: 4
@@ -65,7 +65,7 @@ algorithm:
     contact_context_tolerance: 1.0e-4
     contact_context_normal_tolerance: 1.0e-3
     contact_context_velocity_tolerance: 1.0e-3
-    dataset_path: ./data/datasets/Anymal-C-Rough-Native-ContactTokens/dataset_zero_action_valid.hdf5
+    dataset_path: ./data/datasets/Anymal-C-Rough-Native-v2/dataset_zero_action_valid.hdf5
 
 inputs:
   low_dim: [

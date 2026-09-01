@@ -20,15 +20,15 @@ env:
     # Flat slot width is unused in token mode; capacity is max_contact_tokens.
     num_contacts_per_env: 64
     max_contact_tokens: 64
-    # Metadata only for token mode; packing is implemented in ContactSetEncoder.
+    # Shared by runtime and native-dataset token projection.
     contact_packing_policy: body_round_robin_pair_atomic
 
 algorithm:
   name: SequenceModelTrainer
   num_epochs: 1000
-  num_iters_per_epoch: 5000
+  num_iters_per_epoch: 1250
   sample_sequence_length: 10
-  batch_size: 512
+  batch_size: 1024
   num_valid_batches: 100
   truncate_grad: True
   grad_norm: 1.0
@@ -39,17 +39,19 @@ algorithm:
   optimizer:
     type: Adam
     weight_decay: 0.0
-    lr_start: 1e-4
-    lr_end: 1e-5
+    lr_start: 2e-3
+    lr_end: 2e-4
     lr_schedule: linear
     betas: [0.9, 0.999]
 
   dataset:
-    train_dataset_path: ./data/datasets/Anymal-C-Native-ContactTokens/dataset_train.hdf5
+    train_dataset_path: ./data/datasets/Anymal-C-Flat-Native-v2/dataset_train.hdf5
     valid_datasets:
-      exp_trajectory: ./data/datasets/Anymal-C-Native-ContactTokens/dataset_valid.hdf5
-      zero_action_trajectory: ./data/datasets/Anymal-C-Native-ContactTokens/dataset_zero_action_valid.hdf5
-    max_capacity: 20000000
+      exp_trajectory: ./data/datasets/Anymal-C-Flat-Native-v2/dataset_valid.hdf5
+      zero_action_trajectory: ./data/datasets/Anymal-C-Flat-Native-v2/dataset_zero_action_valid.hdf5
+      lstm_actuator_zero_action_trajectory: ./data/datasets/Anymal-C-Flat-Native-v2/dataset_lstm_actuator_zero_action_valid.hdf5
+      lstm_actuator_policy_trajectory: ./data/datasets/Anymal-C-Flat-Native-v2/dataset_lstm_actuator_policy_valid.hdf5
+    max_capacity: 10000000
     load_mode: eager
     num_data_workers: 8
 
@@ -58,7 +60,7 @@ algorithm:
     action_mode: joint_f
     rollout_horizon: 10
     num_rollouts: 1024
-    dataset_path: ./data/datasets/Anymal-C-Native-ContactTokens/dataset_zero_action_valid.hdf5
+    dataset_path: ./data/datasets/Anymal-C-Flat-Native-v2/dataset_lstm_actuator_policy_valid.hdf5
 
 inputs:
   low_dim: [

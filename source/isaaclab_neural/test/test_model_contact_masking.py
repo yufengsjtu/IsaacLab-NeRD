@@ -81,6 +81,7 @@ def test_mask_inactive_contact_features_zeros_normalized_padding():
         "contact_masks": torch.tensor([[[True, False]]]),
         "contact_normals": torch.tensor([[[1.0, 2.0, 3.0, -4.0, -5.0, -6.0]]]),
         "contact_depths": torch.tensor([[[0.25, -3.0]]]),
+        "contact_world_id": torch.tensor([0]),
         "states_embedding": torch.ones(1, 1, 4),
     }
 
@@ -88,6 +89,7 @@ def test_mask_inactive_contact_features_zeros_normalized_padding():
 
     torch.testing.assert_close(inputs["contact_normals"], torch.tensor([[[1.0, 2.0, 3.0, 0.0, 0.0, 0.0]]]))
     torch.testing.assert_close(inputs["contact_depths"], torch.tensor([[[0.25, 0.0]]]))
+    torch.testing.assert_close(inputs["contact_world_id"], torch.tensor([0]))
     torch.testing.assert_close(inputs["states_embedding"], torch.ones(1, 1, 4))
 
 
