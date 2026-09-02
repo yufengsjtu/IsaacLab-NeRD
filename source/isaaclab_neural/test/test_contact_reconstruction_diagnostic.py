@@ -6,6 +6,7 @@
 """Tests for contact reconstruction diagnostic edge cases."""
 
 import math
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -14,6 +15,7 @@ import torch
 from isaaclab_neural.eval.contact_reconstruction_diagnostic import (
     aggregate_contact_metrics,
     aggregate_contact_token_metrics,
+    build_solver_cfg,
     contact_metrics,
     contact_token_metrics,
     input_difference_metrics,
@@ -25,6 +27,22 @@ from isaaclab_neural.eval.contact_reconstruction_diagnostic import (
     validate_contact_token_metrics,
 )
 from isaaclab_neural.solvers.neural_solver import NeuralSolver
+
+
+def test_standalone_solver_cfg_propagates_contact_filter() -> None:
+    args = SimpleNamespace(
+        states_frame="body",
+        num_contacts_per_env=64,
+        contact_mode="newton_native",
+        contact_packing_policy="penetration_priority",
+        contact_representation="flat",
+        contact_filter="solver_active",
+        max_contact_tokens=64,
+    )
+
+    solver_cfg = build_solver_cfg(None, args)
+
+    assert solver_cfg.contact_filter == "solver_active"
 
 
 def _inputs(mask: torch.Tensor) -> dict[str, torch.Tensor]:

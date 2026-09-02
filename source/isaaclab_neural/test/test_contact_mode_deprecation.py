@@ -48,6 +48,17 @@ def test_negative_contact_capacity_is_rejected() -> None:
         NerdSolverCfg(contact_mode="newton_native", num_contacts_per_env=-1)
 
 
+def test_solver_active_contact_filter_is_supported() -> None:
+    solver_cfg = NerdSolverCfg(contact_filter="solver_active")
+
+    assert solver_cfg.contact_filter == "solver_active"
+
+
+def test_invalid_contact_filter_is_rejected() -> None:
+    with pytest.raises(ValueError, match="Unsupported contact_filter"):
+        NerdSolverCfg(contact_filter="unsupported")
+
+
 @pytest.mark.parametrize(
     "legacy_call",
     [

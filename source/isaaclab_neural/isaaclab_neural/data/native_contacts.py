@@ -148,7 +148,10 @@ def validate_native_storage(dataset_file: h5py.File, expected_frames: int) -> h5
         if _decode_attr(attrs.get(name)) != expected
     }
     if mismatched:
-        raise ValueError(f"Native-contact dataset must use /contacts/native_pairs schema v2: {mismatched}.")
+        raise ValueError(
+            "Native-contact dataset must use /contacts/native_pairs schema "
+            f"v{NATIVE_CONTACT_DATASET_SCHEMA_VERSION}: {mismatched}."
+        )
     validate_native_group(native_group, expected_frames)
     return native_group
 
@@ -167,6 +170,7 @@ class NativeContactProjection:
     representation: ProjectionRepresentation
     capacity: int
     packing_policy: str
+    contact_filter: str = "none"
 
     @property
     def output_keys(self) -> tuple[str, ...]:
@@ -228,6 +232,7 @@ def resolve_native_projection(
     num_contacts_per_env: int | None,
     max_contact_tokens: int | None,
     contact_packing_policy: str | None,
+    contact_filter: str = "none",
 ) -> NativeContactProjection | None:
     """Resolve requested projection settings and require native storage."""
     del native_pair_count
@@ -242,17 +247,20 @@ def resolve_native_projection(
         return None
     if not has_native_contacts:
         raise ValueError(
-            "A positive contact capacity requires /contacts/native_pairs with native-contact dataset schema v2."
+            "A positive contact capacity requires /contacts/native_pairs with native-contact dataset "
+            f"schema v{NATIVE_CONTACT_DATASET_SCHEMA_VERSION}."
         )
     if contact_representation is None:
         raise ValueError("contact_representation is required when requesting a positive contact capacity.")
+    if contact_filter not in {"none", "solver_active"}:
+        raise ValueError(f"Unsupported contact_filter: {contact_filter!r}.")
     if contact_representation == "flat":
         if flat_capacity <= 0:
             raise ValueError("Native flat projection requires a positive num_contacts_per_env.")
         policy = contact_packing_policy or "penetration_priority"
         if policy not in {"stable_index", "penetration_priority", "force_priority", "random"}:
             raise ValueError(f"Unsupported flat contact_packing_policy: {policy!r}.")
-        return NativeContactProjection("flat", flat_capacity, policy)
+        return NativeContactProjection("flat", flat_capacity, policy, contact_filter)
     if contact_representation == "contact_tokens":
         if token_capacity <= 0:
             raise ValueError("Native contact-token projection requires a positive max_contact_tokens.")
@@ -261,7 +269,7 @@ def resolve_native_projection(
             raise ValueError(
                 "Native contact-token projection requires contact_packing_policy='body_round_robin_pair_atomic'."
             )
-        return NativeContactProjection("contact_tokens", token_capacity, policy)
+        return NativeContactProjection("contact_tokens", token_capacity, policy, contact_filter)
     raise ValueError(f"Unsupported contact_representation: {contact_representation!r}.")
 
 
@@ -377,6 +385,7 @@ def _project_native_pairs(
         frame_ids=frame_ids,
         flat_capacity=projection.capacity if projection.representation == "flat" else None,
         max_contact_tokens=projection.capacity if projection.representation == "contact_tokens" else None,
+        contact_filter=projection.contact_filter,
     )
     if not isinstance(projected, Mapping):
         raise TypeError(f"Native-pair projector must return a mapping, got {type(projected).__name__}.")

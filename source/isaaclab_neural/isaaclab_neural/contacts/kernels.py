@@ -63,7 +63,7 @@ def transform_native_contact_geometry(
     surface0_world[contact_id] = world_surface0
     surface1_world[contact_id] = world_surface1
     surface_separation[contact_id] = (
-        wp.dot(normal[contact_id], world_surface1 - world_surface0) - thickness0[contact_id] - thickness1[contact_id]
+        wp.dot(normal[contact_id], world_point1 - world_point0) - thickness0[contact_id] - thickness1[contact_id]
     )
 
 

@@ -64,6 +64,9 @@ ContactPackingPolicy = Literal[
 ContactRepresentation = Literal["flat", "contact_tokens"]
 """Contact encoding used by the trained neural model."""
 
+ContactFilter = Literal["none", "solver_active"]
+"""Selection applied to Newton native pairs before fixed-capacity packing."""
+
 
 @configclass
 class NerdSolverCfg(NewtonSolverCfg):
@@ -128,6 +131,13 @@ class NerdSolverCfg(NewtonSolverCfg):
     contact_representation: ContactRepresentation = "flat"
     """Contact encoding consumed by the trained model."""
 
+    contact_filter: ContactFilter = "none"
+    """Contact selection applied before packing.
+
+    ``"solver_active"`` keeps native pairs with negative signed surface
+    separation [m]. ``"none"`` preserves all collision candidates.
+    """
+
     max_contact_tokens: int = 64
     """Maximum directed contact tokens per environment when ``contact_representation='contact_tokens'``."""
 
@@ -157,6 +167,8 @@ class NerdSolverCfg(NewtonSolverCfg):
         self.contact_mode = normalize_contact_mode(self.contact_mode)
         if self.num_contacts_per_env < 0:
             raise ValueError("num_contacts_per_env must be non-negative.")
+        if self.contact_filter not in {"none", "solver_active"}:
+            raise ValueError(f"Unsupported contact_filter: {self.contact_filter!r}.")
         if self.contact_representation == "contact_tokens":
             if self.num_contacts_per_env == 0:
                 raise ValueError("contact_representation='contact_tokens' requires a positive contact capacity.")

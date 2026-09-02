@@ -191,6 +191,7 @@ class NewtonNerdManager(NewtonManager):
                 packing_policy=packing_policy,
                 contact_representation=cfg_dict.get("contact_representation", "flat"),
                 max_contact_tokens=int(cfg_dict.get("max_contact_tokens", 64)),
+                contact_filter=cfg_dict.get("contact_filter", "none"),
             )
         cls._nerd_contact_adapter = contact_adapter
 

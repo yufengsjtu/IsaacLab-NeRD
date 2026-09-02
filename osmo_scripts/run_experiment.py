@@ -23,6 +23,8 @@ import h5py
 import numpy as np
 from lib.simple_yaml import load_yaml
 
+NATIVE_CONTACT_DATASET_SCHEMA_VERSION = 3
+
 
 @dataclass
 class DatasetSpec:
@@ -205,7 +207,7 @@ def dataset_cache_complete(
             )
             if native_group is not None:
                 native_metadata_matches = (
-                    int(data_group.attrs.get("dataset_schema_version", -1)) == 2
+                    int(data_group.attrs.get("dataset_schema_version", -1)) == NATIVE_CONTACT_DATASET_SCHEMA_VERSION
                     and data_group.attrs.get("contact_storage_schema") == "native_pairs_csr_v1"
                     and data_group.attrs.get("contact_frame") == "world_v1"
                 )

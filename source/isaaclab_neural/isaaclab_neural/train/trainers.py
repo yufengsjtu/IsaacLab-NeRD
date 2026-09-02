@@ -328,6 +328,7 @@ class VanillaTrainer:
             "num_contacts_per_env": int(getattr(self.neural_solver, "num_contacts_per_env", 0)),
             "max_contact_tokens": int(getattr(self.neural_solver, "max_contact_tokens", 0)),
             "contact_packing_policy": solver_cfg.get("contact_packing_policy"),
+            "contact_filter": solver_cfg.get("contact_filter", "none"),
         }
         self.get_datasets(algo_cfg["dataset"].get("train_dataset_path"), algo_cfg["dataset"].get("valid_datasets"))
         self._validate_force_label_datasets()

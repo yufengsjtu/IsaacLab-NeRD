@@ -46,6 +46,7 @@ class TrainingRolloutEvaluator:
         num_contacts_per_env: int | None = None,
         max_contact_tokens: int | None = None,
         contact_packing_policy: str | None = None,
+        contact_filter: str = "none",
     ):
         self.neural_env = neural_env
         self.device = device
@@ -74,6 +75,7 @@ class TrainingRolloutEvaluator:
                 num_contacts_per_env=num_contacts_per_env,
                 max_contact_tokens=max_contact_tokens,
                 contact_packing_policy=contact_packing_policy,
+                contact_filter=contact_filter,
             )
 
     @torch.no_grad()

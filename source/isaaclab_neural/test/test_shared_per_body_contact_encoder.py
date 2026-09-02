@@ -248,6 +248,7 @@ def test_shared_per_body_model_forwards_contact_token_trajectory_dataset(tmp_pat
     native_contacts["surface_points_0_w"][0, 0] = 0.1
     native_contacts["normal_w"][0, 2] = 1.0
     native_contacts["separation"][0] = -0.01
+    native_contacts["points_1_w"][0, 2] = -0.01
     world_ids = torch.arange(2, dtype=torch.int64)
     write_rollouts_to_hdf5(
         dataset_path,

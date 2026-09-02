@@ -118,6 +118,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         choices=("flat", "contact_tokens"),
         default="flat",
     )
+    parser.add_argument(
+        "--contact-filter",
+        choices=("none", "solver_active"),
+        default="none",
+        help="Native-pair selection applied before contact packing.",
+    )
     parser.add_argument("--max-contact-tokens", type=int, default=64)
     parser.add_argument("--states-frame", choices=("world", "body", "body_translation_only"), default="body")
 
@@ -141,6 +147,7 @@ def build_solver_cfg(checkpoint_path: str | None, args: argparse.Namespace) -> N
             contact_mode=args.contact_mode,
             contact_packing_policy=args.contact_packing_policy,
             contact_representation=args.contact_representation,
+            contact_filter=args.contact_filter,
             max_contact_tokens=args.max_contact_tokens,
         )
     checkpoint = load_checkpoint(checkpoint_path, device="cpu")
@@ -194,6 +201,7 @@ def _resolve_diagnostic_native_projection(
     num_contacts_per_env: int | None,
     max_contact_tokens: int | None,
     contact_packing_policy: str | None,
+    contact_filter: str = "none",
 ) -> NativeContactProjection | None:
     """Resolve the fixed compute projection for an optional native-pair group."""
     data_group = cast(h5py.Group, dataset_file["data"])
@@ -206,6 +214,7 @@ def _resolve_diagnostic_native_projection(
         num_contacts_per_env=num_contacts_per_env,
         max_contact_tokens=max_contact_tokens,
         contact_packing_policy=contact_packing_policy,
+        contact_filter=contact_filter,
     )
 
 
@@ -221,6 +230,7 @@ def load_dataset_batch(
     num_contacts_per_env: int | None = None,
     max_contact_tokens: int | None = None,
     contact_packing_policy: str | None = None,
+    contact_filter: str = "none",
 ) -> dict[str, torch.Tensor]:
     """Load a history window ending at one timestep from consecutive trajectories."""
     if trajectory_start < 0:
@@ -239,6 +249,7 @@ def load_dataset_batch(
             num_contacts_per_env=num_contacts_per_env,
             max_contact_tokens=max_contact_tokens,
             contact_packing_policy=contact_packing_policy,
+            contact_filter=contact_filter,
         )
         missing = sorted(required - set(data_group.keys()))
         if missing:
@@ -312,6 +323,7 @@ def load_random_dataset_batch(
     num_contacts_per_env: int | None = None,
     max_contact_tokens: int | None = None,
     contact_packing_policy: str | None = None,
+    contact_filter: str = "none",
 ) -> tuple[dict[str, torch.Tensor], dict[str, np.ndarray]]:
     """Load random evaluator-compatible history windows."""
     if num_envs <= 0:
@@ -331,6 +343,7 @@ def load_random_dataset_batch(
             num_contacts_per_env=num_contacts_per_env,
             max_contact_tokens=max_contact_tokens,
             contact_packing_policy=contact_packing_policy,
+            contact_filter=contact_filter,
         )
         states = cast(h5py.Dataset, data_group["states"])
         if "traj_lengths" in data_group:
@@ -1037,6 +1050,7 @@ def run_diagnostic(env, args: argparse.Namespace) -> None:
         "num_contacts_per_env": int(getattr(solver, "num_contacts_per_env", args.num_contacts_per_env)),
         "max_contact_tokens": int(getattr(solver, "max_contact_tokens", args.max_contact_tokens)),
         "contact_packing_policy": getattr(contact_adapter, "packing_policy", args.contact_packing_policy),
+        "contact_filter": getattr(solver, "contact_filter", "none"),
     }
     print(
         "[setup] "

@@ -12,11 +12,20 @@ from collections.abc import Mapping
 import torch
 
 from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_FILTER_NONE,
+    CONTACT_FILTER_SOLVER_ACTIVE,
     CONTACT_REPRESENTATION_FLAT,
     CONTACT_REPRESENTATION_TOKENS,
     CONTACT_TOKEN_DIM,
 )
 from isaaclab_neural.contacts.packing import ContactPackingPolicy
+
+
+def native_pair_solver_active_mask(native_pairs: Mapping[str, torch.Tensor]) -> torch.Tensor:
+    """Return whether each recorded pair was included by the Newton MJWarp solver."""
+    if "separation" not in native_pairs:
+        raise ValueError("Solver-active classification requires native field 'separation'.")
+    return native_pairs["separation"] < 0.0
 
 
 def _stable_segment_rank(keys: torch.Tensor) -> torch.Tensor:
@@ -55,6 +64,26 @@ def _segment_exclusive_sum(segment_ids: torch.Tensor, values: torch.Tensor) -> t
     result = torch.empty_like(exclusive)
     result.index_copy_(0, order, exclusive)
     return result
+
+
+def _filter_native_pairs(
+    native_pairs: Mapping[str, torch.Tensor],
+    frame_ids: torch.Tensor,
+    contact_filter: str,
+) -> tuple[Mapping[str, torch.Tensor], torch.Tensor, torch.Tensor]:
+    """Select native pairs admitted by the requested contact filter."""
+    source_indices = torch.arange(frame_ids.shape[0], device=frame_ids.device)
+    if contact_filter == CONTACT_FILTER_NONE:
+        return native_pairs, frame_ids, source_indices
+    if contact_filter != CONTACT_FILTER_SOLVER_ACTIVE:
+        raise ValueError(f"Unsupported contact filter: {contact_filter!r}.")
+    active = native_pairs["separation"] < 0.0
+    indices = torch.nonzero(active, as_tuple=False).reshape(-1)
+    return (
+        {name: value.index_select(0, indices) for name, value in native_pairs.items()},
+        frame_ids.index_select(0, indices),
+        indices,
+    )
 
 
 def _flat_order(native_pairs: Mapping[str, torch.Tensor], packing_policy: ContactPackingPolicy) -> torch.Tensor:
@@ -264,6 +293,7 @@ def project_native_pairs(
     flat_capacity: int | None = None,
     max_contact_tokens: int | None = None,
     return_pair_indices: bool = False,
+    contact_filter: str = CONTACT_FILTER_NONE,
 ) -> dict[str, torch.Tensor]:
     """Project complete native pairs into fixed-capacity model contact fields.
 
@@ -280,6 +310,9 @@ def project_native_pairs(
         max_contact_tokens: Directed tokens per frame for token projection.
         return_pair_indices: Include private source-pair indices for flat
             runtime metadata maintenance.
+        contact_filter: Native-pair selection applied before capacity packing.
+            ``"solver_active"`` keeps pairs with negative Newton MJWarp solver
+            clearance [m].
 
     Returns:
         Original fixed-capacity flat fields, or token, overflow, body-id, and
@@ -295,11 +328,15 @@ def project_native_pairs(
     frame_ids = frame_ids.to(device=pair_world_ids.device, dtype=torch.long)
     if frame_ids.ndim != 1 or frame_ids.shape[0] != pair_world_ids.shape[0]:
         raise ValueError("frame_ids must contain one id per native pair.")
+    native_pairs = dict(native_pairs)
+    if "separation" not in native_pairs:
+        raise ValueError("Native-pair projection requires field 'separation'.")
+    native_pairs, frame_ids, source_pair_indices = _filter_native_pairs(native_pairs, frame_ids, contact_filter)
 
     if representation == CONTACT_REPRESENTATION_FLAT:
         if flat_capacity is None or flat_capacity <= 0:
             raise ValueError("flat_capacity must be positive for flat projection.")
-        return _project_flat(
+        result = _project_flat(
             native_pairs,
             frame_ids,
             num_frames,
@@ -307,6 +344,11 @@ def project_native_pairs(
             packing_policy,
             return_pair_indices,
         )
+        if return_pair_indices:
+            pair_indices = result["_pair_indices"]
+            selected = pair_indices >= 0
+            pair_indices[selected] = source_pair_indices[pair_indices[selected]]
+        return result
     if representation == CONTACT_REPRESENTATION_TOKENS:
         if max_contact_tokens is None or max_contact_tokens <= 0:
             raise ValueError("max_contact_tokens must be positive for token projection.")

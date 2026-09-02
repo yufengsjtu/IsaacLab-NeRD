@@ -48,6 +48,7 @@ def _write_token_dataset(path, *, num_trajectories: int = 5, trajectory_length: 
     )
     native_contacts["normal_w"][:, 2] = 1.0
     native_contacts["separation"] = -torch.arange(1, pair_count + 1, dtype=torch.float32)
+    native_contacts["points_1_w"][:, 2] = native_contacts["separation"]
 
     states = torch.zeros((num_trajectories, trajectory_length, 2), dtype=torch.float32)
     states[..., 0] = torch.arange(num_trajectories, dtype=torch.float32).reshape(-1, 1)
@@ -125,7 +126,7 @@ def test_contact_token_loader_rejects_invalid_native_schema_metadata(tmp_path, m
         else:
             handle["data"].attrs["contact_storage_schema"] = metadata_value
 
-    with pytest.raises(ValueError, match="native_pairs schema v2"):
+    with pytest.raises(ValueError, match="native_pairs schema v3"):
         TrajectoryDataset(
             path,
             sample_sequence_length=2,

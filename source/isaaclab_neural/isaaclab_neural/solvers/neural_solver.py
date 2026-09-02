@@ -65,6 +65,7 @@ class NeuralSolver(SolverBase):
         contact_adapter: NewtonContactAdapter | None = None,
         contact_representation: str = "flat",
         max_contact_tokens: int = 0,
+        contact_filter: str = "none",
     ):
         """
         Args:
@@ -89,6 +90,7 @@ class NeuralSolver(SolverBase):
             contact_mode: Contact source convention. Deprecated ``fixed_ground``
                 inputs warn and are rejected as incompatible.
             contact_adapter: Adapter used by ``newton_native`` mode.
+            contact_filter: Native-pair selection applied before packing.
         """
         self.solver_name = name
         if model is None:
@@ -158,7 +160,16 @@ class NeuralSolver(SolverBase):
         self.contact_mode = normalize_contact_mode(contact_mode)
         self.contact_representation = contact_representation
         self.max_contact_tokens = int(max_contact_tokens)
+        if contact_filter not in {"none", "solver_active"}:
+            raise ValueError(f"Unsupported contact_filter: {contact_filter!r}.")
+        self.contact_filter = contact_filter
         self.contact_adapter = contact_adapter
+        adapter_contact_filter = getattr(contact_adapter, "contact_filter", "none")
+        if contact_adapter is not None and adapter_contact_filter != self.contact_filter:
+            raise ValueError(
+                "NeuralSolver and NewtonContactAdapter must use the same contact_filter: "
+                f"solver={self.contact_filter!r}, adapter={adapter_contact_filter!r}."
+            )
         if self.num_contacts_per_env < 0:
             raise ValueError("num_contacts_per_env must be non-negative.")
         if self.contact_representation == "contact_tokens":

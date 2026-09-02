@@ -214,6 +214,7 @@ class DataGenerationAdapter:
                 packing_policy=solver_cfg.contact_packing_policy,
                 contact_representation=contact_representation,
                 max_contact_tokens=int(getattr(solver_cfg, "max_contact_tokens", 64)),
+                contact_filter=getattr(solver_cfg, "contact_filter", "none"),
             )
 
         if record_body_net_contact_forces:

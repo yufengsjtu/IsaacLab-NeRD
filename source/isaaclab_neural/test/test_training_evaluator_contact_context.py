@@ -402,6 +402,7 @@ def test_strict_eval_projects_flat_contact_history_from_native_dataset(tmp_path)
         contact_representation="flat",
         num_contacts_per_env=2,
         contact_packing_policy="penetration_priority",
+        contact_filter="solver_active",
     )
     trajectories = evaluator._sample_dataset_trajectories(1)
 
@@ -425,6 +426,7 @@ def test_trainer_forwards_native_contact_projection_to_evaluator(monkeypatch):
         "num_contacts_per_env": 64,
         "max_contact_tokens": 0,
         "contact_packing_policy": "penetration_priority",
+        "contact_filter": "solver_active",
     }
 
     trainer._init_evaluator(

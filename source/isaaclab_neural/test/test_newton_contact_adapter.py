@@ -103,7 +103,7 @@ def test_shape_body_ids_accepts_int32_shape_indices():
     torch.testing.assert_close(body_ids, torch.tensor([-1, 7, -1, -1]))
 
 
-def test_surface_offset_moves_effective_contact_point():
+def test_surface_offset_does_not_change_solver_clearance():
     adapter = _adapter()
     adapter._points_to_world = lambda _shapes, points, _state: points
     point0 = torch.tensor([[0.0, 0.0, 0.0]])
@@ -127,7 +127,7 @@ def test_surface_offset_moves_effective_contact_point():
 
     torch.testing.assert_close(surface0, torch.tensor([[0.0, 0.0, -0.1]]))
     torch.testing.assert_close(surface1, point1)
-    torch.testing.assert_close(separation, torch.tensor([0.1]))
+    torch.testing.assert_close(separation, torch.tensor([0.0]))
 
 
 def test_warp_geometry_matches_torch_reference():
@@ -279,6 +279,7 @@ def test_contact_adapter_reports_truncation():
     adapter.num_contacts_per_env = 1
     adapter.max_contact_tokens = 1
     adapter.contact_representation = "flat"
+    adapter.contact_filter = "none"
     adapter.device = torch.device("cpu")
     adapter.packing_policy = "penetration_priority"
     adapter.body_world = [0] * 8
@@ -301,6 +302,7 @@ def test_contact_adapter_reports_truncation():
     adapter._truncated_frames = 0
     adapter._truncation_warning_emitted = False
     adapter._packed_contacts_gpu = torch.zeros((), dtype=torch.long)
+    adapter._filtered_contacts_gpu = torch.zeros((), dtype=torch.long)
     adapter._dropped_contacts_gpu = torch.zeros((), dtype=torch.long)
     adapter._truncated_frames_gpu = torch.zeros((), dtype=torch.long)
     raw = {
@@ -308,7 +310,7 @@ def test_contact_adapter_reports_truncation():
         "shape0": torch.tensor([1, 1]),
         "shape1": torch.tensor([0, 0]),
         "point0_world": torch.zeros(2, 3),
-        "point1_world": torch.zeros(2, 3),
+        "point1_world": torch.tensor([[0.0, 0.0, 0.2], [0.0, 0.0, 0.1]]),
         "normal": torch.tensor([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]]),
         "thickness0": torch.zeros(2),
         "thickness1": torch.zeros(2),
@@ -351,6 +353,9 @@ def test_shared_native_pair_projection_matches_flat_reference():
         "thickness_0": torch.tensor([0.01, 0.02, 0.03, 0.04, 0.05]),
         "thickness_1": torch.tensor([0.11, 0.12, 0.13, 0.14, 0.15]),
     }
+    native_pairs["points_1_w"][:, 2] = -(
+        native_pairs["separation"] + native_pairs["thickness_0"] + native_pairs["thickness_1"]
+    )
 
     actual = project_native_pairs(
         native_pairs,

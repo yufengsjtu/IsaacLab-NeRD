@@ -52,6 +52,7 @@ def make_native_rollouts(
     native_contacts["normal_w"][:, 2] = 1.0
     native_contacts["points_0_w"][:, 0] = frame_ids.to(torch.float32)
     native_contacts["points_1_w"][:, 0] = frame_ids.to(torch.float32) + 0.5
+    native_contacts["points_1_w"][:, 2] = native_contacts["separation"]
     native_contacts["surface_points_0_w"].copy_(native_contacts["points_0_w"])
     native_contacts["surface_points_1_w"].copy_(native_contacts["points_1_w"])
 

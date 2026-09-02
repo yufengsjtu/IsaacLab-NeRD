@@ -49,6 +49,7 @@ def _native_rollouts(*, both_sides_on_first_pair: bool = False) -> dict:
     native_contacts["surface_points_1_w"][:, 0] = torch.tensor([1.5, 2.5])
     native_contacts["points_0_w"].copy_(native_contacts["surface_points_0_w"])
     native_contacts["points_1_w"].copy_(native_contacts["surface_points_1_w"])
+    native_contacts["points_1_w"][:, 2] = native_contacts["separation"]
 
     root_q = torch.zeros((1, 2, 7), dtype=torch.float32)
     root_q[..., 3] = 1.0
@@ -115,6 +116,60 @@ def test_one_native_dataset_projects_to_flat_and_tokens(tmp_path) -> None:
     assert int(token_sample["contact_token_overflow"].item()) == 0
 
 
+def test_solver_active_filter_projects_only_penetrating_pairs(tmp_path) -> None:
+    path = tmp_path / "native.hdf5"
+    rollouts = _native_rollouts()
+    rollouts["native_contacts"]["separation"] = torch.tensor([0.01, -0.1])
+    rollouts["native_contacts"]["points_1_w"][:, 2] = -1.0
+    write_rollouts_to_hdf5(path, rollouts, env_name="Test-Env")
+
+    flat = TrajectoryDataset(
+        path,
+        sample_sequence_length=1,
+        contact_representation="flat",
+        num_contacts_per_env=2,
+        contact_packing_policy="penetration_priority",
+        contact_filter="solver_active",
+    )
+    tokens = TrajectoryDataset(
+        path,
+        sample_sequence_length=1,
+        contact_representation="contact_tokens",
+        max_contact_tokens=4,
+        contact_packing_policy="body_round_robin_pair_atomic",
+        contact_filter="solver_active",
+    )
+
+    flat_sample = flat[0]
+    token_sample = tokens[0]
+    assert flat_sample["contact_masks"].tolist() == [[True, False]]
+    torch.testing.assert_close(flat_sample["contact_depths"], torch.tensor([[-0.1, 0.0]]))
+    assert int(token_sample["contact_tokens"][..., 0].sum()) == 1
+    torch.testing.assert_close(token_sample["contact_tokens"][0, 0, 13], torch.tensor(-0.1))
+
+
+def test_solver_active_filter_uses_recorded_separation() -> None:
+    native_pairs = {
+        name: value for name, value in _native_rollouts()["native_contacts"].items() if name != "frame_counts"
+    }
+    native_pairs["separation"] = torch.tensor([0.0, -1.0e-6])
+    native_pairs["points_1_w"][:, 2] = -1.0
+
+    projected = project_native_pairs(
+        native_pairs,
+        num_frames=1,
+        representation="flat",
+        packing_policy="penetration_priority",
+        flat_capacity=2,
+        return_pair_indices=True,
+        contact_filter="solver_active",
+    )
+
+    assert projected["contact_masks"].tolist() == [[True, False]]
+    torch.testing.assert_close(projected["contact_depths"], torch.tensor([[-1.0e-6, 0.0]]))
+    assert projected["_pair_indices"].tolist() == [[1, -1]]
+
+
 def test_token_projection_matches_pair_atomic_overflow_semantics(tmp_path) -> None:
     path = tmp_path / "native.hdf5"
     write_rollouts_to_hdf5(
@@ -147,6 +202,7 @@ def test_token_round_robin_ranks_are_independent_per_frame() -> None:
     native_pairs["body_slots_1"].fill_(-1)
     native_pairs["world_ids"] = torch.tensor([0, 0, 1, 1])
     native_pairs["separation"] = torch.tensor([-0.4, -0.3, -0.5, -0.1])
+    native_pairs["points_1_w"][:, 2] = native_pairs["separation"]
 
     projected = project_native_pairs(
         native_pairs,

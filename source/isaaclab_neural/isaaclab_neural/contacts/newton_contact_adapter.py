@@ -14,6 +14,8 @@ import warp as wp
 
 from isaaclab_neural.contacts.contact_set_encoder import ContactSetEncoder
 from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_FILTER_NONE,
+    CONTACT_FILTER_SOLVER_ACTIVE,
     CONTACT_REPRESENTATION_FLAT,
     CONTACT_REPRESENTATION_TOKENS,
     CONTACT_TOKEN_DIM,
@@ -24,7 +26,7 @@ from isaaclab_neural.contacts.contact_set_schema import (
     NATIVE_CONTACT_VECTOR_FIELDS,
 )
 from isaaclab_neural.contacts.kernels import transform_native_contact_geometry
-from isaaclab_neural.contacts.native_pair_projector import project_native_pairs
+from isaaclab_neural.contacts.native_pair_projector import native_pair_solver_active_mask, project_native_pairs
 from isaaclab_neural.contacts.packing import ContactPackingPolicy
 from isaaclab_neural.utils import step_profile, torch_utils
 
@@ -49,6 +51,7 @@ class NewtonContactAdapter:
         *,
         contact_representation: str = CONTACT_REPRESENTATION_FLAT,
         max_contact_tokens: int = DEFAULT_MAX_CONTACT_TOKENS,
+        contact_filter: str = CONTACT_FILTER_NONE,
     ):
         self.model = model
         self.num_envs = int(model.world_count)
@@ -60,6 +63,9 @@ class NewtonContactAdapter:
             self.num_contacts_per_env = int(num_contacts_per_env)
         self.num_total_contacts = self.num_envs * self.num_contacts_per_env
         self.packing_policy: ContactPackingPolicy = packing_policy
+        if contact_filter not in {CONTACT_FILTER_NONE, CONTACT_FILTER_SOLVER_ACTIVE}:
+            raise ValueError(f"Unsupported contact_filter: {contact_filter!r}.")
+        self.contact_filter = contact_filter
 
         if device is None:
             self.device = wp.device_to_torch(model.device)
@@ -121,6 +127,7 @@ class NewtonContactAdapter:
         self._truncation_warning_emitted = False
         # Deferred GPU counters (synced only in truncation_summary / warnings).
         self._packed_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
+        self._filtered_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
         self._dropped_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
         self._truncated_frames_gpu = torch.zeros((), dtype=torch.long, device=self.device)
         self._torch_view_cache: dict[int, tuple[object, torch.Tensor]] = {}
@@ -240,6 +247,13 @@ class NewtonContactAdapter:
         with step_profile.section("adapter_read_raw"):
             raw = self._read_raw_contacts(contacts, contact_count, state)
         self._native_contact_pairs = self._build_native_contact_pairs(raw, state)
+        frame_raw = self._native_contact_pairs["world_ids"].shape[0]
+        frame_raw_tensor = torch.as_tensor(frame_raw, device=self.device, dtype=torch.long)
+        if self.contact_filter == CONTACT_FILTER_SOLVER_ACTIVE:
+            frame_eligible = native_pair_solver_active_mask(self._native_contact_pairs).sum()
+        else:
+            frame_eligible = frame_raw_tensor
+        self._filtered_contacts_gpu += frame_raw_tensor - frame_eligible
         if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
             if state is None:
                 raise ValueError("Contact token encoding requires the current Newton State.")
@@ -250,13 +264,14 @@ class NewtonContactAdapter:
                     representation=self.contact_representation,
                     packing_policy="body_round_robin_pair_atomic",
                     max_contact_tokens=self.max_contact_tokens,
+                    contact_filter=self.contact_filter,
                 )
                 self.contact_tokens.copy_(projected["contact_tokens"])
                 self.contact_token_overflow.copy_(projected["contact_token_overflow"])
                 self.contact_token_body_ids.copy_(projected["contact_token_body_ids"])
             valid_tokens = (self.contact_tokens[..., 0] > 0.5).sum()
             overflow_sum = self.contact_token_overflow.sum()
-            self._raw_contacts_total += contact_count
+            self._raw_contacts_total += frame_raw
             self._packed_contacts_gpu += valid_tokens.to(dtype=torch.long)
             dropped = overflow_sum.to(dtype=torch.long)
             self._dropped_contacts_gpu += dropped
@@ -278,6 +293,7 @@ class NewtonContactAdapter:
                 packing_policy=self.packing_policy,
                 flat_capacity=self.num_contacts_per_env,
                 return_pair_indices=True,
+                contact_filter=self.contact_filter,
             )
             self.contact_masks.copy_(projected["contact_masks"])
             self.contact_normals.copy_(
@@ -306,9 +322,8 @@ class NewtonContactAdapter:
                 selected1[selected] = valid_body1
                 self.contact_body_ids_0[selected0] = self.body_local_ids[body0[valid_body0]]
                 self.contact_body_ids_1[selected1] = self.body_local_ids[body1[valid_body1]]
-        frame_raw = self._native_contact_pairs["world_ids"].shape[0]
         packed = self.contact_masks.sum()
-        dropped = torch.as_tensor(frame_raw, device=self.device, dtype=torch.long) - packed
+        dropped = frame_eligible - packed
         self._raw_contacts_total += frame_raw
         self._packed_contacts_gpu += packed.to(dtype=torch.long)
         self._dropped_contacts_gpu += dropped
@@ -446,6 +461,7 @@ class NewtonContactAdapter:
     def truncation_summary(self) -> dict[str, int | float]:
         """Return cumulative native contact packing statistics."""
         packed_gpu = int(getattr(self, "_packed_contacts_gpu", torch.tensor(0)).item())
+        filtered_gpu = int(getattr(self, "_filtered_contacts_gpu", torch.tensor(0)).item())
         dropped_gpu = int(getattr(self, "_dropped_contacts_gpu", torch.tensor(0)).item())
         truncated_gpu = int(getattr(self, "_truncated_frames_gpu", torch.tensor(0)).item())
         packed = self._packed_contacts_total + packed_gpu
@@ -465,6 +481,8 @@ class NewtonContactAdapter:
             "truncated_frames": truncated,
             "truncated_frame_ratio": truncated / max(self._contact_frames, 1),
         }
+        if self.contact_filter == CONTACT_FILTER_SOLVER_ACTIVE:
+            summary["filtered_contacts"] = filtered_gpu
         if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
             summary.update(
                 {
@@ -720,7 +738,7 @@ class NewtonContactAdapter:
         surface1_local = point1 if offset1 is None else point1 + offset1
         surface0_world = self._points_to_world(shape0, surface0_local, state)
         surface1_world = self._points_to_world(shape1, surface1_local, state)
-        normal_distance = torch.sum(normal * (surface1_world - surface0_world), dim=-1)
+        normal_distance = torch.sum(normal * (point1_world - point0_world), dim=-1)
         surface_separation = normal_distance - thickness0 - thickness1
         return surface_separation, point0_world, point1_world, surface0_world, surface1_world
 

@@ -52,6 +52,7 @@ def _resolve_file_native_projection(
     num_contacts_per_env: int | None,
     max_contact_tokens: int | None,
     contact_packing_policy: str | None,
+    contact_filter: str = "none",
 ) -> NativeContactProjection | None:
     """Validate native storage and resolve the requested read-boundary projection."""
     data_group = cast(h5py.Group, dataset_file["data"])
@@ -59,13 +60,14 @@ def _resolve_file_native_projection(
     native_group = validate_native_storage(dataset_file, total_transitions)
     has_native = native_group is not None
     if "body_net_contact_forces_w" in data_group and not has_native:
-        raise ValueError("body_net_contact_forces_w labels require /contacts/native_pairs schema v2.")
+        raise ValueError("body_net_contact_forces_w labels require compatible /contacts/native_pairs storage.")
     return resolve_native_projection(
         has_native_contacts=has_native,
         contact_representation=contact_representation,
         num_contacts_per_env=num_contacts_per_env,
         max_contact_tokens=max_contact_tokens,
         contact_packing_policy=contact_packing_policy,
+        contact_filter=contact_filter,
     )
 
 
@@ -156,6 +158,7 @@ def _read_hdf5_metadata(
     num_contacts_per_env: int | None = None,
     max_contact_tokens: int | None = None,
     contact_packing_policy: str | None = None,
+    contact_filter: str = "none",
 ) -> dict[str, Any]:
     """Read dataset metadata without materializing rollout arrays."""
     dataset_path = _resolve_dataset_path(hdf5_dataset_path)
@@ -173,6 +176,7 @@ def _read_hdf5_metadata(
             num_contacts_per_env=num_contacts_per_env,
             max_contact_tokens=max_contact_tokens,
             contact_packing_policy=contact_packing_policy,
+            contact_filter=contact_filter,
         )
         body_net_contact_force_body_names = validate_body_net_contact_force_metadata(data_group)
         data_keys = [key for key in data_group.keys() if key != "traj_lengths"]
@@ -311,6 +315,7 @@ class BatchTransitionDataset:
         num_contacts_per_env: int | None = None,
         max_contact_tokens: int | None = None,
         contact_packing_policy: str | None = None,
+        contact_filter: str = "none",
     ):
         self.batch_size = batch_size
         self.max_capacity = max_capacity
@@ -325,6 +330,7 @@ class BatchTransitionDataset:
             "num_contacts_per_env": num_contacts_per_env,
             "max_contact_tokens": max_contact_tokens,
             "contact_packing_policy": contact_packing_policy,
+            "contact_filter": contact_filter,
         }
 
         self.load_dataset(hdf5_dataset_path)
@@ -422,6 +428,7 @@ class LazyBatchTransitionDataset:
         num_contacts_per_env: int | None = None,
         max_contact_tokens: int | None = None,
         contact_packing_policy: str | None = None,
+        contact_filter: str = "none",
     ):
         self.batch_size = batch_size
         self.max_capacity = max_capacity
@@ -439,6 +446,7 @@ class LazyBatchTransitionDataset:
             num_contacts_per_env=num_contacts_per_env,
             max_contact_tokens=max_contact_tokens,
             contact_packing_policy=contact_packing_policy,
+            contact_filter=contact_filter,
         )
         self.dataset_path = metadata["dataset_path"]
         self.dataset_length = int(metadata["dataset_length"])
@@ -547,6 +555,7 @@ class TrajectoryDataset(Dataset):
         num_contacts_per_env: int | None = None,
         max_contact_tokens: int | None = None,
         contact_packing_policy: str | None = None,
+        contact_filter: str = "none",
     ):
         if world_size <= 0:
             raise ValueError("world_size must be positive.")
@@ -570,6 +579,7 @@ class TrajectoryDataset(Dataset):
             "num_contacts_per_env": num_contacts_per_env,
             "max_contact_tokens": max_contact_tokens,
             "contact_packing_policy": contact_packing_policy,
+            "contact_filter": contact_filter,
         }
 
         self.load_dataset(hdf5_dataset_path)
@@ -713,6 +723,7 @@ class LazyTrajectoryDataset(Dataset):
         num_contacts_per_env: int | None = None,
         max_contact_tokens: int | None = None,
         contact_packing_policy: str | None = None,
+        contact_filter: str = "none",
     ):
         self.max_capacity = max_capacity
         self.sample_sequence_length = sample_sequence_length
@@ -728,6 +739,7 @@ class LazyTrajectoryDataset(Dataset):
             num_contacts_per_env=num_contacts_per_env,
             max_contact_tokens=max_contact_tokens,
             contact_packing_policy=contact_packing_policy,
+            contact_filter=contact_filter,
         )
         if metadata["mode"] != "trajectory":
             raise ValueError(f"LazyTrajectoryDataset requires dataset mode 'trajectory', got {metadata['mode']!r}.")
@@ -832,6 +844,7 @@ def create_batch_transition_dataset(
     num_contacts_per_env: int | None = None,
     max_contact_tokens: int | None = None,
     contact_packing_policy: str | None = None,
+    contact_filter: str = "none",
 ) -> BatchTransitionDataset | LazyBatchTransitionDataset:
     """Create an eager or lazy batched transition dataset."""
     if load_mode == "lazy":
@@ -844,6 +857,7 @@ def create_batch_transition_dataset(
             num_contacts_per_env=num_contacts_per_env,
             max_contact_tokens=max_contact_tokens,
             contact_packing_policy=contact_packing_policy,
+            contact_filter=contact_filter,
         )
     if load_mode == "eager":
         return BatchTransitionDataset(
@@ -855,6 +869,7 @@ def create_batch_transition_dataset(
             num_contacts_per_env=num_contacts_per_env,
             max_contact_tokens=max_contact_tokens,
             contact_packing_policy=contact_packing_policy,
+            contact_filter=contact_filter,
         )
     raise ValueError(f"Unsupported dataset load_mode: {load_mode!r}. Expected 'eager' or 'lazy'.")
 
@@ -871,6 +886,7 @@ def create_trajectory_dataset(
     num_contacts_per_env: int | None = None,
     max_contact_tokens: int | None = None,
     contact_packing_policy: str | None = None,
+    contact_filter: str = "none",
 ) -> TrajectoryDataset | LazyTrajectoryDataset:
     """Create an eager or lazy trajectory-window dataset."""
     if load_mode == "lazy":
@@ -882,6 +898,7 @@ def create_trajectory_dataset(
             num_contacts_per_env=num_contacts_per_env,
             max_contact_tokens=max_contact_tokens,
             contact_packing_policy=contact_packing_policy,
+            contact_filter=contact_filter,
         )
     if load_mode == "eager":
         return TrajectoryDataset(
@@ -894,5 +911,6 @@ def create_trajectory_dataset(
             num_contacts_per_env=num_contacts_per_env,
             max_contact_tokens=max_contact_tokens,
             contact_packing_policy=contact_packing_policy,
+            contact_filter=contact_filter,
         )
     raise ValueError(f"Unsupported dataset load_mode: {load_mode!r}. Expected 'eager' or 'lazy'.")
