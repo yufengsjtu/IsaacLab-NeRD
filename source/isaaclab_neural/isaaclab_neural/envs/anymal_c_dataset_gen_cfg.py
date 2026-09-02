@@ -7,9 +7,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
+from typing import TYPE_CHECKING
+
+import torch
 
 import isaaclab.envs.mdp as base_mdp
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
@@ -22,6 +28,10 @@ from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c.flat_env_c
 from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c.rough_env_cfg import AnymalCRoughEnvCfg
 
 from isaaclab_assets.robots.anymal import ANYDRIVE_3_SIMPLE_ACTUATOR_CFG
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedRLEnv
+    from isaaclab.terrains import TerrainImporter
 
 
 @configclass
@@ -58,6 +68,37 @@ class ObservationsCfg:
 ROOT_HEIGHT_MINIMUM = 0.4
 KP_RANGE = (30.0, 200.0)
 KD_RANGE = (0.0, 4.0)
+
+
+def _sample_terrain_levels_uniform(env: ManagerBasedRLEnv, env_ids: Sequence[int]) -> torch.Tensor:
+    """Uniformly resample terrain levels while preserving each environment's terrain type."""
+    terrain: TerrainImporter = env.scene.terrain
+    terrain.terrain_levels[env_ids] = torch.randint_like(terrain.terrain_levels[env_ids], terrain.max_terrain_level)
+    terrain.env_origins[env_ids] = terrain.terrain_origins[
+        terrain.terrain_levels[env_ids], terrain.terrain_types[env_ids]
+    ]
+    return torch.mean(terrain.terrain_levels.float())
+
+
+def _raise_root_above_terrain(
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int],
+    root_clearance: float,
+) -> None:
+    """Place the root above the highest terrain point under the height scan."""
+    robot = env.scene["robot"]
+    # Root/joint reset writes invalidate FK; refresh it before the attached scanner is moved.
+    _ = robot.data.body_link_pose_w.torch
+
+    height_scanner = env.scene["height_scanner"]
+    height_scanner.update(dt=0.0, force_recompute=True)
+    terrain_height = height_scanner.data.ray_hits_w.torch[env_ids, :, 2].amax(dim=1)
+
+    root_pose = robot.data.root_pose_w.torch[env_ids].clone()
+    root_pose[:, 2] = terrain_height + root_clearance
+    robot.write_root_pose_to_sim_index(root_pose=root_pose, env_ids=env_ids)
+    # Make the corrected pose visible to collision detection before recording starts.
+    _ = robot.data.body_link_pose_w.torch
 
 
 @configclass
@@ -107,13 +148,26 @@ class AnymalCDatasetGenFlatEnvCfg(AnymalCFlatEnvCfg):
 class AnymalCDatasetGenRoughEnvCfg(AnymalCRoughEnvCfg):
     """Anymal-C rough config for NeRD dataset generation.
 
-    This keeps the upstream rough-terrain observation and terrain curriculum
-    setup so policy-driven collection can use rough-terrain policies, while
-    replacing the actuator with a simple explicit actuator for data generation.
+    This keeps the upstream rough-terrain observations and generated terrain
+    layout, but samples terrain levels uniformly at each trajectory reset.
     """
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        self.scene.terrain.max_init_terrain_level = None
+        self.curriculum.terrain_levels = CurrTerm(func=_sample_terrain_levels_uniform)
+        # Start near platform edges so rough contacts appear within short rollouts.
+        self.events.reset_base.params["pose_range"]["x"] = (-1.0, 1.0)
+        self.events.reset_base.params["pose_range"]["y"] = (-1.0, 1.0)
+        setattr(
+            self.events,
+            "raise_base_above_terrain",
+            EventTerm(
+                func=_raise_root_above_terrain,
+                mode="reset",
+                params={"root_clearance": 0.61},
+            ),
+        )
         # Disable contact-sensor related reward/termination terms (not working with NeRD solver)
         setattr(self.terminations, "base_contact", None)
         setattr(self.rewards, "feet_air_time", None)
