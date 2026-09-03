@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import time
@@ -402,7 +403,7 @@ def _upload_object(connection, container: str, source: Path, object_name: str, *
     connection.put_object(
         container,
         object_name,
-        contents=manifest_bytes,
+        contents=io.BytesIO(manifest_bytes),
         content_length=len(manifest_bytes),
         content_type="application/json",
         query_string="multipart-manifest=put",

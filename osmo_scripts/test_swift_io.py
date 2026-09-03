@@ -190,6 +190,34 @@ class TestSwiftIO(unittest.TestCase):
             )
             self.assertEqual(destination.read_bytes(), source.read_bytes())
 
+    def test_large_object_manifest_payload_is_retryable(self):
+        class RetryManifestConnection(FakeConnection):
+            def __init__(self):
+                super().__init__()
+                self.retry_payload: bytes | None = None
+
+            def put_object(self, container: str, object_name: str, **kwargs):
+                contents = kwargs["contents"]
+                if kwargs.get("query_string") == "multipart-manifest=put":
+                    first_payload = contents.read()
+                    contents.seek(0)
+                    self.retry_payload = contents.read()
+                    contents.seek(0)
+                    assert self.retry_payload == first_payload
+                return super().put_object(container, object_name, **kwargs)
+
+        connection = RetryManifestConnection()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "dataset.hdf5"
+            source.write_bytes(b"0123456789")
+            with (
+                mock.patch.object(swift_io, "connect", return_value=(connection, "https://auth")),
+                mock.patch.dict(os.environ, {"SWIFT_SEGMENT_SIZE_BYTES": "4"}, clear=False),
+            ):
+                swift_io.upload_file("datasets", source, "cache/dataset.hdf5")
+
+        self.assertIsNotNone(connection.retry_payload)
+
     def test_upload_resume_replaces_same_size_corrupt_object(self):
         connection = FakeConnection()
         connection.objects[("datasets", "cache/dataset.hdf5")] = b"xxxx"
