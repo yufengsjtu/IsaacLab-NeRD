@@ -7,6 +7,7 @@ from .abstract_contact import AbstractContact
 from .contact_set_encoder import (
     ContactSetEncoder,
     contact_token_validity_mask,
+    gather_owner_body_q,
     mask_invalid_contact_tokens,
     transform_contact_tokens_to_body_frame,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "collision_detection_fixed_ground",
     "contact_token_validity_mask",
     "find_ground_shape_index",
+    "gather_owner_body_q",
     "get_contact_order",
     "mask_invalid_contact_tokens",
     "resolve_contact_packing_policy",

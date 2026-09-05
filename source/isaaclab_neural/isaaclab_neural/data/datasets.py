@@ -31,7 +31,7 @@ INTEGER_DATASET_KEYS = {
     "contact_token_world_ids",
 }
 DatasetLoadMode = Literal["eager", "lazy"]
-STRUCTURED_DATASET_KEYS = {"contact_tokens", "body_net_contact_forces_w"}
+STRUCTURED_DATASET_KEYS = {"contact_tokens", "body_net_contact_forces_w", "primary_body_q"}
 
 
 def validate_native_only_data_group(data_group: h5py.Group) -> None:

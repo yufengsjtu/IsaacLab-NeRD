@@ -15,6 +15,7 @@ import warp as wp
 
 from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_REPRESENTATION_TOKENS,
+    CONTACT_TOKEN_BODY_SLOT_INDEX,
     CONTACT_TOKEN_DIM,
     CONTACT_TOKEN_GEOMETRY_SLICE,
     CONTACT_TOKEN_VALID_INDEX,
@@ -434,13 +435,50 @@ class ContactSetEncoder:
         return torch.where(dynamic.unsqueeze(-1), value, torch.zeros_like(value))
 
 
+def gather_owner_body_q(primary_body_q: torch.Tensor, contact_tokens: torch.Tensor) -> torch.Tensor:
+    """Gather per-token owner poses from per-primary-body poses.
+
+    Args:
+        primary_body_q: Primary-body poses ``[B, T, P, 7]`` or ``[B, P, 7]``.
+        contact_tokens: Packed tokens ``[B, T, K, D]`` or ``[B, K, D]``.
+
+    Returns:
+        Owner poses matching the token layout, shape ``[..., 7]``.
+    """
+    original_token_ndim = contact_tokens.ndim
+    if contact_tokens.ndim == 3:
+        contact_tokens = contact_tokens.unsqueeze(1)
+    if primary_body_q.ndim == 3:
+        primary_body_q = primary_body_q.unsqueeze(1)
+    if primary_body_q.ndim != 4 or primary_body_q.shape[-1] != 7:
+        raise ValueError(f"primary_body_q must have shape [B, T, P, 7], got {tuple(primary_body_q.shape)}.")
+    if contact_tokens.shape[:2] != primary_body_q.shape[:2]:
+        raise ValueError(
+            "primary_body_q batch/time must match contact_tokens, "
+            f"got poses {tuple(primary_body_q.shape)} and tokens {tuple(contact_tokens.shape)}."
+        )
+    num_primary = int(primary_body_q.shape[2])
+    if num_primary <= 0:
+        raise ValueError("primary_body_q must contain at least one primary body.")
+    slots = contact_tokens[..., CONTACT_TOKEN_BODY_SLOT_INDEX].to(dtype=torch.long)
+    safe = slots.clamp(min=0, max=num_primary - 1)
+    gathered = torch.gather(primary_body_q, 2, safe.unsqueeze(-1).expand(*safe.shape, 7))
+    if original_token_ndim == 3:
+        return gathered.squeeze(1)
+    return gathered
+
+
 def transform_contact_tokens_to_body_frame(
     contact_tokens: torch.Tensor,
     root_body_q: torch.Tensor,
     *,
     translation_only: bool = False,
 ) -> torch.Tensor:
-    """Transform token geometry channels from world frame into the root body frame."""
+    """Transform token geometry channels from world frame into a body frame.
+
+    ``root_body_q`` may be a shared pose per frame ``[B, T, 7]`` or a per-token
+    pose ``[B, T, K, 7]``.
+    """
     if contact_tokens is None:
         return contact_tokens
     if contact_tokens.numel() == 0:
@@ -452,13 +490,29 @@ def transform_contact_tokens_to_body_frame(
         root_body_q = root_body_q.unsqueeze(0)
     if contact_tokens.ndim == 3:
         contact_tokens = contact_tokens.unsqueeze(1)
-        root_body_q = root_body_q.unsqueeze(1)
+        if root_body_q.ndim == 2:
+            root_body_q = root_body_q.unsqueeze(1)
+        elif root_body_q.ndim == 3 and root_body_q.shape[-1] == 7 and root_body_q.shape[1] == contact_tokens.shape[2]:
+            root_body_q = root_body_q.unsqueeze(1)
 
     batch, time, tokens, _ = contact_tokens.shape
     valid = contact_tokens[..., CONTACT_TOKEN_VALID_INDEX] > 0.5
     flat_tokens = contact_tokens.reshape(batch * time * tokens, CONTACT_TOKEN_DIM)
     flat_valid = valid.reshape(-1)
-    flat_root = root_body_q.reshape(batch * time, 7).repeat_interleave(tokens, dim=0)
+    if root_body_q.ndim == 4:
+        if root_body_q.shape[:3] != (batch, time, tokens) or root_body_q.shape[-1] != 7:
+            raise ValueError(
+                "Per-token body poses must have shape [B, T, K, 7] matching contact_tokens, "
+                f"got {tuple(root_body_q.shape)} for tokens {tuple(contact_tokens.shape)}."
+            )
+        flat_root = root_body_q.reshape(batch * time * tokens, 7)
+    else:
+        if root_body_q.shape[:2] != (batch, time) or root_body_q.shape[-1] != 7:
+            raise ValueError(
+                "Shared body poses must have shape [B, T, 7], "
+                f"got {tuple(root_body_q.shape)} for tokens {tuple(contact_tokens.shape)}."
+            )
+        flat_root = root_body_q.reshape(batch * time, 7).repeat_interleave(tokens, dim=0)
 
     geometry = flat_tokens[:, CONTACT_TOKEN_GEOMETRY_SLICE].reshape(-1, 13)
     points = geometry[:, :3]

@@ -280,6 +280,19 @@ def _validate_rollout_arrays(arrays: Mapping[str, Any], *, has_native_contacts: 
         if not np.issubdtype(forces.dtype, np.floating):
             raise ValueError(f"Rollout field {force_key!r} must use a floating dtype, got {forces.dtype}.")
 
+    pose_key = "primary_body_q"
+    if pose_key in arrays:
+        if not has_native_contacts:
+            raise ValueError(f"Rollout field {pose_key!r} requires top-level native_contacts.")
+        poses = arrays[pose_key]
+        if poses.ndim != 4 or poses.shape[-1] != 7 or poses.shape[-2] <= 0:
+            raise ValueError(
+                f"Rollout field {pose_key!r} must have shape "
+                f"[trajectories, steps, num_primary_bodies, 7], got {poses.shape}."
+            )
+        if not np.issubdtype(poses.dtype, np.floating):
+            raise ValueError(f"Rollout field {pose_key!r} must use a floating dtype, got {poses.dtype}.")
+
     states = arrays["states"]
     if states.ndim < 3:
         raise ValueError(f"states must have shape [trajectories, steps, features], got {states.shape}.")

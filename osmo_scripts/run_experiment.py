@@ -238,6 +238,20 @@ def dataset_cache_complete(
                         f"{missing_projection_context}."
                     )
                     return False
+                if str(experiment.get("contact_token_frame", "root")) == "owner":
+                    pose_key = "primary_body_q"
+                    expected_primary_bodies = int(experiment.get("num_primary_bodies", 17))
+                    pose_dataset = cast(h5py.Dataset, data_group[pose_key]) if pose_key in data_group else None
+                    if (
+                        pose_dataset is None
+                        or pose_dataset.ndim != 4
+                        or pose_dataset.shape[:2] != step_shape
+                        or pose_dataset.shape[-2:] != (expected_primary_bodies, 7)
+                    ):
+                        print(
+                            f"Rejected cached dataset without owner-frame primary_body_q poses: {dataset_path}"
+                        )
+                        return False
             if experiment.get("record_body_net_contact_forces", False):
                 force_key = "body_net_contact_forces_w"
                 expected_primary_bodies = int(experiment.get("num_primary_bodies", 17))

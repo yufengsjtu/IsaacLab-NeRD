@@ -150,3 +150,62 @@ def test_force_preset_rejects_old_cache_without_force_labels(tmp_path: Path) -> 
         handle["data"].attrs["body_net_contact_force_body_names"] = [f"body_{index}" for index in range(17)]
 
     assert dataset_cache_complete(tmp_path, [dataset_path.name], experiment)
+
+
+def test_owner_frame_preset_requires_primary_body_q_cache(tmp_path: Path) -> None:
+    cfg = _load_yaml(
+        CFG_DIR / "transformer_rough_native_shared_per_body_contact_force_rope_active_filter_owner_body.yaml"
+    )
+    preset = _load_yaml(
+        PRESET_DIR / "anymal_rough_newton_native_shared_per_body_contact_force_rope_active_filter_owner_body.yaml"
+    )
+    solver_cfg = cfg["env"]["neural_solver_cfg"]
+    experiment = preset["experiment"]
+
+    assert solver_cfg["contact_token_frame"] == "owner"
+    assert solver_cfg["contact_filter"] == "solver_active"
+    assert solver_cfg["contact_representation"] == "contact_tokens"
+    assert experiment["contact_token_frame"] == "owner"
+    assert experiment["contact_filter"] == "solver_active"
+    assert Path(experiment["train_cfg"]).name.endswith("owner_body.yaml")
+    assert preset["workflow"]["dataset_subdir"] == "anymal-c-rough-native-force-v3-owner-body"
+
+    dataset_path = tmp_path / "dataset_train.hdf5"
+    experiment = {
+        "env_name": "owner-frame-test",
+        "train_transitions": 4,
+        "valid_transitions": 2,
+        "trajectory_length": 2,
+        "num_contacts_per_env": 64,
+        "contact_token_frame": "owner",
+        "num_primary_bodies": 17,
+        "dataset_specs": [
+            {
+                "filename": dataset_path.name,
+                "seed": 0,
+                "split": "train",
+                "task_kind": "default",
+                "zero_actions": False,
+                "use_policy": False,
+            }
+        ],
+    }
+    with h5py.File(dataset_path, "w") as handle:
+        data = handle.create_group("data")
+        data.attrs["mode"] = "trajectory"
+        data.attrs["env"] = experiment["env_name"]
+        data.attrs["total_transitions"] = 4
+        data.create_dataset("states", shape=(2, 2, 3), dtype="f4")
+        data.create_dataset("next_states", shape=(2, 2, 3), dtype="f4")
+        data.create_dataset("joint_f", shape=(2, 2, 3), dtype="f4")
+        data.create_dataset("root_body_q", shape=(2, 2, 7), dtype="f4")
+        data.create_dataset("root_body_qd", shape=(2, 2, 6), dtype="f4")
+        data.create_dataset("gravity_dir", shape=(2, 2, 3), dtype="f4")
+
+    assert not dataset_cache_complete(tmp_path, [dataset_path.name], experiment)
+
+    with h5py.File(dataset_path, "a") as handle:
+        handle["data"].create_dataset("primary_body_q", shape=(2, 2, 17, 7), dtype="f4")
+
+    # Native-pair metadata is still required for contact datasets.
+    assert not dataset_cache_complete(tmp_path, [dataset_path.name], experiment)

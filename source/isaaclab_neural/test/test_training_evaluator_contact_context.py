@@ -379,6 +379,44 @@ def test_strict_history_context_requires_preload_support():
         )
 
 
+def test_owner_frame_history_preload_requires_primary_body_q():
+    tokens = torch.zeros(2, 4, 17)
+    evaluator = _evaluator(_token_contacts(tokens))
+    evaluator.history_length = 3
+    evaluator.device = torch.device("cpu")
+    evaluator.neural_env.solver_neural.contact_token_frame = "owner"
+    evaluator.neural_env.solver_neural.num_envs = 2
+    evaluator.neural_env.solver_neural.num_states_history = 3
+    evaluator.neural_env.solver_neural.root_body_q = torch.zeros(2, 7)
+    evaluator.neural_env.solver_neural.states = torch.zeros(2, 4)
+    evaluator.neural_env.solver_neural.joint_f = torch.zeros(2, 3)
+    evaluator.neural_env.solver_neural.gravity_dir = torch.zeros(2, 3)
+    evaluator.neural_env.solver_neural.primary_body_q = torch.zeros(2, 17, 7)
+
+    trajectories = _trajectories(_token_contacts(tokens))
+    trajectories["root_body_q"] = torch.zeros(2, 3, 7)
+    trajectories["states"] = torch.zeros(2, 3, 4)
+    trajectories["joint_f"] = torch.zeros(2, 3, 3)
+    trajectories["gravity_dir"] = torch.zeros(2, 3, 3)
+    trajectories["contact_tokens"] = torch.zeros(2, 3, 4, 17)
+    trajectories["contact_token_overflow"] = torch.zeros(2, 3, dtype=torch.long)
+
+    with pytest.raises(ValueError, match="primary_body_q"):
+        evaluator._history_offset(trajectories)
+
+    captured = {}
+
+    def _preload(history):
+        captured.update(history)
+
+    evaluator.neural_env.solver_neural.preload_states_history = _preload
+    trajectories["primary_body_q"] = torch.zeros(2, 3, 17, 7)
+    assert evaluator._history_offset(trajectories) == 2
+    evaluator._preload_history(trajectories, start=0, end=2, history_offset=2)
+    assert "primary_body_q" in captured
+    assert captured["primary_body_q"].shape == (2, 2, 17, 7)
+
+
 def test_strict_eval_projects_flat_contact_history_from_native_dataset(tmp_path):
     dataset_path = tmp_path / "native.hdf5"
     write_rollouts_to_hdf5(

@@ -342,12 +342,19 @@ class TrainingRolloutEvaluator:
             trajectories["states"][start:end, step].to(self.device),
         )
 
+    def _history_keys(self) -> set[str]:
+        """Return dataset fields required to warm-start solver history."""
+        solver = self.neural_env.solver_neural
+        keys = {"root_body_q", "states", "joint_f", "gravity_dir", *solver.contacts.keys()}
+        if getattr(solver, "contact_token_frame", "root") == "owner":
+            keys.add("primary_body_q")
+        return keys
+
     def _history_offset(self, trajectories: dict[str, torch.Tensor]) -> int:
         """Return the number of dataset frames used to warm-start history."""
         if self.history_length <= 1:
             return 0
-        required = {"root_body_q", "states", "joint_f", "gravity_dir"}
-        required.update(self.neural_env.solver_neural.contacts.keys())
+        required = self._history_keys()
         if not required.issubset(trajectories):
             if self.require_terrain_context:
                 missing = sorted(required - set(trajectories))
@@ -371,7 +378,7 @@ class TrainingRolloutEvaluator:
             if self.require_terrain_context:
                 raise ValueError("Strict rollout evaluation requires solver history preloading support.")
             return
-        keys = {"root_body_q", "states", "joint_f", "gravity_dir", *solver.contacts.keys()}
+        keys = self._history_keys()
         missing = sorted(keys - set(trajectories))
         if missing:
             raise ValueError(f"Rollout history preload is missing dataset fields: {missing}.")

@@ -116,6 +116,25 @@ def test_one_native_dataset_projects_to_flat_and_tokens(tmp_path) -> None:
     assert int(token_sample["contact_token_overflow"].item()) == 0
 
 
+def test_trajectory_dataset_keeps_primary_body_q_pose_axes(tmp_path) -> None:
+    path = tmp_path / "native.hdf5"
+    rollouts = _native_rollouts()
+    rollouts["primary_body_q"] = torch.zeros((*rollouts["states"].shape[:2], 17, 7), dtype=torch.float32)
+    rollouts["primary_body_q"][..., 6] = 1.0
+    write_rollouts_to_hdf5(path, rollouts, env_name="Test-Env")
+
+    dataset = TrajectoryDataset(
+        path,
+        sample_sequence_length=2,
+        contact_representation="contact_tokens",
+        max_contact_tokens=4,
+        contact_packing_policy="body_round_robin_pair_atomic",
+    )
+    sample = dataset[0]
+    assert sample["primary_body_q"].shape == (2, 17, 7)
+    torch.testing.assert_close(sample["primary_body_q"][..., 6], torch.ones(2, 17))
+
+
 def test_solver_active_filter_projects_only_penetrating_pairs(tmp_path) -> None:
     path = tmp_path / "native.hdf5"
     rollouts = _native_rollouts()

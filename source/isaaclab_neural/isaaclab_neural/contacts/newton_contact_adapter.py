@@ -119,6 +119,12 @@ class NewtonContactAdapter:
                 world_bodies = np.flatnonzero(self.body_world == world_id)
                 body_local_ids[world_bodies] = np.arange(world_bodies.size)
         self.body_local_ids = torch.as_tensor(body_local_ids, dtype=torch.long, device=self.device)
+        self.primary_body_q = torch.zeros(
+            (self.num_envs, self.num_primary_bodies_per_env, 7),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.primary_body_q[..., 6] = 1.0
         self._contact_frames = 0
         self._raw_contacts_total = 0
         self._packed_contacts_total = 0
@@ -235,6 +241,8 @@ class NewtonContactAdapter:
         state: newton.State | None = None,
     ) -> None:
         """Pack Newton native contacts into fixed NeRD contact buffers."""
+        if hasattr(self, "primary_body_q"):
+            self._update_primary_body_q(state)
         contact_count = self._contact_count(contacts)
         self._contact_frames += 1
         if contact_count == 0:
@@ -432,6 +440,17 @@ class NewtonContactAdapter:
         if set(pairs) != set(NATIVE_CONTACT_INTEGER_FIELDS + NATIVE_CONTACT_FLOAT_FIELDS):
             raise RuntimeError("Native contact-pair fields do not match the schema.")
         return pairs
+
+    def _update_primary_body_q(self, state: newton.State | None) -> None:
+        """Copy current primary-body poses from the Newton state."""
+        if state is None or getattr(state, "body_q", None) is None:
+            self.primary_body_q.zero_()
+            self.primary_body_q[..., 6] = 1.0
+            return
+        body_q = self._warp_torch_view(state.body_q)
+        ids = self.primary_body_ids_by_world.reshape(-1)
+        gathered = body_q.index_select(0, ids).reshape(self.num_envs, self.num_primary_bodies_per_env, 7)
+        self.primary_body_q.copy_(gathered)
 
     def to_neural_inputs(self) -> dict[str, torch.Tensor]:
         """Return contact tensors shaped like fixed-ground neural inputs.

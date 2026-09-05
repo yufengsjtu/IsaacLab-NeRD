@@ -59,6 +59,17 @@ def test_invalid_contact_filter_is_rejected() -> None:
         NerdSolverCfg(contact_filter="unsupported")
 
 
+def test_owner_contact_token_frame_is_supported() -> None:
+    solver_cfg = NerdSolverCfg(contact_token_frame="owner")
+
+    assert solver_cfg.contact_token_frame == "owner"
+
+
+def test_invalid_contact_token_frame_is_rejected() -> None:
+    with pytest.raises(ValueError, match="Unsupported contact_token_frame"):
+        NerdSolverCfg(contact_token_frame="world")
+
+
 @pytest.mark.parametrize(
     "legacy_call",
     [

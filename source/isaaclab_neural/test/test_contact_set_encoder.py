@@ -14,9 +14,11 @@ from isaaclab_neural.contacts.contact_set_encoder import (
     _DirectedContactRows,
     _segment_exclusive_sum,
     _segment_rank,
+    gather_owner_body_q,
     transform_contact_tokens_to_body_frame,
 )
 from isaaclab_neural.contacts.contact_set_schema import (
+    CONTACT_TOKEN_BODY_SLOT_INDEX,
     CONTACT_TOKEN_DIM,
     NATIVE_CONTACT_INTEGER_FIELDS,
     NATIVE_CONTACT_SCALAR_FIELDS,
@@ -223,6 +225,41 @@ def test_transform_contact_tokens_to_body_frame_zeros_padding():
     transformed = transform_contact_tokens_to_body_frame(tokens, root)
     assert transformed[0, 1, 0].item() == 0.0
     torch.testing.assert_close(transformed[0, 0, 4:7], torch.tensor([1.0, 0.0, 0.0]))
+
+
+def test_gather_owner_body_q_selects_per_token_poses():
+    tokens = torch.zeros(1, 1, 2, CONTACT_TOKEN_DIM)
+    tokens[0, 0, 0, 0] = 1.0
+    tokens[0, 0, 1, 0] = 1.0
+    tokens[0, 0, 0, CONTACT_TOKEN_BODY_SLOT_INDEX] = 0.0
+    tokens[0, 0, 1, CONTACT_TOKEN_BODY_SLOT_INDEX] = 1.0
+    primary = torch.zeros(1, 1, 2, 7)
+    primary[..., 6] = 1.0
+    primary[0, 0, 0, :3] = torch.tensor([0.5, 0.0, 0.0])
+    primary[0, 0, 1, :3] = torch.tensor([1.5, 0.0, 0.0])
+
+    gathered = gather_owner_body_q(primary, tokens)
+
+    torch.testing.assert_close(gathered[0, 0, 0, :3], torch.tensor([0.5, 0.0, 0.0]))
+    torch.testing.assert_close(gathered[0, 0, 1, :3], torch.tensor([1.5, 0.0, 0.0]))
+
+
+def test_transform_contact_tokens_to_owner_body_frame_uses_per_token_pose():
+    tokens = torch.zeros(1, 1, 2, CONTACT_TOKEN_DIM)
+    tokens[0, 0, :, 0] = 1.0
+    tokens[0, 0, 0, 4:7] = torch.tensor([0.6, 0.0, 0.0])
+    tokens[0, 0, 1, 4:7] = torch.tensor([1.7, 0.0, 0.0])
+    tokens[0, 0, 0, CONTACT_TOKEN_BODY_SLOT_INDEX] = 0.0
+    tokens[0, 0, 1, CONTACT_TOKEN_BODY_SLOT_INDEX] = 1.0
+    primary = torch.zeros(1, 1, 2, 7)
+    primary[..., 6] = 1.0
+    primary[0, 0, 0, :3] = torch.tensor([0.5, 0.0, 0.0])
+    primary[0, 0, 1, :3] = torch.tensor([1.5, 0.0, 0.0])
+
+    transformed = transform_contact_tokens_to_body_frame(tokens, gather_owner_body_q(primary, tokens))
+
+    torch.testing.assert_close(transformed[0, 0, 0, 4:7], torch.tensor([0.1, 0.0, 0.0]))
+    torch.testing.assert_close(transformed[0, 0, 1, 4:7], torch.tensor([0.2, 0.0, 0.0]))
 
 
 def test_pack_rows_overflow_does_not_contaminate_next_env():

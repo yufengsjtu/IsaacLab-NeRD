@@ -67,6 +67,9 @@ ContactRepresentation = Literal["flat", "contact_tokens"]
 ContactFilter = Literal["none", "solver_active"]
 """Selection applied to Newton native pairs before fixed-capacity packing."""
 
+ContactTokenFrame = Literal["root", "owner"]
+"""Frame used to express packed contact-token geometry at train/inference time."""
+
 
 @configclass
 class NerdSolverCfg(NewtonSolverCfg):
@@ -141,6 +144,15 @@ class NerdSolverCfg(NewtonSolverCfg):
     max_contact_tokens: int = 64
     """Maximum directed contact tokens per environment when ``contact_representation='contact_tokens'``."""
 
+    contact_token_frame: ContactTokenFrame = "root"
+    """Frame used to express packed contact-token geometry.
+
+    ``"root"`` rotates token points, normals, lever arms, and relative
+    velocities into the articulation root (base) frame. ``"owner"`` uses each
+    token's primary body pose instead. Stored native pairs remain world-frame.
+    Force labels stay in the root-frame convention used by the force head.
+    """
+
     states_frame: Literal["world", "body", "body_translation_only"] = "body"
     """Frame used to express neural-model states."""
 
@@ -169,6 +181,8 @@ class NerdSolverCfg(NewtonSolverCfg):
             raise ValueError("num_contacts_per_env must be non-negative.")
         if self.contact_filter not in {"none", "solver_active"}:
             raise ValueError(f"Unsupported contact_filter: {self.contact_filter!r}.")
+        if self.contact_token_frame not in {"root", "owner"}:
+            raise ValueError(f"Unsupported contact_token_frame: {self.contact_token_frame!r}.")
         if self.contact_representation == "contact_tokens":
             if self.num_contacts_per_env == 0:
                 raise ValueError("contact_representation='contact_tokens' requires a positive contact capacity.")

@@ -57,6 +57,8 @@ class TransformerNeuralSolver(NeuralSolver):
             history: Raw model inputs with shape ``[num_envs, history, features]``.
         """
         required = {"root_body_q", "states", "joint_f", "gravity_dir", *self.contacts.keys()}
+        if getattr(self, "contact_token_frame", "root") == "owner":
+            required.add("primary_body_q")
         missing = sorted(required - set(history))
         if missing:
             raise ValueError(f"History is missing required model inputs: {missing}.")
@@ -77,6 +79,10 @@ class TransformerNeuralSolver(NeuralSolver):
             "gravity_dir": self.gravity_dir,
             **self.contacts,
         }
+        if getattr(self, "contact_token_frame", "root") == "owner":
+            if self.primary_body_q is None:
+                raise ValueError("contact_token_frame='owner' requires primary_body_q on the solver.")
+            live_inputs["primary_body_q"] = self.primary_body_q
         normalized_history: dict[str, torch.Tensor] = {}
         for key in required:
             value = history[key]
@@ -151,7 +157,7 @@ class TransformerNeuralSolver(NeuralSolver):
 
     def _history_snapshot(self) -> dict[str, torch.Tensor]:
         """Clone mutable solver inputs before storing one online history frame."""
-        return {
+        snapshot = {
             "root_body_q": self.root_body_q.clone(),
             "states": self.states.clone(),
             "states_embedding": self.states_embedding.clone(),
@@ -159,6 +165,11 @@ class TransformerNeuralSolver(NeuralSolver):
             "gravity_dir": self.gravity_dir.clone(),
             **{key: value.clone() for key, value in self.contacts.items()},
         }
+        if getattr(self, "contact_token_frame", "root") == "owner":
+            if self.primary_body_q is None:
+                raise ValueError("contact_token_frame='owner' requires primary_body_q on the solver.")
+            snapshot["primary_body_q"] = self.primary_body_q.clone()
+        return snapshot
 
     def get_neural_model_inputs(self):
         if len(self.states_history) == 0:  # for dummy call

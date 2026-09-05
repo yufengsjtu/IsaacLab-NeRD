@@ -109,6 +109,11 @@ class ActionTrajectorySampler:
         }
         if getattr(self.adapter, "contact_adapter", None) is not None:
             buffers["_native_contact_frames"] = []
+            num_primary = int(self.adapter.contact_adapter.num_primary_bodies_per_env)
+            buffers["primary_body_q"] = torch.empty(
+                (num_envs, trajectory_length, num_primary, 7),
+                device=self.data_device,
+            )
         if getattr(self.adapter, "body_net_contact_force_recorder", None) is not None:
             buffers["body_net_contact_forces_w"] = torch.empty(
                 (num_envs, trajectory_length, self.adapter.num_primary_bodies, 3),
@@ -165,6 +170,8 @@ class ActionTrajectorySampler:
         self._copy_input(buffers["states"][:, step], inputs["states"])
         self._copy_input(buffers["root_body_q"][:, step], inputs["root_body_q"])
         self._copy_input(buffers["root_body_qd"][:, step], inputs["root_body_qd"])
+        if "primary_body_q" in buffers:
+            self._copy_input(buffers["primary_body_q"][:, step], inputs["primary_body_q"])
         if "_native_contact_frames" in buffers:
             pairs = self.adapter.native_contact_pairs()
             if pairs is None:

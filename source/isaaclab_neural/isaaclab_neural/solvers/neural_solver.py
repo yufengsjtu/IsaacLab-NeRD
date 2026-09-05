@@ -66,6 +66,7 @@ class NeuralSolver(SolverBase):
         contact_representation: str = "flat",
         max_contact_tokens: int = 0,
         contact_filter: str = "none",
+        contact_token_frame: str = "root",
     ):
         """
         Args:
@@ -91,6 +92,8 @@ class NeuralSolver(SolverBase):
                 inputs warn and are rejected as incompatible.
             contact_adapter: Adapter used by ``newton_native`` mode.
             contact_filter: Native-pair selection applied before packing.
+            contact_token_frame: Frame for packed token geometry; ``"root"`` or
+                ``"owner"``. Defaults to ``"root"``.
         """
         self.solver_name = name
         if model is None:
@@ -163,7 +166,11 @@ class NeuralSolver(SolverBase):
         if contact_filter not in {"none", "solver_active"}:
             raise ValueError(f"Unsupported contact_filter: {contact_filter!r}.")
         self.contact_filter = contact_filter
+        if contact_token_frame not in {"root", "owner"}:
+            raise ValueError(f"Unsupported contact_token_frame: {contact_token_frame!r}.")
+        self.contact_token_frame = contact_token_frame
         self.contact_adapter = contact_adapter
+        self.primary_body_q = getattr(contact_adapter, "primary_body_q", None)
         adapter_contact_filter = getattr(contact_adapter, "contact_filter", "none")
         if contact_adapter is not None and adapter_contact_filter != self.contact_filter:
             raise ValueError(
@@ -440,6 +447,7 @@ class NeuralSolver(SolverBase):
                 self.contact_adapter.update(contacts, newton_states)
             with step_profile.section("to_neural_inputs"):
                 self.contacts = self.contact_adapter.to_neural_inputs()
+            self.primary_body_q = getattr(self.contact_adapter, "primary_body_q", None)
 
     def get_contact_masks(
         self,
@@ -459,7 +467,10 @@ class NeuralSolver(SolverBase):
         )
 
     def process_neural_model_inputs(self, model_inputs):
-        from isaaclab_neural.contacts.contact_set_encoder import transform_contact_tokens_to_body_frame
+        from isaaclab_neural.contacts.contact_set_encoder import (
+            gather_owner_body_q,
+            transform_contact_tokens_to_body_frame,
+        )
 
         # convert frame
         (
@@ -492,7 +503,21 @@ class NeuralSolver(SolverBase):
                 model_inputs.pop(key, None)
 
         if "contact_tokens" in model_inputs:
-            if self.states_frame != "world":
+            translation_only = self.states_frame == "body_translation_only"
+            if self.contact_token_frame == "owner":
+                primary_body_q = model_inputs.get("primary_body_q")
+                if primary_body_q is None:
+                    raise ValueError(
+                        "contact_token_frame='owner' requires primary_body_q poses "
+                        "[B, T, num_primary_bodies, 7] recorded at collection time."
+                    )
+                token_frame_q = gather_owner_body_q(primary_body_q, model_inputs["contact_tokens"])
+                model_inputs["contact_tokens"] = transform_contact_tokens_to_body_frame(
+                    model_inputs["contact_tokens"],
+                    token_frame_q,
+                    translation_only=translation_only,
+                )
+            elif self.states_frame != "world":
                 root_body_q = model_inputs["root_body_q"]
                 batch, time = root_body_q.shape[:2]
                 if self.anchor_frame_step == "first":
@@ -506,8 +531,9 @@ class NeuralSolver(SolverBase):
                 model_inputs["contact_tokens"] = transform_contact_tokens_to_body_frame(
                     model_inputs["contact_tokens"],
                     token_frame_q,
-                    translation_only=(self.states_frame == "body_translation_only"),
+                    translation_only=translation_only,
                 )
+        model_inputs.pop("primary_body_q", None)
 
         # post processing
         self.wrap2PI(model_inputs["states"])
@@ -549,6 +575,8 @@ class NeuralSolver(SolverBase):
             "gravity_dir": self.gravity_dir,
             **self.contacts,
         }
+        if self.primary_body_q is not None:
+            model_inputs["primary_body_q"] = self.primary_body_q
         for k in model_inputs.keys():
             model_inputs[k] = model_inputs[k].unsqueeze(1)  # (num_envs, T, dim)
 
@@ -564,6 +592,8 @@ class NeuralSolver(SolverBase):
             "gravity_dir": self.gravity_dir,
             **self.contacts,
         }
+        if self.contact_token_frame == "owner" and self.primary_body_q is not None:
+            model_inputs["primary_body_q"] = self.primary_body_q
         for k in model_inputs.keys():
             model_inputs[k] = model_inputs[k].unsqueeze(1)  # (num_envs, T, dim)
 
