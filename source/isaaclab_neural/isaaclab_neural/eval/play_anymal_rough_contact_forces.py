@@ -496,7 +496,7 @@ def run(env_cfg, agent_cfg, args: argparse.Namespace) -> None:
 
     from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
 
-    from isaaclab_tasks.utils import launch_simulation
+    from isaaclab.app import launch_simulation
 
     with launch_simulation(env_cfg, args):
         import gymnasium as gym

@@ -133,7 +133,7 @@ def main(env_cfg, agent_cfg=None) -> None:
     import gymnasium as gym
     import torch
 
-    from isaaclab_tasks.utils import launch_simulation
+    from isaaclab.app import launch_simulation
 
     from isaaclab_neural.data import build_terrain_context, write_rollouts_to_hdf5
     from isaaclab_neural.generate.adapter import DataGenerationAdapter
