@@ -177,7 +177,7 @@ def main(env_cfg, _agent_cfg=None) -> None:
     neural_solver_cfg.pop("use_cuda_graph", None)
     solver_cfg = NerdSolverCfg(**neural_solver_cfg)
 
-    from isaaclab_tasks.utils import launch_simulation
+    from isaaclab.app import launch_simulation
 
     from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
 

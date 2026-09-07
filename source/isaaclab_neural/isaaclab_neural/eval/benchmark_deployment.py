@@ -163,9 +163,9 @@ def main(env_cfg, _agent_cfg) -> None:
     from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
     from rsl_rl.runners import OnPolicyRunner
 
-    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
+    from isaaclab.app import launch_simulation
 
-    from isaaclab_tasks.utils import launch_simulation
+    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 
     if args_cli.warmup < 0 or args_cli.steps <= 0:
         raise ValueError("warmup must be non-negative and steps must be positive.")
