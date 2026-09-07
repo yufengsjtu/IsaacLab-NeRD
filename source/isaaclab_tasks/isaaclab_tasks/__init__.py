@@ -7,24 +7,20 @@
 
 The package is structured as follows:
 
-- ``direct``: These include single-file implementations of tasks.
-- ``manager_based``: These include task implementations that use the manager-based API.
+- ``core``: Core task families maintained as part of Isaac Lab.
+- ``contrib``: Contributed task families. These may depend on ``core`` tasks, but
+  ``core`` tasks never depend on ``contrib`` tasks.
 - ``utils``: These include utility functions for the tasks.
 
 """
 
+import importlib.metadata
 import os
-import toml
 
-# Conveniences to other module directories via relative paths
-ISAACLAB_TASKS_EXT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../"))
-"""Path to the extension source directory."""
-
-ISAACLAB_TASKS_METADATA = toml.load(os.path.join(ISAACLAB_TASKS_EXT_DIR, "config", "extension.toml"))
-"""Extension metadata dictionary parsed from the extension.toml file."""
-
-# Configure the module-level variables
-__version__ = ISAACLAB_TASKS_METADATA["package"]["version"]
+try:
+    __version__ = importlib.metadata.version("isaaclab_tasks")
+except importlib.metadata.PackageNotFoundError:
+    __version__ = "0.0.0"
 
 ##
 # Register Gym environments.
@@ -39,6 +35,6 @@ from .utils import import_packages
 # during that window, __init__ runs again and re-registers every gym env.
 # We stash a flag on builtins because it is never evicted from sys.modules.
 if not getattr(builtins, "_isaaclab_tasks_registered", False):
-    _BLACKLIST_PKGS = ["utils", ".mdp", "direct.humanoid_amp.motions"]
+    _BLACKLIST_PKGS = ["utils", ".mdp", "contrib.humanoid_amp.motions"]
     import_packages(__name__, _BLACKLIST_PKGS)
     builtins._isaaclab_tasks_registered = True

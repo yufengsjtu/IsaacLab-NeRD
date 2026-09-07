@@ -1,179 +1,61 @@
-# IsaacLab Guidelines
+# IsaacLab Development Guidelines
+- Make the smallest change that solves the requested problem.
+- Preserve existing behavior unless the task explicitly changes it.
+- Read surrounding code, callers, tests, and documentation before changing an interface.
+- Do not add dependencies unless necessary. Prefer existing project dependencies and the standard library.
+- Do not commit generated plans, scratch files, or agent artifacts.
+- Follow a more-specific `AGENTS.md` in the directory being changed.
+- Use the repository's current SPDX header template for new source files; do not change existing file headers.
+- Follow the existing style and abstractions in the affected package.
+- Use modern Python type hints, including `X | None` instead of `Optional[X]`.
+- Use `snake_case` for methods, functions, and CLI arguments.
+- Keep related public symbols discoverable through consistent prefixes.
+- Use concrete types for public interfaces where practical.
+- Use Google-style docstrings for public APIs.
+- Document SI units for public physical quantities in docstrings using inline `[unit]` notation (e.g. `Particle positions [m], shape [N, 3]`); use `[m or rad, depending on joint type]` where applicable, and skip non-physical fields (indices, counts, flags).
+- Keep comments brief and explain intent, constraints, or edge cases rather than restating code.
+- Do not remove or rename a public API without a prior deprecation and migration path.
+- Update public documentation when adding or changing public APIs.
+- Verify documented technical claims against the current code and primary sources before relying on them.
+- Use the uv-managed environment for routine commands.
+- Use `uv run python` for Python scripts and tests.
+- Use `uv run isaaclab` for Isaac Lab CLI commands.
+- Use `./isaaclab.sh` only for installer workflows that require it.
+- Do not define Warp kernels in `python -c`; write a temporary Python file instead so Warp can inspect the source.
 
-## Breaking API changes
+## Testing and validation
 
-- **Breaking changes require a deprecation first.** Do not remove or rename public API symbols without deprecating them in a prior release.
+- Run the narrowest relevant test first.
+- Before reporting that a test cannot run because an optional dependency is missing, identify its project extra and retry with `uv run --extra <extra> ...`.
+- Do not treat an optional dependency missing from the base environment as a blocker when its project extra is available.
+- Run `uv run isaaclab -f` before committing.
+- For a regression test, verify that it fails without the fix and passes with it.
+- Find and extend the closest existing test before creating a new test file or test case.
+- Add a test only when it covers a distinct behavior, regression, boundary, or failure mode that existing tests do not cover clearly.
+- Test observable behavior and public contracts, not implementation details.
+- Use hard-coded values only when they are the intended contract or a small, independently verified example; otherwise derive the expected result from a separate, simple reference calculation.
+- Keep tests focused and remove or consolidate redundant coverage instead of growing overlapping test suites.
+- Do not add debug output to production Warp kernels. Use temporary standalone reproductions and remove debug output before committing.
 
-## API design rules (naming + structure)
+## Changelog and release metadata
 
-- **Group by common prefix for discoverability (autocomplete).**
-  - **Classes**: group by domain concept — `ActuatorNetLSTM`, `ActuatorNetMLP` (not `LSTMActuatorNet`, `MLPActuatorNet`).
-  - **Methods**: group by noun before modifier — `set_joint_position_target()` (not `set_target_joint_position()`).
-- **Method names are `snake_case`.**
-- **CLI arguments are `snake_case`.**
-- **Prefer nested classes when self-contained.**
-  - If a helper type or an enum is only meaningful inside one parent class and doesn't need a public identity, define it as a nested class instead of creating a new top-level class/module.
-- **Follow PEP 8 for Python code.**
-- **Use modern Python type-hint syntax.**
-  - Prefer PEP 604 unions: `x | y`, `x | None`. Do not use `typing.Union` or `typing.Optional`.
-- **Use specific type hints for public interfaces.**
-  - For torch tensors, annotate with `torch.Tensor`. For Warp arrays, annotate concrete dtypes (e.g., `wp.array(dtype=wp.vec3)`) rather than generic `object`.
-  - Prefer consistent parameter names across base/override APIs (e.g., `xforms`, `scales`, `colors`, `materials`).
-- **Use Google-style docstrings.**
-  - Write clear, concise docstrings that explain what the function does, its parameters, and its return value.
-  - Keep argument/return types in function annotations, not inline in docstrings.
-  - In `Args:` entries, use `name: description` (not `name (Type): description`).
-  - Use Sphinx cross-reference roles for symbol references (e.g. `:class:`, `:meth:`, `:attr:`, `:paramref:`), but keep targets as short as possible.
-  - Within the same class/module, prefer short local references (e.g. `:meth:\`set_joint_position_target\``, `:attr:\`num_joints\``) over fully qualified paths.
-  - If qualification is needed, prefer public API paths (e.g. `isaaclab.assets.Articulation`) and do not use internal `_src` or private module paths in Sphinx role targets.
-- **State SI units for all physical quantities in docstrings.**
-  - Use inline `[unit]` notation, e.g. `"""Particle positions [m], shape [particle_count, 3], float."""`.
-  - For joint-type-dependent quantities use `[m or rad, depending on joint type]`.
-  - For spatial vectors annotate both components, e.g. `[N, N·m]`.
-  - For compound arrays list per-component units, e.g. `[0] k_mu [Pa], [1] k_lambda [Pa], ...`.
-  - When a parameter's interpretation varies across solvers, document each solver's convention instead of a single unit.
-  - Skip non-physical fields (indices, keys, counts, flags).
-  - This rule applies to **public API docstrings only**, not test docstrings.
-- **Keep the documentation up-to-date.**
-  - When adding new files or symbols that are part of the public-facing API, make sure to keep the auto-generated documentation updated by running `./isaaclab.sh -d`.
+- Do not edit `CHANGELOG.rst` or `config/extension.toml` directly.
+- Add one changelog fragment for each changed source package when the change is user-visible.
+- Use `.skip` fragments for changes that do not require a release note.
+- Write changelog entries in past tense and include migration guidance for deprecated, changed, or removed behavior.
+- Mark breaking changes clearly and provide migration guidance.
 
-## Dependencies
+## Commits and branches
 
-- **Avoid adding new required dependencies.** IsaacLab's core should remain lightweight and minimize external requirements.
-- **Strongly prefer not adding new optional dependencies.** If additional functionality requires a new package, carefully consider whether the benefit justifies the added complexity and maintenance burden. When possible, implement functionality using existing dependencies, including Warp functions and kernels, NumPy, or the standard library.
+- Work on a feature branch; do not commit directly to `main`.
+- Keep commits focused and atomic.
+- Use an imperative, capitalized commit subject with no trailing period.
+- Inspect staged changes before committing.
+- Do not add AI co-author or attribution lines.
+- Prefer follow-up commits over amending commits while addressing review feedback.
 
-## Tooling: prefer `./isaaclab.sh -p` for running, testing, and benchmarking
+## Repository skills
 
-We use a wrapped python call within `./isaaclab.sh`.
-
-- **Use `./isaaclab.sh -p -c` for inline Python**: When running one-off Python commands, use `./isaaclab.sh -p -c "..."` instead of `python3 -c "..."`.
-- **Use `./isaaclab.sh -p`** to run standalone Python scripts without a `pyproject.toml` (e.g., in CI after switching to a branch with no project files).
-
-### Run tests
-
-```bash
-# run all tests (extremely heavy, should be avoided).
-./isaaclab.sh -t
-
-# run a specific test file by name
-./isaaclab.sh -p -m pytest PATH_TO_TEST
-
-# run a specific example test
-./isaaclab.sh -p -m pytest PATH_TO_TEST::METHOD
-```
-
-### Pre-commit (lint/format hooks)
-
-**CRITICAL: Always run pre-commit hooks BEFORE committing and BEFORE pushing.**
-
-Proper workflow:
-1. Make your code changes
-2. Run `./isaaclab.sh -f` to check ALL files
-3. If pre-commit modifies any files (e.g., formatting), review the changes
-4. Stage the modified files with `git add`
-5. Run `./isaaclab.sh -f` again to ensure all checks pass
-6. Only then create your commit with `git commit`
-7. Verify pre-commit still passes before pushing — never push commits that haven't been checked
-
-```bash
-# Run pre-commit checks on all files
-./isaaclab.sh -f
-```
-
-**Common mistakes to avoid:**
-- Don't commit first and then run pre-commit (requires amending commits)
-- Don't push before running pre-commit (pushes broken code to the remote)
-- Do run pre-commit before committing and before pushing (clean workflow)
-
-**When reviewing code** (e.g. via a code-reviewer agent), always run `./isaaclab.sh -f` as part of the review to catch formatting or lint issues early.
-
-## Changelog
-
-- **Do not edit `CHANGELOG.rst` or `config/extension.toml` directly.** Each PR adds a fragment file under `source/<package>/changelog.d/`; the changelog and version are compiled by the nightly CI workflow.
-- **Add one fragment per touched package.** Pick any short, unique slug for the filename — your branch name (with `/` replaced by `-`) is a good default. The filename suffix declares the bump tier; within a batch the highest tier wins for the package.
-
-  | Filename | Effect |
-  |---|---|
-  | `source/<pkg>/changelog.d/<slug>.rst` | patch bump |
-  | `source/<pkg>/changelog.d/<slug>.minor.rst` | minor bump |
-  | `source/<pkg>/changelog.d/<slug>.major.rst` | major bump |
-  | `source/<pkg>/changelog.d/<slug>.skip` | no entry, no bump (CI / docs / test-only) |
-
-- Use **past tense** matching the section header: "Added X", "Fixed Y", "Changed Z".
-- Place entries under the correct category: `Added`, `Changed`, `Deprecated`, `Removed`, or `Fixed`.
-- Avoid internal implementation details users wouldn't understand.
-- **For `Deprecated`, `Changed`, and `Removed` entries, include migration guidance.**
-  - Example: "Deprecated `Articulation.A` in favor of `Articulation.B`."
-- **Breaking changes** belong in `Changed`, prefixed with `**Breaking:**`.
-- Use Sphinx cross-reference roles for class/method/module names.
-
-### RST formatting reference
-
-```
-Added
-^^^^^
-
-* Added :class:`~package.ClassName` to support feature X.
-
-Fixed
-^^^^^
-
-* Fixed edge case in :meth:`~package.ClassName.method` where input was
-  not validated, causing ``AttributeError`` at runtime.
-```
-
-Key formatting rules:
-- Category heading: underline with `^` (carets), at least as long as the heading text.
-- Entries: `* ` prefix, continuation lines indented by 2 spaces.
-
-See `tools/changelog/test/integration/` for worked examples that double as integration-test fixtures.
-
-## Commit and Pull Request Guidelines
-
-Follow conventional commit message practices.
-
-- **Use feature branches**: All development work should be on branches named `<username>/feature-desc` (e.g., `jdoe/docs-versioning`). Do not commit directly to `main`.
-- Keep commits focused and atomic—one logical change per commit.
-- Reference related issues in commit messages when applicable.
-- **When iterating on PR feedback**, prefer adding new commits over amending existing ones. This avoids force-pushing and lets the reviewer easily verify each change request was addressed.
-- **Do not include AI attribution or co-authorship lines** (e.g., "Co-Authored-By: Claude...") in commit messages. Commits should represent human contributions without explicit AI attribution.
-- **Commit message format**:
-  - Separate subject from body with a blank line
-  - Subject: imperative mood, capitalized, ~50 chars, no trailing period
-    - Write as a command: "Fix bug" not "Fixed bug" or "Fixes bug"
-    - Test: "If applied, this commit will _[your subject]_"
-  - Body: wrap at 72 chars, explain _what_ and _why_ (not _how_—the diff shows that)
-
-## File headers and copyright
-
-- New files must use the current year (2026) in the SPDX copyright header:
-  ```
-  # Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
-  # All rights reserved.
-  #
-  # SPDX-License-Identifier: BSD-3-Clause
-  ```
-- Do not change the year in existing file headers.
-
-## Sandbox & Networking
-
-- Network access (e.g., `git push`) is blocked by the sandbox. Use `dangerouslyDisableSandbox: true` so the user gets an approval prompt — don't ask them to run it manually.
-- **Never push to `origin` (`isaac-sim/IsaacLab`).** The `origin` remote is the public upstream repository. Push to your own fork remote (e.g., `antoine`, `alex`) or to the remote of the PR you are working on. If the correct remote is unclear, ask the user before pushing.
-
-## GitHub Actions and CI/CD
-
-- Pin actions by major version tag (e.g. `actions/checkout@v6`). Use the same major version that other workflows in `.github/workflows/` already use — don't introduce a new major version without checking how it's used elsewhere.
-
-## Testing Guidelines
-
-- **Always verify regression tests fail without the fix.** When writing a regression test for a bug fix, temporarily revert the fix and run the test to confirm it fails. Then reapply the fix and verify the test passes. This ensures the test actually covers the bug.
-
-### Debugging Warp kernels
-
-**Do not add `wp.printf` to kernels in production code.** Debug prints in Warp kernels affect performance and can produce noisy test output. Use them only in standalone reproduction scripts during development, and always remove them before committing.
-
-To debug Warp kernel behavior:
-
-1. **Write a standalone reproduction script** and run it directly with `./isaaclab.sh -p -c "..."` or `./isaaclab.sh -p script.py`. This keeps stdout visible and avoids the test framework entirely.
-2. **Use high-precision format strings** for floating-point debugging (e.g., `wp.printf("val=%.15e\n", x)`) — the default `%f` format hides values smaller than ~1e-6 that can still affect control flow.
-3. **Remove all `wp.printf` calls before committing.**
+- Keep repository-owned skills in `skills/`; do not duplicate their contents in tool-specific discovery directories.
+- Validate skill changes with `uv run --no-project python tools/skills/cli.py check`.
+- Keep skills concise and point to maintained documentation and source examples.

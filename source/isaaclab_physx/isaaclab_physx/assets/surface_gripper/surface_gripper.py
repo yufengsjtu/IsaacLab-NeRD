@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import warnings
 from typing import TYPE_CHECKING
 
@@ -14,10 +13,9 @@ import numpy as np
 import torch
 import warp as wp
 
-from isaacsim.core.experimental.utils.app import enable_extension
-
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBase
+from isaaclab.cloner import queue_replication
 from isaaclab.utils.version import get_isaac_sim_version, has_kit
 
 if TYPE_CHECKING:
@@ -86,6 +84,8 @@ class SurfaceGripper(AssetBase):
             cfg: A configuration instance.
         """
         # copy the configuration
+        # this class does not run AssetBase.__init__, so it registers its cfg itself
+        queue_replication(cfg)
         self._cfg = cfg.copy()
 
         # checks for Isaac Sim v5.0 to ensure that the surface gripper is supported
@@ -451,33 +451,24 @@ class SurfaceGripper(AssetBase):
                 " `--device cpu` to run the simulation on CPU."
             )
 
-        enable_extension("isaacsim.robot.surface_gripper")
+        sim_utils.enable_extension("isaacsim.robot.surface_gripper")
         from isaacsim.robot.surface_gripper import GripperView
 
         def is_surface_gripper(prim) -> bool:
             return prim.GetTypeName() == "IsaacSurfaceGripper"
 
-        matches = sim_utils.resolve_matching_prims_from_source(self._cfg.prim_path)
-        if not matches:
-            raise RuntimeError(f"No prim found at '{self._cfg.prim_path}'.")
-        asset_prim, root_expr = matches[0]
-        walk_root = asset_prim.GetPath().pathString
-        gripper_prims = sim_utils.get_all_matching_child_prims(
-            walk_root, predicate=is_surface_gripper, traverse_instance_prims=False
+        resolve_kwargs = {"raise_if_no_matches": False, "traverse_instance_prims": False}
+        gripper_matches = sim_utils.resolve_matching_prims_from_source(
+            self._cfg.prim_path, is_surface_gripper, **resolve_kwargs
         )
-        if len(gripper_prims) != 1:
-            matched = [p.GetPath().pathString for p in gripper_prims]
+        if len(gripper_matches) != 1:
+            matched = [prim.GetPath().pathString for prim, _ in gripper_matches]
             raise RuntimeError(
-                f"Expected exactly one IsaacSurfaceGripper prim under '{walk_root}'"
-                f" (resolved from '{self._cfg.prim_path}'), found {len(gripper_prims)}: {matched}."
+                f"Expected exactly one IsaacSurfaceGripper prim under '{self._cfg.prim_path}', "
+                f"found {len(gripper_matches)}: {matched}."
             )
-        gripper_prim = gripper_prims[0]
-        self._prim_expr = root_expr + gripper_prim.GetPath().pathString[len(walk_root) :]
-        # ``GripperView`` (XformPrim.resolve_paths) requires explicit regex (".*") and rejects the
-        # legacy "*" wildcard that the clone-plan destination glob (e.g. "/World/envs/env_*") can
-        # carry. Convert any bare "*" to ".*" (a "*" already preceded by "." is left untouched).
-        self._prim_expr = re.sub(r"(?<!\.)\*", ".*", self._prim_expr)
-        env_prim_path_expr = self._prim_expr.rsplit("/", 1)[0]
+        _, self._prim_expr = gripper_matches[0]
+        env_prim_path_expr = "/".join(sim_utils.split_path_expr(self._prim_expr)[:-1])
         self._parent_prims = sim_utils.find_matching_prims(env_prim_path_expr)
         self._num_envs = len(self._parent_prims)
 
@@ -488,8 +479,11 @@ class SurfaceGripper(AssetBase):
         self._process_cfg()
 
         # Initialize gripper view and set properties.
+        # ``GripperView`` (XformPrim.resolve_paths) matches one regex per path segment, so a
+        # segment wildcard has to be spelled ``.*`` there: ``[^/]`` holds a separator and would
+        # be split across two segments.
         self._gripper_view = GripperView(
-            self._prim_expr,
+            sim_utils.path_expr_to_glob(self._prim_expr).replace("*", ".*"),
         )
         self.update_gripper_properties_index(
             max_grip_distance=wp.clone(self._max_grip_distance),

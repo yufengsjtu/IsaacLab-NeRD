@@ -11,6 +11,9 @@ This page covers data generation and imitation learning workflows for humanoid r
 
 .. important::
 
+   The Isaac Lab Mimic workflows and Pink IK tasks on this page are supported only on Linux.
+   Pink IK and its dependencies are not available on Windows.
+
    Complete the tutorial in :ref:`Synthetic Data Generation and Imitation Learning with Isaac Lab Mimic <teleoperation-imitation-learning>`
    before proceeding with the following demonstrations to
    understand the data collection, annotation, and generation steps of Isaac Lab Mimic.
@@ -45,7 +48,7 @@ Collect human demonstrations
    The differential IK controller requires the user's wrist pose to be close to the robot's initial or current pose for optimal performance.
    Rapid movements of the user's wrist may cause it to deviate significantly from the goal state, which could prevent the IK controller from finding the optimal solution.
    This may result in a mismatch between the user's wrist and the robot's wrist.
-   You can increase the gain of all the `Pink-IK controller's FrameTasks <https://github.com/isaac-sim/IsaacLab/blob/main/source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/pick_place/pickplace_gr1t2_env_cfg.py>`__ to track the AVP wrist poses with lower latency.
+   You can increase the gain of all the `Pink-IK controller's FrameTasks <../../../../source/isaaclab_tasks/isaaclab_tasks/contrib/pick_place/pickplace_gr1t2_env_cfg.py>`__ to track the AVP wrist poses with lower latency.
    However, this may lead to more jerky motion.
    Separately, the finger joints of the robot are retargeted to the user's finger joints using the `dex-retargeting <https://github.com/dexsuite/dex-retargeting>`_ library.
 
@@ -78,8 +81,8 @@ Collect five demonstrations by running the following command:
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/tools/record_demos.py \
-   --task Isaac-PickPlace-GR1T2-Abs-v0 \
+   uv run --extra teleop,isaacsim isaaclab teleop record \
+   --task IsaacContrib-PickPlace-GR1T2-Abs \
    --visualizer kit \
    --xr \
    --device cpu \
@@ -88,7 +91,7 @@ Collect five demonstrations by running the following command:
 
 
 .. note::
-   We also provide a GR-1 pick and place task with waist degrees-of-freedom enabled ``Isaac-PickPlace-GR1T2-WaistEnabled-Abs-v0`` (see :ref:`environments` for details on the available environments, including the GR1 Waist Enabled variant). The same command above applies but with the task name changed to ``Isaac-PickPlace-GR1T2-WaistEnabled-Abs-v0``.
+   We also provide a GR-1 pick and place task with waist degrees-of-freedom enabled ``IsaacContrib-PickPlace-GR1T2-WaistEnabled-Abs`` (see :doc:`/source/setup/environments` for details on the available environments, including the GR1 Waist Enabled variant). The same command above applies but with the task name changed to ``IsaacContrib-PickPlace-GR1T2-WaistEnabled-Abs``.
 
 .. tip::
    If a demo fails during data collection, the environment can be reset using the teleoperation controls panel in the XR teleop client
@@ -100,8 +103,8 @@ You can replay the collected demonstrations by running the following command:
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/tools/replay_demos.py \
-   --task Isaac-PickPlace-GR1T2-Abs-v0 \
+   uv run --extra teleop,isaacsim isaaclab teleop replay \
+   --task IsaacContrib-PickPlace-GR1T2-Abs \
    --visualizer kit \
    --device cpu \
    --dataset_file ./datasets/dataset_gr1.hdf5
@@ -129,7 +132,7 @@ Annotate the demonstrations by running the following command:
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/imitation_learning/isaaclab_mimic/annotate_demos.py \
+   uv run --extra isaacsim,mimic python scripts/imitation_learning/isaaclab_mimic/annotate_demos.py \
    --task Isaac-PickPlace-GR1T2-Abs-Mimic-v0 \
    --visualizer kit \
    --device cpu \
@@ -167,7 +170,7 @@ Place the file under ``IsaacLab/datasets`` and run the following command to gene
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/imitation_learning/isaaclab_mimic/generate_dataset.py \
+   uv run --extra isaacsim,mimic python scripts/imitation_learning/isaaclab_mimic/generate_dataset.py \
    --device cpu \
    --num_envs 20 \
    --generation_num_trials 1000 \
@@ -181,8 +184,8 @@ Use `Robomimic <https://robomimic.github.io/>`__ to train a policy for the gener
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/imitation_learning/robomimic/train.py \
-   --task Isaac-PickPlace-GR1T2-Abs-v0 \
+   uv run --extra isaacsim,mimic python scripts/imitation_learning/robomimic/train.py \
+   --task IsaacContrib-PickPlace-GR1T2-Abs \
    --algo bc \
    --normalize_training_actions \
    --dataset ./datasets/generated_dataset_gr1.hdf5
@@ -201,8 +204,8 @@ Visualize the results of the trained policy by running the following command, us
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/imitation_learning/robomimic/play.py \
-   --task Isaac-PickPlace-GR1T2-Abs-v0 \
+   uv run --extra isaacsim,mimic python scripts/imitation_learning/robomimic/play.py \
+   --task IsaacContrib-PickPlace-GR1T2-Abs \
    --visualizer kit \
    --device cpu \
    --num_rollouts 50 \
@@ -271,8 +274,8 @@ generated using Isaac Lab Mimic for the ``Isaac-NutPour-GR1T2-Pink-IK-Abs-Mimic-
 
    .. code:: bash
 
-      ./isaaclab.sh -p scripts/tools/record_demos.py \
-      --task Isaac-NutPour-GR1T2-Pink-IK-Abs-v0 \
+      uv run --extra teleop,isaacsim isaaclab teleop record \
+      --task IsaacContrib-NutPour-GR1T2-Pink-IK-Abs \
       --visualizer kit \
       --device cpu \
       --xr \
@@ -283,10 +286,9 @@ generated using Isaac Lab Mimic for the ``Isaac-NutPour-GR1T2-Pink-IK-Abs-Mimic-
 
    .. code:: bash
 
-      ./isaaclab.sh -p scripts/imitation_learning/isaaclab_mimic/annotate_demos.py \
+      uv run --extra isaacsim,mimic python scripts/imitation_learning/isaaclab_mimic/annotate_demos.py \
       --task Isaac-NutPour-GR1T2-Pink-IK-Abs-Mimic-v0 \
       --visualizer kit \
-      --enable_cameras \
       --device cpu \
       --input_file ./datasets/dataset_gr1_nut_pouring.hdf5 \
       --output_file ./datasets/dataset_annotated_gr1_nut_pouring.hdf5
@@ -300,10 +302,9 @@ generated using Isaac Lab Mimic for the ``Isaac-NutPour-GR1T2-Pink-IK-Abs-Mimic-
 
    .. code:: bash
 
-      ./isaaclab.sh -p scripts/imitation_learning/isaaclab_mimic/generate_dataset.py \
+      uv run --extra isaacsim,mimic python scripts/imitation_learning/isaaclab_mimic/generate_dataset.py \
       --task Isaac-NutPour-GR1T2-Pink-IK-Abs-Mimic-v0 \
       --visualizer kit \
-      --enable_cameras \
       --device cpu \
       --generation_num_trials 1000 \
       --num_envs 5 \
@@ -318,8 +319,8 @@ Use `Robomimic <https://robomimic.github.io/>`__ to train a visuomotor BC agent 
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/imitation_learning/robomimic/train.py \
-   --task Isaac-NutPour-GR1T2-Pink-IK-Abs-v0 \
+   uv run --extra isaacsim,mimic python scripts/imitation_learning/robomimic/train.py \
+   --task IsaacContrib-NutPour-GR1T2-Pink-IK-Abs \
    --algo bc \
    --normalize_training_actions \
    --dataset ./datasets/generated_dataset_gr1_nut_pouring.hdf5
@@ -344,11 +345,10 @@ Visualize the results of the trained policy by running the following command, us
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/imitation_learning/robomimic/play.py \
-   --task Isaac-NutPour-GR1T2-Pink-IK-Abs-v0 \
+   uv run --extra isaacsim,mimic python scripts/imitation_learning/robomimic/play.py \
+   --task IsaacContrib-NutPour-GR1T2-Pink-IK-Abs \
    --visualizer kit \
    --device cpu \
-   --enable_cameras \
    --num_rollouts 50 \
    --horizon 350 \
    --norm_factor_min <NORM_FACTOR_MIN> \
@@ -414,7 +414,7 @@ Generate the manipulation dataset
 The same data generation and policy training steps from Demo 1 can be applied to the G1 humanoid robot with locomanipulation capabilities.
 This demonstration shows how to train a G1 robot to perform pick and place tasks with full-body locomotion and manipulation.
 
-The process follows the same workflow as Demo 1, but uses the ``Isaac-PickPlace-Locomanipulation-G1-Abs-v0`` task environment.
+The process follows the same workflow as Demo 1, but uses the ``IsaacContrib-PickPlace-Locomanipulation-G1-Abs`` task environment.
 
 Follow the same data collection, annotation, and generation process as demonstrated in Demo 1, but adapted for the G1 locomanipulation task.
 
@@ -430,11 +430,11 @@ Follow the same data collection, annotation, and generation process as demonstra
 
    .. code:: bash
 
-      ./isaaclab.sh -p scripts/tools/record_demos.py \
+      uv run --extra teleop,isaacsim isaaclab teleop record \
       --device cpu \
       --xr \
       --visualizer kit \
-      --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0 \
+      --task IsaacContrib-PickPlace-Locomanipulation-G1-Abs \
       --dataset_file ./datasets/dataset_g1_locomanip.hdf5 \
       --num_demos 5
 
@@ -446,17 +446,17 @@ Follow the same data collection, annotation, and generation process as demonstra
 
    .. code:: bash
 
-      ./isaaclab.sh -p scripts/tools/replay_demos.py \
+      uv run --extra teleop,isaacsim isaaclab teleop replay \
       --device cpu \
       --visualizer kit \
-      --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0 \
+      --task IsaacContrib-PickPlace-Locomanipulation-G1-Abs \
       --dataset_file ./datasets/dataset_g1_locomanip.hdf5
 
    To annotate the demonstrations:
 
    .. code:: bash
 
-      ./isaaclab.sh -p scripts/imitation_learning/isaaclab_mimic/annotate_demos.py \
+      uv run --extra isaacsim,mimic python scripts/imitation_learning/isaaclab_mimic/annotate_demos.py \
       --device cpu \
       --visualizer kit \
       --task Isaac-Locomanipulation-G1-Abs-Mimic-v0 \
@@ -470,7 +470,7 @@ Place the file under ``IsaacLab/datasets`` and run the following command to gene
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/imitation_learning/isaaclab_mimic/generate_dataset.py \
+   uv run --extra isaacsim,mimic python scripts/imitation_learning/isaaclab_mimic/generate_dataset.py \
    --device cpu --num_envs 20 --generation_num_trials 1000 \
    --input_file ./datasets/dataset_annotated_g1_locomanip.hdf5 --output_file ./datasets/generated_dataset_g1_locomanip.hdf5
 
@@ -482,8 +482,8 @@ At this point you can train a policy that only performs manipulation tasks using
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/imitation_learning/robomimic/train.py \
-   --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0 --algo bc \
+   uv run --extra isaacsim,mimic python scripts/imitation_learning/robomimic/train.py \
+   --task IsaacContrib-PickPlace-Locomanipulation-G1-Abs --algo bc \
    --normalize_training_actions \
    --dataset ./datasets/generated_dataset_g1_locomanip.hdf5
 
@@ -494,10 +494,10 @@ Visualize the trained policy performance:
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/imitation_learning/robomimic/play.py \
+   uv run --extra isaacsim,mimic python scripts/imitation_learning/robomimic/play.py \
    --device cpu \
    --visualizer kit \
-   --task Isaac-PickPlace-Locomanipulation-G1-Abs-v0 \
+   --task IsaacContrib-PickPlace-Locomanipulation-G1-Abs \
    --num_rollouts 50 \
    --horizon 400 \
    --norm_factor_min <NORM_FACTOR_MIN> \
@@ -577,7 +577,7 @@ To generate the locomanipulation dataset, use the following command:
 
 .. code:: bash
 
-   ./isaaclab.sh -p \
+   uv run python \
        scripts/imitation_learning/locomanipulation_sdg/generate_data.py \
        --device cpu \
        --kit_args="--enable isaacsim.replicator.experimental.mobility_gen" \
@@ -587,7 +587,6 @@ To generate the locomanipulation dataset, use the following command:
        --lift_step 60 \
        --navigate_step 130 \
        --output_file ./datasets/generated_dataset_g1_locomanipulation_sdg.hdf5 \
-       --enable_cameras \
        --randomize_placement \
        --visualizer kit
 
@@ -613,7 +612,7 @@ This process creates a dataset where the robot performs the manipulation task at
 
    .. code:: bash
 
-      ./isaaclab.sh -p scripts/imitation_learning/locomanipulation_sdg/plot_navigation_trajectory.py --input_file datasets/generated_dataset_g1_locomanipulation_sdg.hdf5 --output_dir /PATH/TO/DESIRED_OUTPUT_DIR
+      uv run python scripts/imitation_learning/locomanipulation_sdg/plot_navigation_trajectory.py --input_file datasets/generated_dataset_g1_locomanipulation_sdg.hdf5 --output_dir /PATH/TO/DESIRED_OUTPUT_DIR
 
 The data generated from this locomanipulation pipeline can also be used to finetune an imitation learning policy using GR00T N1.5.
 The following steps describe how to install GR00T, convert the dataset to LeRobot format, finetune the policy, and run rollouts in Isaac Lab.
@@ -675,7 +674,7 @@ GR00T N1.5 expects data in LeRobot format. From the **IsaacLab** repository root
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/imitation_learning/locomanipulation_sdg/gr00t/convert_dataset.py <input_dir> <output_path>
+   uv run python scripts/imitation_learning/locomanipulation_sdg/gr00t/convert_dataset.py <input_dir> <output_path>
 
 Example — move the SDG output into its own directory first so the converter only sees SDG files:
 
@@ -683,7 +682,7 @@ Example — move the SDG output into its own directory first so the converter on
 
    mkdir -p ./datasets/locomanip_sdg
    mv ./datasets/generated_dataset_g1_locomanipulation_sdg.hdf5 ./datasets/locomanip_sdg/
-   ./isaaclab.sh -p scripts/imitation_learning/locomanipulation_sdg/gr00t/convert_dataset.py ./datasets/locomanip_sdg ./datasets/datasets_train_200_lerobot
+   uv run python scripts/imitation_learning/locomanipulation_sdg/gr00t/convert_dataset.py ./datasets/locomanip_sdg ./datasets/datasets_train_200_lerobot
 
 Finetune the policy
 """""""""""""""""""
@@ -730,7 +729,7 @@ From the **IsaacLab** repository root, run the rollout script with the path to y
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/imitation_learning/locomanipulation_sdg/gr00t/rollout_policy.py \
+   uv run python scripts/imitation_learning/locomanipulation_sdg/gr00t/rollout_policy.py \
        --model_path <checkpoint_dir_or_file> \
        --embodiment_tag new_embodiment \
        --dataset ./datasets/generated_dataset_g1_locomanip.hdf5 \
@@ -738,7 +737,6 @@ From the **IsaacLab** repository root, run the rollout script with the path to y
        --output_file ./datasets/rollout_output.hdf5 \
        --task Isaac-G1-SteeringWheel-Locomanipulation \
        --device cpu \
-       --enable_cameras \
        --visualizer kit
 
 Optional arguments include ``--randomize_placement`` and ``--policy_quat_format wxyz`` (use if your checkpoint was trained with wxyz quaternion format).
@@ -850,7 +848,7 @@ Run the generation command:
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/imitation_learning/locomanipulation_sdg/generate_data.py \
+   uv run --extra isaacsim,mimic python scripts/imitation_learning/locomanipulation_sdg/generate_data.py \
        --device cpu \
        --kit_args="--enable isaacsim.replicator.experimental.mobility_gen" \
        --task="Isaac-G1-SteeringWheel-Locomanipulation" \
@@ -859,7 +857,6 @@ Run the generation command:
        --lift_step 60 \
        --navigate_step 130 \
        --output_file <DATASET_FOLDER>/generated_dataset_g1_locomanipulation_sdg_gaussian_background.hdf5 \
-       --enable_cameras \
        --visualizer kit \
        --background_usd_path <PATH_TO_USD_ASSET>/stage_particle.usdz \
        --background_occupancy_yaml_file <PATH_TO_USD_ASSET>/occupancy_map.yaml \
@@ -878,7 +875,7 @@ observations. You can convert the ego-centric camera view to MP4:
 
 .. code:: bash
 
-   ./isaaclab.sh -p scripts/tools/hdf5_to_mp4.py \
+   uv run python scripts/tools/hdf5_to_mp4.py \
       --input_file <DATASET_FOLDER>/generated_dataset_g1_locomanipulation_sdg_gaussian_background.hdf5 \
       --output_dir <DATASET_FOLDER>/ \
       --input_keys robot_pov_cam \

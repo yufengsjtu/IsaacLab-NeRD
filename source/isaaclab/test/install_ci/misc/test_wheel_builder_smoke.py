@@ -5,27 +5,28 @@
 
 """
 Setup:
-    - bash tools/wheel_builder/build.sh
+    - uv build --wheel tools/wheel_builder --out-dir tools/wheel_builder/build/dist
     - ./isaaclab.sh -u
-    - uv pip install <wheel>[all]
+    - uv pip install <wheel>[sb3,skrl,rsl-rl]
 Tests:
     - import isaaclab -> verify importable
     - from isaaclab import __version__ -> verify version matches wheel filename
+    - inspect the wheel and isaaclab.__path__ -> verify the core package has a flat layout
     - from isaaclab import _deprioritize_prebundle_paths -> verify wheel exports path sanitizer
     - from isaaclab.app import AppLauncher -> verify importable
-    - from isaaclab.envs import ViewerCfg -> verify importable
+    - from isaaclab.envs import VideoRecorderCfg -> verify importable
     - from isaaclab_assets.robots.allegro import ALLEGRO_HAND_CFG -> verify importable
     - from isaaclab.scene import InteractiveSceneCfg -> verify importable
     - python -m isaaclab --help -> verify CLI functional
+    - verify project-generator resources are installed
     - import pinocchio -> verify importable
-    - inspect built wheel -> verify each promoted extension keeps
-        isaaclab/source/<ext>/config/extension.toml for Kit discovery
+    - python -c "import importlib.util; raise SystemExit(importlib.util.find_spec('pytetwild') is not None)"
+        -> verify the RL extras omit tetrahedralization dependencies
 """
 
 from __future__ import annotations
 
 import glob
-import re
 import shutil
 import zipfile
 
@@ -33,10 +34,12 @@ import pytest
 from utils import UV_Mixin, run_cmd
 
 
-class Test_Wheel_Builder(UV_Mixin):
-    """Test building the isaaclab wheel and installing it in a uv environment."""
+@pytest.mark.smoke
+class Test_Wheel_Builder_Smoke(UV_Mixin):
+    """Test building and installing the Isaac Lab wheel with selected RL extras."""
 
     _wheel: str = ""
+    _extras: str = "[sb3,skrl,rsl-rl]"
 
     @classmethod
     def setup_class(cls):
@@ -48,12 +51,20 @@ class Test_Wheel_Builder(UV_Mixin):
         """Build the wheel and install it in a uv environment once for all tests."""
 
         cls = self.__class__
-        build_script = isaaclab_root / "tools" / "wheel_builder" / "build.sh"
-        dist_dir = isaaclab_root / "tools" / "wheel_builder" / "build" / "dist"
+        builder_dir = isaaclab_root / "tools" / "wheel_builder"
+        dist_dir = builder_dir / "build" / "dist"
+        shutil.rmtree(dist_dir, ignore_errors=True)
+        dist_dir.mkdir(parents=True)
 
-        # Build the wheel
-        result = run_cmd(["bash", str(build_script)], cwd=isaaclab_root)
-        assert result.returncode == 0, f"build.sh failed:\n{result.stdout}\n{result.stderr}"
+        # Build through the PEP 517 entry point used by Git-source consumers. Capture output
+        # silently to avoid spamming the test log with 10k+
+        # setuptools/pip lines; the captured output is included in the assertion if it fails).
+        result = run_cmd(
+            ["uv", "build", "--wheel", str(builder_dir), "--out-dir", str(dist_dir)],
+            cwd=isaaclab_root,
+            stream=False,
+        )
+        assert result.returncode == 0, f"PEP 517 wheel build failed:\n{result.stdout}\n{result.stderr}"
 
         # Find the built wheel
         wheels = glob.glob(str(dist_dir / "isaaclab-*.whl"))
@@ -67,7 +78,7 @@ class Test_Wheel_Builder(UV_Mixin):
         cls.env_path = self.env_path
         cls.python = self.python
         cls.cli_script = self.cli_script
-        result = self.run_in_uv_env(["uv", "pip", "install", cls._wheel + "[all]"])
+        result = self.run_in_uv_env(["uv", "pip", "install", cls._wheel + cls._extras])
         assert result.returncode == 0, f"uv pip install wheel failed:\n{result.stdout}\n{result.stderr}"
 
         yield
@@ -75,13 +86,13 @@ class Test_Wheel_Builder(UV_Mixin):
         self.destroy_uv_env()
 
     # import isaaclab
-    def test_import_isaaclab(self):
+    def test_isaaclab_importable(self):
         """Verify 'isaaclab' is importable."""
         result = self.run_in_uv_env(["python", "-c", "import isaaclab;"])
         assert result.returncode == 0, f"import isaaclab failed:\n{result.stdout}\n{result.stderr}"
 
     # from isaaclab import __version__; print(__version__)
-    def test_version_matches_wheel(self):
+    def test_isaaclab_version_matches_wheel(self):
         """Verify isaaclab.__version__ matches the wheel version."""
         result = self.run_in_uv_env(["python", "-c", "from isaaclab import __version__; print(__version__)"])
         imported_version = result.stdout.strip()
@@ -89,6 +100,27 @@ class Test_Wheel_Builder(UV_Mixin):
         assert imported_version == expected_version, (
             f"isaaclab.__version__ mismatch: expected {expected_version}, got {imported_version}"
         )
+
+    def test_isaaclab_package_has_flat_layout(self):
+        """Verify core modules are installed directly under the top-level package."""
+        with zipfile.ZipFile(self._wheel) as wheel:
+            names = set(wheel.namelist())
+
+        assert "isaaclab/app/__init__.py" in names
+        assert "isaaclab/apps/isaaclab.python.kit" in names
+        nested_prefix = "isaaclab/source/isaaclab/isaaclab/"
+        assert not any(name.startswith(nested_prefix) for name in names)
+
+        result = self.run_in_uv_env(
+            [
+                "python",
+                "-c",
+                "import isaaclab; "
+                "from pathlib import Path; "
+                "assert list(isaaclab.__path__) == [str(Path(isaaclab.__file__).parent)]",
+            ]
+        )
+        assert result.returncode == 0, f"isaaclab has multiple package roots:\n{result.stdout}\n{result.stderr}"
 
     # from isaaclab import _deprioritize_prebundle_paths
     def test_isaaclab_prebundle_path_sanitizer_exported(self):
@@ -99,70 +131,62 @@ class Test_Wheel_Builder(UV_Mixin):
         assert result.returncode == 0, f"import path sanitizer failed:\n{result.stdout}\n{result.stderr}"
 
     # from isaaclab.app import AppLauncher
-    def test_import_isaaclab_app(self):
+    def test_isaaclab_app_importable(self):
         """Verify isaaclab.app and AppLauncher are importable."""
         result = self.run_in_uv_env(["python", "-c", "from isaaclab.app import AppLauncher"])
         assert result.returncode == 0, f"import isaaclab.app failed:\n{result.stdout}\n{result.stderr}"
 
-    # from isaaclab.envs import ViewerCfg
-    def test_import_isaaclab_envs(self):
+    # from isaaclab.envs import VideoRecorderCfg
+    def test_isaaclab_envs_importable(self):
         """Verify isaaclab.envs is importable."""
-        result = self.run_in_uv_env(["python", "-c", "from isaaclab.envs import ViewerCfg"])
+        result = self.run_in_uv_env(["python", "-c", "from isaaclab.envs import VideoRecorderCfg"])
         assert result.returncode == 0, f"import isaaclab.envs failed:\n{result.stdout}\n{result.stderr}"
 
     # from isaaclab_assets.robots.allegro import ALLEGRO_HAND_CFG
-    def test_import_isaaclab_assets(self):
+    def test_isaaclab_assets_importable(self):
         """Verify isaaclab_assets is importable."""
         result = self.run_in_uv_env(["python", "-c", "from isaaclab_assets.robots.allegro import ALLEGRO_HAND_CFG"])
         assert result.returncode == 0, f"import isaaclab_assets failed:\n{result.stdout}\n{result.stderr}"
 
     # from isaaclab.scene import InteractiveSceneCfg
-    def test_import_isaaclab_scene(self):
+    def test_isaaclab_scene_importable(self):
         """Verify isaaclab.scene and InteractiveSceneCfg are importable."""
         result = self.run_in_uv_env(["python", "-c", "from isaaclab.scene import InteractiveSceneCfg"])
         assert result.returncode == 0, f"import isaaclab.scene failed:\n{result.stdout}\n{result.stderr}"
 
     # python -m isaaclab --help
-    def test_cli_help(self):
+    def test_python_m_isaaclab_help_works(self):
         """Verify the isaaclab CLI is functional."""
         result = self.run_in_uv_env(["python", "-m", "isaaclab", "--help"])
         assert result.returncode == 0, f"isaaclab CLI help failed:\n{result.stdout}\n{result.stderr}"
 
+    def test_project_generator_is_bundled(self):
+        """Verify the installed CLI includes the project generator."""
+        result = self.run_in_uv_env(
+            [
+                "python",
+                "-c",
+                "from isaaclab.cli.utils import ISAACLAB_ROOT; "
+                "assert (ISAACLAB_ROOT / 'tools/template/cli.py').is_file()",
+            ]
+        )
+        assert result.returncode == 0, f"project generator is missing from the wheel:\n{result.stderr}"
+
     # import pinocchio as pin; print(pin.__version__)
-    def test_pinocchio_import(self):
+    def test_pinocchio_importable(self):
         """Verify pinocchio is importable and has the expected version."""
         result = self.run_in_uv_env(["python", "-c", "import pinocchio as pin; print(pin.__version__)"])
         assert result.returncode == 0, f"import pinocchio failed:\n{result.stdout}\n{result.stderr}"
 
-    # inspect the built wheel's file layout
-    def test_promoted_extensions_remain_discoverable_under_source(self):
-        """Each promoted extension must keep ``isaaclab/source/<ext>/config/extension.toml``.
-
-        The ``apps/*.kit`` experience files register ``${app}/../source`` as a Kit extension
-        search folder. ``build.sh`` promotes each extension's Python package to the top level
-        (for ``import isaaclab_<ext>``); if it also drops the extension from ``source/`` then Kit
-        cannot resolve it and the dependency solver aborts with
-        ``isaaclab_assets ... (none found)`` before the app starts. This guards against that
-        regression by checking the wheel layout directly.
-        """
-        with zipfile.ZipFile(self._wheel) as wheel:
-            names = set(wheel.namelist())
-
-        # Promoted extensions are top-level packages named ``isaaclab_<ext>`` that ship a
-        # ``config/extension.toml`` (the core ``isaaclab`` package is handled separately and is
-        # not promoted, so it is intentionally excluded here).
-        promoted = sorted(
-            {
-                match.group(1)
-                for name in names
-                if (match := re.fullmatch(r"(isaaclab_[^/]+)/config/extension.toml", name))
-            }
+    def test_install_rl_extras_omits_tetrahedralization_dependencies(self):
+        """Verify the wheel's RL extras do not install pytetwild."""
+        result = self.run_in_uv_env(
+            [
+                "python",
+                "-c",
+                "import importlib.util; raise SystemExit(importlib.util.find_spec('pytetwild') is not None)",
+            ]
         )
-        assert promoted, f"No promoted extensions found in wheel {self._wheel}; namelist may have changed."
-        assert "isaaclab_assets" in promoted, f"Expected isaaclab_assets among promoted extensions, got: {promoted}"
-
-        missing = [ext for ext in promoted if f"isaaclab/source/{ext}/config/extension.toml" not in names]
-        assert not missing, (
-            "Promoted extensions are missing their Kit-discoverable config/extension.toml under "
-            f"isaaclab/source/ (Kit dependency resolution will fail for these): {missing}"
+        assert result.returncode == 0, (
+            f"pytetwild should not be installed by {self._extras}:\n{result.stdout}\n{result.stderr}"
         )

@@ -23,7 +23,7 @@ from pxr import Usd
 
 import isaaclab.sim as sim_utils
 
-pytestmark = pytest.mark.isaacsim_ci
+pytestmark = [pytest.mark.integration, pytest.mark.isaacsim_ci]
 
 
 def test_create_new_stage():
@@ -203,6 +203,35 @@ def test_save_stage_invalid_path():
         sim_utils.save_stage("/tmp/test.invalid")
 
 
+@pytest.mark.parametrize(
+    "scheme, scheme_end",
+    [
+        ("http://", "example.com/file.usd"),
+        ("https://", "example.com/assets/textures/sky.hdr"),
+        ("omniverse://", "path/to/file.usd"),
+        ("s3://", "bucket-name/path/to/asset.usd"),
+    ],
+)
+def test_save_stage_preserves_uri_asset_paths(scheme, scheme_end):
+    """Test saving stage preserves URI asset paths."""
+    from pxr import UsdLux
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        stage = sim_utils.create_new_stage()
+        dome_light = UsdLux.DomeLight.Define(stage, "/World/skyLight")
+        ref = scheme + scheme_end
+        dome_light.CreateTextureFileAttr().Set(ref)
+
+        save_path = Path(temp_dir) / "test_stage.usda"
+        result = sim_utils.save_stage(str(save_path), save_and_reload_in_place=False)
+
+        assert result is True
+        saved_stage = save_path.read_text(encoding="utf-8")
+        assert f"@{ref}@" in saved_stage
+        assert f"../{scheme}" not in saved_stage
+        assert rf"..\{scheme}" not in saved_stage
+
+
 def test_close_stage():
     """Test closing the current stage."""
     # Create a stage
@@ -290,6 +319,49 @@ def test_resolve_paths():
         cube_prim = dest_stage.GetPrimAtPath("/World/Cube")
         assert cube_prim.IsValid()
         assert cube_prim.GetTypeName() == "Cube"
+
+
+def test_resolve_paths_keeps_search_path_assets():
+    """Test resolve_paths leaves search-path asset identifiers untouched.
+
+    Identifiers such as the MDL module ``OmniPBR.mdl`` are resolved against the renderer's module
+    path rather than the layer's directory, so re-anchoring one to the destination layer yields a
+    path relative to the process working directory that resolves to nothing.
+    """
+    from pxr import Sdf, UsdShade
+
+    from isaaclab.sim.utils.stage import resolve_paths
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Create a mesh the source asset references through a directory-qualified relative path
+        mesh_path = Path(temp_dir) / "meshes" / "mesh.usda"
+        mesh_path.parent.mkdir(parents=True, exist_ok=True)
+        mesh_stage = Usd.Stage.CreateNew(str(mesh_path))
+        mesh_stage.GetRootLayer().Save()
+
+        # Create the source asset with a mesh reference and an MDL shader
+        source_path = Path(temp_dir) / "asset.usda"
+        source_stage = Usd.Stage.CreateNew(str(source_path))
+        world_prim = source_stage.DefinePrim("/World", "Xform")
+        world_prim.GetReferences().AddReference("./meshes/mesh.usda")
+        shader = UsdShade.Shader.Define(source_stage, "/World/Looks/red/red")
+        shader.SetSourceAsset(Sdf.AssetPath("OmniPBR.mdl"), "mdl")
+        source_stage.GetRootLayer().Save()
+
+        # Copy the layer one directory deeper, as export_prim_to_file does for instanceable meshes
+        dest_path = Path(temp_dir) / "Props" / "instanceable_meshes.usda"
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_layer = Sdf.Layer.CreateNew(str(dest_path))
+        dest_layer.TransferContent(source_stage.GetRootLayer())
+
+        resolve_paths(str(source_path), str(dest_path))
+        dest_layer.Save()
+
+        contents = dest_layer.ExportToString()
+        # the MDL module keeps its search-path identifier
+        assert "@OmniPBR.mdl@" in contents
+        # the mesh reference is re-anchored to the new location
+        assert "@../meshes/mesh.usda@" in contents
 
 
 def test_stage_context_tracking():

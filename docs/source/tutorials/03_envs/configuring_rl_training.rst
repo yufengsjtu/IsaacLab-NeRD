@@ -22,13 +22,13 @@ the :ref:`tutorial-register-rl-env-gym` tutorial, you can register the learning 
 The Code
 --------
 
-As an example, we will look at the configuration included for the task ``Isaac-Cartpole-v0``
+As an example, we will look at the configuration included for the task ``Isaac-Cartpole``
 in the ``isaaclab_tasks`` package. This is the same task that we used in the
 :ref:`tutorial-run-rl-training` tutorial.
 
-.. literalinclude:: ../../../../source/isaaclab_tasks/isaaclab_tasks/manager_based/classic/cartpole/__init__.py
+.. literalinclude:: ../../../../source/isaaclab_tasks/isaaclab_tasks/core/cartpole/__init__.py
    :language: python
-   :lines: 18-29
+   :lines: 50-64
 
 The Code Explained
 ------------------
@@ -53,11 +53,11 @@ are equivalent:
       from . import agents
 
       gym.register(
-         id="Isaac-Cartpole-v0",
+         id="Isaac-Cartpole",
          entry_point="isaaclab.envs:ManagerBasedRLEnv",
          disable_env_checker=True,
          kwargs={
-            "env_cfg_entry_point": f"{__name__}.cartpole_env_cfg:CartpoleEnvCfg",
+            "env_cfg_entry_point": f"{__name__}.cartpole_manager_env_cfg:CartpoleEnvCfg",
             "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:CartpolePPORunnerCfg",
          },
       )
@@ -70,11 +70,11 @@ are equivalent:
       from . import agents
 
       gym.register(
-         id="Isaac-Cartpole-v0",
+         id="Isaac-Cartpole",
          entry_point="isaaclab.envs:ManagerBasedRLEnv",
          disable_env_checker=True,
          kwargs={
-            "env_cfg_entry_point": f"{__name__}.cartpole_env_cfg:CartpoleEnvCfg",
+            "env_cfg_entry_point": f"{__name__}.cartpole_manager_env_cfg:CartpoleEnvCfg",
             "rsl_rl_cfg_entry_point": agents.rsl_rl_ppo_cfg.CartpolePPORunnerCfg,
          },
       )
@@ -93,7 +93,7 @@ reads the configuration instance:
 .. dropdown:: Code for train_sb3.py with SB3
     :icon: code
 
-    .. literalinclude:: ../../../../scripts/reinforcement_learning/sb3/train_sb3.py
+    .. literalinclude:: ../../../../source/isaaclab_rl/isaaclab_rl/entrypoints/backends/train_sb3.py
       :language: python
       :linenos:
       :emphasize-lines: 56-60, 97-98
@@ -110,26 +110,57 @@ we can use the ``--agent`` argument to specify the configuration instance to use
 
 * Training with the standard PPO configuration:
 
-  .. code-block:: bash
+  .. tab-set::
 
-    # standard PPO training
-    ./isaaclab.sh train --rl_library rsl_rl --task Isaac-Cartpole-v0 \
-      --run_name ppo
+     .. tab-item:: uv (Recommended)
+
+        .. code-block:: bash
+
+          # standard PPO training
+          uv run isaaclab train --rl_library rsl_rl --task Isaac-Cartpole \
+            --run_name ppo
+
+     .. tab-item:: isaaclab.sh / isaaclab.bat
+
+        .. code-block:: bash
+
+          # standard PPO training
+          ./isaaclab.sh train --rl_library rsl_rl --task Isaac-Cartpole \
+            --run_name ppo
 
 * Training with the PPO configuration with symmetry augmentation:
 
-  .. code-block:: bash
+  .. tab-set::
 
-    # PPO training with symmetry augmentation
-    ./isaaclab.sh train --rl_library rsl_rl --task Isaac-Cartpole-v0 \
-      --agent rsl_rl_with_symmetry_cfg_entry_point \
-      --run_name ppo_with_symmetry_data_augmentation
+     .. tab-item:: uv (Recommended)
 
-    # you can use hydra to disable symmetry augmentation but enable mirror loss computation
-    ./isaaclab.sh train --rl_library rsl_rl --task Isaac-Cartpole-v0 \
-      --agent rsl_rl_with_symmetry_cfg_entry_point \
-      --run_name ppo_without_symmetry_data_augmentation \
-      agent.algorithm.symmetry_cfg.use_data_augmentation=false
+        .. code-block:: bash
+
+          # PPO training with symmetry augmentation
+          uv run isaaclab train --rl_library rsl_rl --task Isaac-Cartpole \
+            --agent rsl_rl_with_symmetry_cfg_entry_point \
+            --run_name ppo_with_symmetry_data_augmentation
+
+          # you can use hydra to disable symmetry augmentation but enable mirror loss computation
+          uv run isaaclab train --rl_library rsl_rl --task Isaac-Cartpole \
+            --agent rsl_rl_with_symmetry_cfg_entry_point \
+            --run_name ppo_without_symmetry_data_augmentation \
+            agent.algorithm.symmetry_cfg.use_data_augmentation=false
+
+     .. tab-item:: isaaclab.sh / isaaclab.bat
+
+        .. code-block:: bash
+
+          # PPO training with symmetry augmentation
+          ./isaaclab.sh train --rl_library rsl_rl --task Isaac-Cartpole \
+            --agent rsl_rl_with_symmetry_cfg_entry_point \
+            --run_name ppo_with_symmetry_data_augmentation
+
+          # you can use hydra to disable symmetry augmentation but enable mirror loss computation
+          ./isaaclab.sh train --rl_library rsl_rl --task Isaac-Cartpole \
+            --agent rsl_rl_with_symmetry_cfg_entry_point \
+            --run_name ppo_without_symmetry_data_augmentation \
+            agent.algorithm.symmetry_cfg.use_data_augmentation=false
 
 The ``--run_name`` argument is used to specify the name of the run. This is used to
 create a directory for the run in the ``logs/rsl_rl/cartpole`` directory.

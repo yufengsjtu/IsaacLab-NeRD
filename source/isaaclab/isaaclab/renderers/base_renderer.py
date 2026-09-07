@@ -8,14 +8,30 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .camera_render_spec import CameraRenderSpec
 from .output_contract import RenderBufferKind, RenderBufferSpec
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    import torch
+
     from isaaclab.sensors.camera.camera_data import CameraData
     from isaaclab.utils.warp import ProxyArray
+
+
+@dataclass(frozen=True)
+class VisualMaterialBatch:
+    """One flat material-channel buffer and its aligned backend addresses."""
+
+    channel: str
+    material_paths: tuple[str, ...]
+    shader_paths: tuple[str, ...]
+    input_names: tuple[str, ...]
+    values: torch.Tensor
 
 
 class BaseRenderer(ABC):
@@ -24,6 +40,15 @@ class BaseRenderer(ABC):
     def initialize(self) -> None:
         """Post-physics one-time initialization hook. Called only once."""
         return
+
+    @property
+    def visual_material_writer(self) -> Callable[[tuple[VisualMaterialBatch, ...]], Any] | None:
+        """Return the backend's shared material-writer factory, if supported.
+
+        Its writer accepts ``None`` for a full sync or channel-to-material-offset device arrays plus
+        one environment-id device array for partial writes, and provides an idempotent ``close()``.
+        """
+        return None
 
     def prepare_cameras(self, stage: Any, spec: CameraRenderSpec) -> None:
         """Pre-render per-camera setup the backend needs.
@@ -94,7 +119,16 @@ class BaseRenderer(ABC):
     def update_transforms(self) -> None:
         """Update scene transforms before rendering.
 
-        Called to sync physics/asset state into the renderer's scene representation.
+        Called to sync physics/asset pose state into the renderer's scene representation.
+        """
+        pass
+
+    @abstractmethod
+    def update_geometries(self) -> None:
+        """Update mutable geometry attributes before rendering.
+
+        Called to sync physics-driven geometry such as mesh points, extents, or other
+        per-frame geometry buffers into the renderer's scene representation.
         """
         pass
 
@@ -147,3 +181,17 @@ class BaseRenderer(ABC):
             render_data: The render data object to clean up, or ``None``.
         """
         pass
+
+    def close(self) -> None:
+        """Release resources owned by the renderer itself rather than by a render data.
+
+        A renderer is shared by every camera whose configuration resolves to it (see
+        :meth:`~isaaclab.renderers.render_context.RenderContext.get_renderer`), so state it owns
+        outlives any single camera and cannot be released from :meth:`cleanup`.
+        :meth:`~isaaclab.renderers.render_context.RenderContext.close` calls this once at
+        simulation teardown, while the stage and the underlying renderer backend are still alive.
+
+        The default implementation is a no-op, for backends whose state lives entirely on the
+        render data. Implementations must be idempotent.
+        """
+        return

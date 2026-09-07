@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -16,7 +17,7 @@ from newton.selection import ArticulationView
 from pxr import UsdPhysics
 
 from isaaclab.sensors.joint_wrench import BaseJointWrenchSensor
-from isaaclab.sim.utils.queries import get_all_matching_child_prims, resolve_matching_prims_from_source
+from isaaclab.sim.utils.queries import resolve_matching_prims_from_source
 
 from isaaclab_newton.physics import NewtonManager
 
@@ -125,33 +126,21 @@ class JointWrenchSensor(BaseJointWrenchSensor):
         """PHYSICS_READY callback: builds the articulation view and binds model / state arrays."""
         super()._initialize_impl()
 
-        model = NewtonManager.get_model()
-        state_0 = NewtonManager.get_state_0()
+        model, state_0 = NewtonManager.get_model(), NewtonManager.get_state_0()
 
         def has_articulation_root_api(prim) -> bool:
             return bool(prim.HasAPI(UsdPhysics.ArticulationRootAPI))
 
-        matches = resolve_matching_prims_from_source(self.cfg.prim_path)
-        if not matches:
-            raise RuntimeError(f"No prim found at '{self.cfg.prim_path}'.")
-        asset_prim, root_expr = matches[0]
-        walk_root = asset_prim.GetPath().pathString
-        root_prims = get_all_matching_child_prims(
-            walk_root, predicate=has_articulation_root_api, traverse_instance_prims=False
-        )
-        if len(root_prims) != 1:
-            matched = [p.GetPath().pathString for p in root_prims]
-            raise RuntimeError(
-                f"Expected exactly one ArticulationRootAPI prim under '{walk_root}'"
-                f" (resolved from '{self.cfg.prim_path}'), found {len(root_prims)}: {matched}."
+        resolve_kwargs = {"predicate": has_articulation_root_api, "expected_num_matches": 1}
+        _, root_prim_path_expr = resolve_matching_prims_from_source(self.cfg.prim_path, **resolve_kwargs)[0]
+        self._root_view = NewtonManager.views.get((NewtonManager, root_prim_path_expr))
+        if self._root_view is None:
+            self._root_view = NewtonManager.views[NewtonManager, root_prim_path_expr] = ArticulationView(
+                model,
+                re.compile(root_prim_path_expr),
+                verbose=False,
+                exclude_joint_types=[JointType.FREE, JointType.FIXED],
             )
-        root_prim_path_expr = root_expr + root_prims[0].GetPath().pathString[len(walk_root) :]
-        self._root_view = ArticulationView(
-            model,
-            root_prim_path_expr.replace(".*", "*"),
-            verbose=False,
-            exclude_joint_types=[JointType.FREE, JointType.FIXED],
-        )
         self._num_joints = self._root_view.joint_count
         if self._num_joints == 0:
             raise RuntimeError(

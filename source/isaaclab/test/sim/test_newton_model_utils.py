@@ -12,32 +12,29 @@ from __future__ import annotations
 import warnings
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
-import torch
 import warp as wp
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
-from isaaclab.cloner import ClonePlan
 from isaaclab.sim.utils.newton_model_utils import (
     _OMNIPBR_DEFAULTS,
     _UNBOUND_DEFAULT_FALLBACK_GRAY,
-    _build_clone_source_map,
     _get_omnipbr_albedo,
     _resolve_shape_color,
-    _scatter_shape_color_rows_kernel,
-    replace_newton_shape_colors,
+    replace_newton_builder_shape_colors,
 )
+
+pytestmark = pytest.mark.integration
 
 _WARNING_MESSAGE = "Newton shape color replacement is enabled; this workaround will be deprecated in a future release."
 
 
-def _replace_newton_shape_colors_wrapper(model: object, stage: Usd.Stage | None = None) -> int:
-    """Call :func:`replace_newton_shape_colors` with :class:`FutureWarning` suppressed in test reports."""
+def _replace_newton_builder_shape_colors_wrapper(builder: object, stage: Usd.Stage) -> int:
+    """Call :func:`replace_newton_builder_shape_colors` with :class:`FutureWarning` suppressed in test reports."""
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=_WARNING_MESSAGE, category=FutureWarning)
-        return replace_newton_shape_colors(model, stage)
+        return replace_newton_builder_shape_colors(builder, stage)
 
 
 _OMNIPBR_ALBEDO_INPUT_CASES = [
@@ -151,43 +148,6 @@ def _reference_linear_to_srgb(rgb: tuple[float, float, float]) -> tuple[float, f
     return (linear_to_srgb(r), linear_to_srgb(g), linear_to_srgb(b))
 
 
-def _run_scatter_shape_color_rows_kernel(
-    linear_colors: list[tuple[float, float, float]],
-    device: str,
-) -> torch.Tensor:
-    """Launch :func:`_scatter_shape_color_rows_kernel` on ``device``."""
-    num_colors = len(linear_colors)
-    row_indices = list(range(num_colors))
-
-    shape_colors = wp.zeros(num_colors, dtype=wp.vec3, device=device)
-    idx_wp = wp.array(row_indices, dtype=wp.int32, device=device)
-    colors_np = np.asarray(linear_colors, dtype=np.float32).reshape(num_colors, 3)
-    row_colors = wp.from_numpy(colors_np, dtype=wp.vec3, device=device)
-    wp.launch(
-        _scatter_shape_color_rows_kernel,
-        dim=num_colors,
-        inputs=[shape_colors, idx_wp, row_colors],
-        device=device,
-    )
-    return wp.to_torch(shape_colors)
-
-
-@pytest.mark.parametrize(
-    "linear_rgb",
-    [
-        pytest.param((0.002, 0.0, 0.21404114048), id="low_linear_zero_pow"),
-        pytest.param((-0.25, 1.75, 0.5), id="oob_clamps_pow"),
-    ],
-)
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
-def test_scatter_shape_color_rows_kernel(device: str, linear_rgb: tuple[float, float, float]):
-    """Packed RGB per case; the two parametrized cases jointly cover every ``_linear_channel_to_srgb_warp`` branch."""
-    after = _run_scatter_shape_color_rows_kernel([linear_rgb], device=device)
-    exp = _reference_linear_to_srgb(linear_rgb)
-    for ch in range(3):
-        assert after[0, ch].item() == pytest.approx(exp[ch], rel=1e-5)
-
-
 @pytest.mark.parametrize(("diffuse_color_constant", "diffuse_tint"), _OMNIPBR_ALBEDO_INPUT_CASES)
 def test_get_omnipbr_albedo(
     diffuse_color_constant: tuple[float, float, float] | None,
@@ -278,63 +238,27 @@ def test_resolve_shape_color_neutral_material_binding():
     assert _resolve_shape_color(stage, mesh_path, {}) is None
 
 
-def test_replace_newton_shape_colors_warning():
+def test_replace_newton_builder_shape_colors_warning():
     """A :exc:`FutureWarning` is expected by default."""
-    model = SimpleNamespace(shape_label=None, shape_color=None)
+    builder = SimpleNamespace(shape_label=None, shape_color=None)
 
     with pytest.warns(FutureWarning, match=_WARNING_MESSAGE):
-        replace_newton_shape_colors(model)
+        replace_newton_builder_shape_colors(builder, stage=Usd.Stage.CreateInMemory())
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
-def test_replace_newton_shape_colors_env_var_switch(monkeypatch: pytest.MonkeyPatch, device: str):
-    """Setting ``ISAACLAB_REPLACE_NEWTON_SHAPE_COLORS`` to ``0`` disables the workaround."""
-    monkeypatch.setenv("ISAACLAB_REPLACE_NEWTON_SHAPE_COLORS", "0")
-
-    # Set up a stage that has a prim with display color primvar and no material binding. If the workaround was enabled,
-    # the prim's color in the model would be synced with the display color primvar.
-    stage = Usd.Stage.CreateInMemory()
-    mesh = UsdGeom.Mesh.Define(stage, "/World/A")
-    assert mesh.GetPrim().IsValid()
-    pv = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar(
-        "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant, 1
-    )
-    pv.Set([Gf.Vec3f(0.2, 0.4, 0.6)])
-
-    shape_color = wp.zeros(1, dtype=wp.vec3, device=device)
-    before = wp.to_torch(shape_color).clone()
-    model = SimpleNamespace(shape_label=["/World/A"], shape_color=shape_color)
-
-    # The workaround is disabled, so the shape color is expected to be unchanged
-    with warnings.catch_warnings(record=True) as recorded:
-        warnings.simplefilter("always")
-        num_colors_updated = replace_newton_shape_colors(model, stage)
-
-    assert num_colors_updated == 0
-    assert torch.allclose(wp.to_torch(shape_color), before)
-
-    # No FutureWarning is expected
-    assert not any(issubclass(w.category, FutureWarning) for w in recorded)
-
-
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
-def test_replace_newton_shape_colors_invalid_prim(device: str):
-    """Invalid prim path leaves ``shape_color`` unchanged."""
+def test_replace_newton_builder_shape_colors_invalid_prim():
+    """Invalid prim path leaves ``shape_color`` entry unchanged."""
     stage = Usd.Stage.CreateInMemory()
 
-    shape_color = wp.array([(0.1, 0.2, 0.3)], dtype=wp.vec3, device=device)
-    before = wp.to_torch(shape_color).clone()
+    initial = (0.1, 0.2, 0.3)
+    builder = SimpleNamespace(shape_label=["/World/Missing"], shape_color=[wp.vec3(*initial)])
 
-    model = SimpleNamespace(shape_label=["/World/Missing"], shape_color=shape_color)
-
-    count = _replace_newton_shape_colors_wrapper(model, stage)
-    assert count == 0
-    assert torch.allclose(wp.to_torch(shape_color), before)
+    assert _replace_newton_builder_shape_colors_wrapper(builder, stage) == 0
+    assert tuple(builder.shape_color[0]) == pytest.approx(initial)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
-def test_replace_newton_shape_colors_guide_purpose(device: str):
-    """Guide-purpose mesh leaves ``shape_color`` unchanged."""
+def test_replace_newton_builder_shape_colors_guide_purpose():
+    """Guide-purpose mesh leaves ``shape_color`` entry unchanged."""
     stage = Usd.Stage.CreateInMemory()
     mesh = UsdGeom.Mesh.Define(stage, "/World/GuideMesh")
     assert mesh.GetPrim().IsValid()
@@ -342,17 +266,14 @@ def test_replace_newton_shape_colors_guide_purpose(device: str):
     assert purpose_attr.IsValid()
     purpose_attr.Set(UsdGeom.Tokens.guide)
 
-    shape_color = wp.array([(0.1, 0.2, 0.3)], dtype=wp.vec3, device=device)
-    before = wp.to_torch(shape_color).clone()
-    model = SimpleNamespace(shape_label=["/World/GuideMesh"], shape_color=shape_color)
+    initial = (0.1, 0.2, 0.3)
+    builder = SimpleNamespace(shape_label=["/World/GuideMesh"], shape_color=[wp.vec3(*initial)])
 
-    count = _replace_newton_shape_colors_wrapper(model, stage)
-    assert count == 0
-    assert torch.allclose(wp.to_torch(shape_color), before)
+    assert _replace_newton_builder_shape_colors_wrapper(builder, stage) == 0
+    assert tuple(builder.shape_color[0]) == pytest.approx(initial)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
-def test_replace_newton_shape_colors_no_material_binding(device: str):
+def test_replace_newton_builder_shape_colors_no_material_binding():
     """No material: ``displayColor`` or unbound gray as linear RGB, then sRGB OETF into ``shape_color``."""
     stage = Usd.Stage.CreateInMemory()
 
@@ -367,61 +288,45 @@ def test_replace_newton_shape_colors_no_material_binding(device: str):
     # Mesh B has no material binding and no display color primvar.
     UsdGeom.Mesh.Define(stage, "/World/B")
 
-    shape_labels = ["/World/A", "/World/B"]
-    num_shapes = len(shape_labels)
-    shape_colors = wp.zeros(num_shapes, dtype=wp.vec3, device=device)
-    model = SimpleNamespace(shape_label=shape_labels, shape_color=shape_colors)
+    builder = SimpleNamespace(
+        shape_label=["/World/A", "/World/B"],
+        shape_color=[wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0)],
+    )
 
-    num_colors_updated = _replace_newton_shape_colors_wrapper(model, stage)
-    assert num_colors_updated == 2
-
-    after = wp.to_torch(shape_colors)
-    exp_a = _reference_linear_to_srgb(color_a)
-    exp_b = _reference_linear_to_srgb(_UNBOUND_DEFAULT_FALLBACK_GRAY)
-    expected = torch.tensor([exp_a, exp_b], dtype=after.dtype, device=after.device)
-    torch.testing.assert_close(after, expected, rtol=1e-5, atol=1e-5)
+    assert _replace_newton_builder_shape_colors_wrapper(builder, stage) == 2
+    assert tuple(builder.shape_color[0]) == pytest.approx(_reference_linear_to_srgb(color_a), rel=1e-5)
+    assert tuple(builder.shape_color[1]) == pytest.approx(
+        _reference_linear_to_srgb(_UNBOUND_DEFAULT_FALLBACK_GRAY), rel=1e-5
+    )
 
 
 @pytest.mark.parametrize(("diffuse_color_constant", "diffuse_tint"), _OMNIPBR_ALBEDO_INPUT_CASES)
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
-def test_replace_newton_shape_colors_omnipbr_binding(
-    device: str,
+def test_replace_newton_builder_shape_colors_omnipbr_binding(
     diffuse_color_constant: tuple[float, float, float] | None,
     diffuse_tint: tuple[float, float, float] | None,
 ):
     """Bound OmniPBR: diffuse × tint then sRGB OETF."""
     stage, _shader, mesh_path = _make_mesh_bound_to_omnipbr_test_material(diffuse_color_constant, diffuse_tint)
 
-    shape_color = wp.zeros(1, dtype=wp.vec3, device=device)
-    model = SimpleNamespace(shape_label=[mesh_path], shape_color=shape_color)
+    builder = SimpleNamespace(shape_label=[mesh_path], shape_color=[wp.vec3(0.0, 0.0, 0.0)])
 
-    assert _replace_newton_shape_colors_wrapper(model, stage) == 1
-
+    assert _replace_newton_builder_shape_colors_wrapper(builder, stage) == 1
     exp = _reference_linear_to_srgb(_expected_omnipbr_linear_albedo(diffuse_color_constant, diffuse_tint))
-    after = wp.to_torch(shape_color)[0]
-    torch.testing.assert_close(
-        after,
-        torch.tensor(exp, dtype=after.dtype, device=after.device),
-        rtol=1e-5,
-        atol=1e-5,
-    )
+    assert tuple(builder.shape_color[0]) == pytest.approx(exp, rel=1e-5)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
-def test_replace_newton_shape_colors_neutral_material(device: str):
-    """Bound ``UsdPreviewSurface`` material leaves ``shape_color`` unchanged."""
+def test_replace_newton_builder_shape_colors_neutral_material():
+    """Bound ``UsdPreviewSurface`` material leaves ``shape_color`` entry unchanged."""
     stage, mesh_path = _make_preview_surface_bound_mesh_stage()
 
-    shape_color = wp.array([(0.1, 0.2, 0.3)], dtype=wp.vec3, device=device)
-    before = wp.to_torch(shape_color).clone()
-    model = SimpleNamespace(shape_label=[mesh_path], shape_color=shape_color)
+    initial = (0.1, 0.2, 0.3)
+    builder = SimpleNamespace(shape_label=[mesh_path], shape_color=[wp.vec3(*initial)])
 
-    assert _replace_newton_shape_colors_wrapper(model, stage) == 0
-    assert torch.allclose(wp.to_torch(shape_color), before)
+    assert _replace_newton_builder_shape_colors_wrapper(builder, stage) == 0
+    assert tuple(builder.shape_color[0]) == pytest.approx(initial)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
-def test_replace_newton_shape_colors_respects_binding_strength(device: str):
+def test_replace_newton_builder_shape_colors_respects_binding_strength():
     """Parent stronger-than-descendants binding overrides direct child binding."""
     # Scene graph (``ComputeBoundMaterial`` on the mesh yields ParentMat / green, not ChildMat / red):
     #
@@ -457,24 +362,15 @@ def test_replace_newton_shape_colors_respects_binding_strength(device: str):
     UsdShade.MaterialBindingAPI.Apply(mesh_prim)
     UsdShade.MaterialBindingAPI(mesh_prim).Bind(child_mat)
 
-    shape_color = wp.zeros(1, dtype=wp.vec3, device=device)
-    model = SimpleNamespace(shape_label=["/World/Parent/Mesh"], shape_color=shape_color)
-    assert _replace_newton_shape_colors_wrapper(model, stage) == 1
+    builder = SimpleNamespace(shape_label=["/World/Parent/Mesh"], shape_color=[wp.vec3(0.0, 0.0, 0.0)])
+    assert _replace_newton_builder_shape_colors_wrapper(builder, stage) == 1
 
     # Expected color is green which is inherited from the parent xform prim
-    exp = (0.0, 1.0, 0.0)
-    after = wp.to_torch(shape_color)[0]
-    torch.testing.assert_close(
-        after,
-        torch.tensor(exp, dtype=after.dtype, device=after.device),
-        rtol=1e-5,
-        atol=1e-5,
-    )
+    assert tuple(builder.shape_color[0]) == pytest.approx((0.0, 1.0, 0.0))
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
-def test_replace_newton_shape_colors_instanced(device: str):
-    """Instance-proxy labels deduplicate via canonical prototype paths in the per-key cache."""
+def test_replace_newton_builder_shape_colors_instanced():
+    """Instance-proxy shape labels resolve colors from their prototype via displayColor."""
     stage = Usd.Stage.CreateInMemory()
 
     prototype = UsdGeom.Xform.Define(stage, "/World/Prototype")
@@ -504,72 +400,51 @@ def test_replace_newton_shape_colors_instanced(device: str):
         assert inst_proxy.IsValid(), f"Proxy path {proxy_path} is not valid"
         assert inst_proxy.IsInstanceProxy(), f"Proxy path {proxy_path} is not an instance proxy"
 
-    # Create the dummy model
-    shape_color = wp.zeros(2, dtype=wp.vec3, device=device)
-    model = SimpleNamespace(
+    builder = SimpleNamespace(
         shape_label=proxy_paths,
-        shape_color=shape_color,
+        shape_color=[wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0)],
     )
-    assert _replace_newton_shape_colors_wrapper(model, stage) == 2
+    assert _replace_newton_builder_shape_colors_wrapper(builder, stage) == 2
 
-    after = wp.to_torch(shape_color)
     exp = _reference_linear_to_srgb((0.1, 0.2, 0.3))
-    expected = torch.tensor([exp, exp], dtype=after.dtype, device=after.device)
-    torch.testing.assert_close(after, expected, rtol=1e-5, atol=1e-5)
+    assert tuple(builder.shape_color[0]) == pytest.approx(exp, rel=1e-5)
+    assert tuple(builder.shape_color[1]) == pytest.approx(exp, rel=1e-5)
 
 
-def test_build_clone_source_map_homogeneous():
-    """Missing dest paths are mapped to the clone source in a homogeneous scene.
+def test_replace_newton_builder_shape_colors_updates_source_builder():
+    """Source builders are colorized once before clone replication copies colors forward."""
+    stage = Usd.Stage.CreateInMemory()
+    mesh = UsdGeom.Mesh.Define(stage, "/World/envs/env_0/Robot/Mesh")
+    color = (0.2, 0.4, 0.6)
+    primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar(
+        "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant, 1
+    )
+    primvar.Set([Gf.Vec3f(*color)])
 
-    Simulates the Newton headless path (USD cloning skipped): only the env_0 source
-    prim exists; envs 1-3 labels are missing and must resolve back to env_0's source.
-    """
-    clone_plan = ClonePlan(
-        sources=("/World/envs/env_0/Robot",),
-        destinations=("/World/envs/env_{}/Robot",),
-        clone_mask=torch.ones((1, 4), dtype=torch.bool),
+    builder = SimpleNamespace(
+        shape_label=["/World/envs/env_0/Robot/Mesh", "/World/envs/env_1/Robot/Mesh"],
+        shape_color=[wp.vec3(0.0, 0.0, 0.0), wp.vec3(0.0, 0.0, 0.0)],
     )
 
-    missing = {f"/World/envs/env_{i}/Robot/Mesh" for i in range(1, 4)}
-    result = _build_clone_source_map(missing, clone_plan)
+    assert _replace_newton_builder_shape_colors_wrapper(builder, stage) == 1
+    assert tuple(builder.shape_color[0]) == pytest.approx(_reference_linear_to_srgb(color))
+    assert tuple(builder.shape_color[1]) == pytest.approx((0.0, 0.0, 0.0))
 
-    assert result == {key: "/World/envs/env_0/Robot/Mesh" for key in missing}
 
+def test_replace_newton_builder_shape_colors_skips_missing_prim_labels():
+    """Labels with no matching USD prim leave the corresponding ``shape_color`` entry unchanged."""
+    stage = Usd.Stage.CreateInMemory()
+    mesh = UsdGeom.Mesh.Define(stage, "/World/envs/env_0/Robot/Mesh")
+    primvar = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar(
+        "displayColor", Sdf.ValueTypeNames.Color3fArray, UsdGeom.Tokens.constant, 1
+    )
+    primvar.Set([Gf.Vec3f(0.2, 0.4, 0.6)])
 
-def test_build_clone_source_map_heterogeneous():
-    """Each missing dest path resolves to the correct variant source in a heterogeneous scene.
-
-    Two robot variants share the same destination template but populate disjoint env
-    subsets: RobotA → envs 0,2; RobotB → envs 1,3.  env_2 must map to RobotA's
-    source and env_3 to RobotB's source, not always to the first row's source.
-    """
-    mask = torch.zeros((2, 4), dtype=torch.bool)
-    mask[0, [0, 2]] = True  # RobotA populates envs 0 and 2
-    mask[1, [1, 3]] = True  # RobotB populates envs 1 and 3
-    clone_plan = ClonePlan(
-        sources=("/World/envs/env_0/RobotA", "/World/envs/env_1/RobotB"),
-        destinations=("/World/envs/env_{}/Robot", "/World/envs/env_{}/Robot"),
-        clone_mask=mask,
+    initial = (0.1, 0.2, 0.3)
+    builder = SimpleNamespace(
+        shape_label=["/World/envs/env_1/Robot/Mesh"],
+        shape_color=[wp.vec3(*initial)],
     )
 
-    missing = {
-        "/World/envs/env_2/Robot/Mesh",  # env_2 → RobotA (row 0 owns env_ids {0, 2})
-        "/World/envs/env_3/Robot/Mesh",  # env_3 → RobotB (row 1 owns env_ids {1, 3})
-    }
-    result = _build_clone_source_map(missing, clone_plan)
-
-    assert result["/World/envs/env_2/Robot/Mesh"] == "/World/envs/env_0/RobotA/Mesh"
-    assert result["/World/envs/env_3/Robot/Mesh"] == "/World/envs/env_1/RobotB/Mesh"
-
-
-def test_build_clone_source_map_no_match():
-    """Paths not owned by any clone-plan row are absent from the result."""
-    clone_plan = ClonePlan(
-        sources=("/World/envs/env_0/Robot",),
-        destinations=("/World/envs/env_{}/Robot",),
-        clone_mask=torch.ones((1, 4), dtype=torch.bool),
-    )
-
-    # "Sensor" sub-tree is not under the "Robot" template, so no match.
-    result = _build_clone_source_map({"/World/envs/env_2/Sensor/Mesh"}, clone_plan)
-    assert result == {}
+    assert _replace_newton_builder_shape_colors_wrapper(builder, stage) == 0
+    assert tuple(builder.shape_color[0]) == pytest.approx(initial)

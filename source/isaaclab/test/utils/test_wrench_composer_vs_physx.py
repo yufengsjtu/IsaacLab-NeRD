@@ -31,6 +31,8 @@ from isaaclab.assets import RigidObject, RigidObjectCfg
 from isaaclab.sim import build_simulation_context
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
+pytestmark = pytest.mark.integration
+
 
 def generate_dual_cube_scene(
     num_cubes: int = 1,
@@ -71,14 +73,14 @@ def generate_dual_cube_scene(
     )
 
     cube_composer_cfg = RigidObjectCfg(
-        prim_path="/World/Composer_.*/Object",
+        prim_path="/World/Composer_[^/]*/Object",
         spawn=spawn_cfg,
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, height), rot=initial_rot),
     )
     cube_composer = RigidObject(cfg=cube_composer_cfg)
 
     cube_raw_cfg = RigidObjectCfg(
-        prim_path="/World/Raw_.*/Object",
+        prim_path="/World/Raw_[^/]*/Object",
         spawn=spawn_cfg,
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, y_offset, height), rot=initial_rot),
     )

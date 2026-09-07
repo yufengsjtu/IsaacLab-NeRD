@@ -64,14 +64,14 @@ def resolve_visible_env_indices(
     * Cap-only path (``env_ids`` is ``None``): contiguous ``0 .. min(cap, num_envs) - 1`` when ``max_visible_envs``
       is set; otherwise ``None`` (viewer shows all worlds). (Random cap-only selection is applied earlier by
       turning it into explicit ``env_ids``.)
-    * Explicit path (``env_ids`` is a list): if ``max_visible_envs`` is set, keep only the first *cap* indices
-      (truncate from the end); if ``None``, use the full list.
+    * Explicit path (``env_ids`` is a list): remove duplicate indices while preserving order, then keep only the
+      first *cap* indices when ``max_visible_envs`` is set.
 
     Returns:
         Selected indices, or ``None`` when all environments should be visible (cap-only, no limit).
     """
     if env_ids is not None:
-        out = list(env_ids)
+        out = list(dict.fromkeys(env_ids))
         if max_visible_envs is not None:
             out = out[: max(0, int(max_visible_envs))]
         return out
@@ -107,3 +107,12 @@ def apply_viewer_visible_worlds(
         viewer.set_visible_worlds(None)
     else:
         viewer.set_visible_worlds(resolved)
+
+
+# TODO: Newton GL's checker floor (GeoType.PLANE, material.z=1.0) renders in the Newton GL
+# OpenGL viewport but the streaming view seen in the browser shows composited Isaac Sim
+# camera-sensor frames (RTX-rendered).  Patching Newton's GLSL checker_scale only affects
+# the OpenGL window, not the camera images, so it has no visible effect from the user's
+# perspective.  To fix the floor appearance in the streaming view, the Isaac Sim USD scene
+# for each task needs an updated floor material/texture (see the Kuka Allegro env for a
+# reference with a blue-grid floor).

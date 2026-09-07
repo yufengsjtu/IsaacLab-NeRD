@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from isaaclab.utils.configclass import configclass
 
-from isaaclab_tasks.manager_based.classic.cartpole.cartpole_env_cfg import CartpoleEnvCfg
+from isaaclab_tasks.core.cartpole.cartpole_manager_env_cfg import CartpoleEnvCfg
 
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 

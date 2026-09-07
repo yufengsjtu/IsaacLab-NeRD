@@ -3,13 +3,30 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
 import warp as wp
 
-from isaaclab.test.mock_interfaces.assets import MockRigidObjectCollection
+from isaaclab.test.utils import test_devices
+from isaaclab.utils.warp import ProxyArray
 from isaaclab.utils.wrench_composer import WrenchComposer
+
+pytestmark = pytest.mark.unit
+
+
+class _WrenchAssetDataFixture:
+    """Minimal asset data required by :class:`WrenchComposer`."""
+
+    def __init__(self, com_pos_w: torch.Tensor, link_quat_w: torch.Tensor, device: str) -> None:
+        self._device = device
+        self.body_com_pos_w = ProxyArray(wp.from_torch(com_pos_w.to(device), dtype=wp.vec3f))
+        self.body_link_quat_w = ProxyArray(wp.from_torch(link_quat_w.to(device), dtype=wp.quatf))
+
+    def set_body_com_pose_w(self, pose_w: torch.Tensor) -> None:
+        self.body_com_pos_w = ProxyArray(wp.from_torch(pose_w[..., :3].to(self._device), dtype=wp.vec3f))
 
 
 def create_mock_asset(
@@ -18,8 +35,8 @@ def create_mock_asset(
     device: str,
     link_pos: torch.Tensor | None = None,
     link_quat: torch.Tensor | None = None,
-) -> MockRigidObjectCollection:
-    """Create a MockRigidObjectCollection with optional custom link poses.
+) -> SimpleNamespace:
+    """Create a minimal asset fixture with optional custom link poses.
 
     Args:
         num_envs: Number of environments.
@@ -30,9 +47,8 @@ def create_mock_asset(
                    Defaults to identity quaternion.
 
     Returns:
-        MockRigidObjectCollection with body_link_pose_w set.
+        Asset fixture with the state required by WrenchComposer.
     """
-    mock = MockRigidObjectCollection(num_instances=num_envs, num_bodies=num_bodies, device=device)
 
     # Build combined pose (N, B, 7) = pos(3) + quat_xyzw(4) matching wp.transformf layout
     if link_pos is None:
@@ -47,9 +63,9 @@ def create_mock_asset(
     else:
         quat = link_quat.float()
 
-    pose = torch.cat([pos, quat], dim=-1)  # (N, B, 7)
-    mock.data.set_body_link_pose_w(pose)
-    return mock
+    return SimpleNamespace(
+        num_instances=num_envs, num_bodies=num_bodies, device=device, data=_WrenchAssetDataFixture(pos, quat, device)
+    )
 
 
 # --- Helper functions for quaternion math ---
@@ -97,7 +113,7 @@ def random_unit_quaternion_np(rng: np.random.Generator, shape: tuple) -> np.ndar
     return q
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 @pytest.mark.parametrize("num_envs", [1, 10, 100, 1000])
 @pytest.mark.parametrize("num_bodies", [1, 3, 5, 10])
 def test_wrench_composer_add_force(device: str, num_envs: int, num_bodies: int):
@@ -136,7 +152,7 @@ def test_wrench_composer_add_force(device: str, num_envs: int, num_bodies: int):
         assert np.allclose(composed_force_np, hand_calculated_composed_force_np, atol=1, rtol=1e-7)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 @pytest.mark.parametrize("num_envs", [1, 10, 100, 1000])
 @pytest.mark.parametrize("num_bodies", [1, 3, 5, 10])
 def test_wrench_composer_add_torque(device: str, num_envs: int, num_bodies: int):
@@ -175,7 +191,7 @@ def test_wrench_composer_add_torque(device: str, num_envs: int, num_bodies: int)
         assert np.allclose(composed_torque_np, hand_calculated_composed_torque_np, atol=1, rtol=1e-7)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 @pytest.mark.parametrize("num_envs", [1, 10, 100, 1000])
 @pytest.mark.parametrize("num_bodies", [1, 3, 5, 10])
 def test_add_forces_at_positions(device: str, num_envs: int, num_bodies: int):
@@ -234,7 +250,7 @@ def test_add_forces_at_positions(device: str, num_envs: int, num_bodies: int):
         assert np.allclose(composed_torque_np, hand_calculated_composed_torque_np, atol=1, rtol=1e-7)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 @pytest.mark.parametrize("num_envs", [1, 10, 100, 1000])
 @pytest.mark.parametrize("num_bodies", [1, 3, 5, 10])
 def test_add_torques_at_position(device: str, num_envs: int, num_bodies: int):
@@ -280,7 +296,7 @@ def test_add_torques_at_position(device: str, num_envs: int, num_bodies: int):
         assert np.allclose(composed_torque_np, hand_calculated_composed_torque_np, atol=1, rtol=1e-7)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 @pytest.mark.parametrize("num_envs", [1, 10, 100, 1000])
 @pytest.mark.parametrize("num_bodies", [1, 3, 5, 10])
 def test_add_forces_and_torques_at_position(device: str, num_envs: int, num_bodies: int):
@@ -343,7 +359,7 @@ def test_add_forces_and_torques_at_position(device: str, num_envs: int, num_bodi
         assert np.allclose(composed_torque_np, hand_calculated_composed_torque_np, atol=1, rtol=1e-7)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 @pytest.mark.parametrize("num_envs", [1, 10, 100, 1000])
 @pytest.mark.parametrize("num_bodies", [1, 3, 5, 10])
 def test_wrench_composer_reset(device: str, num_envs: int, num_bodies: int):
@@ -392,7 +408,7 @@ def test_wrench_composer_reset(device: str, num_envs: int, num_bodies: int):
 # ============================================================================
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 @pytest.mark.parametrize("num_envs", [1, 10, 100])
 @pytest.mark.parametrize("num_bodies", [1, 3, 5])
 def test_global_forces_with_rotation(device: str, num_envs: int, num_bodies: int):
@@ -434,7 +450,7 @@ def test_global_forces_with_rotation(device: str, num_envs: int, num_bodies: int
         )
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 @pytest.mark.parametrize("num_envs", [1, 10, 100])
 @pytest.mark.parametrize("num_bodies", [1, 3, 5])
 def test_global_torques_with_rotation(device: str, num_envs: int, num_bodies: int):
@@ -476,7 +492,7 @@ def test_global_torques_with_rotation(device: str, num_envs: int, num_bodies: in
         )
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 @pytest.mark.parametrize("num_envs", [1, 10, 50])
 @pytest.mark.parametrize("num_bodies", [1, 3, 5])
 def test_global_forces_at_global_position(device: str, num_envs: int, num_bodies: int):
@@ -540,7 +556,7 @@ def test_global_forces_at_global_position(device: str, num_envs: int, num_bodies
         )
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_local_vs_global_identity_quaternion(device: str):
     """Test that local and global give same result with identity quaternion and zero position."""
     rng = np.random.default_rng(seed=13)
@@ -582,7 +598,7 @@ def test_local_vs_global_identity_quaternion(device: str):
     )
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_90_degree_rotation_global_force(device: str):
     """Test global force with a known 90-degree rotation for easy verification."""
     num_envs, num_bodies = 1, 1
@@ -615,7 +631,7 @@ def test_90_degree_rotation_global_force(device: str):
     )
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_composition_mixed_local_and_global(device: str):
     """Test that local and global forces can be composed together correctly."""
     rng = np.random.default_rng(seed=14)
@@ -660,7 +676,7 @@ def test_composition_mixed_local_and_global(device: str):
     )
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 @pytest.mark.parametrize("num_envs", [1, 10, 50])
 @pytest.mark.parametrize("num_bodies", [1, 3, 5])
 def test_local_forces_at_local_position(device: str, num_envs: int, num_bodies: int):
@@ -705,7 +721,7 @@ def test_local_forces_at_local_position(device: str, num_envs: int, num_bodies: 
         assert np.allclose(composed_torque_np, expected_torques, atol=1e-4, rtol=1e-5)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_global_force_at_link_origin_no_torque(device: str):
     """Test that a global force applied at the link origin produces no torque."""
     rng = np.random.default_rng(seed=16)
@@ -753,7 +769,7 @@ def test_global_force_at_link_origin_no_torque(device: str):
 # ============================================================================
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 @pytest.mark.parametrize("num_envs", [1, 10, 100])
 @pytest.mark.parametrize("num_bodies", [1, 3, 5])
 def test_add_raw_buffers_from(device: str, num_envs: int, num_bodies: int):
@@ -819,7 +835,7 @@ def test_add_raw_buffers_from(device: str, num_envs: int, num_bodies: int):
     ), "add_raw_buffers_from torque mismatch vs direct accumulation"
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_add_raw_buffers_from_inactive_is_noop(device: str):
     """Test that add_raw_buffers_from is a no-op when the source composer is inactive."""
     num_envs, num_bodies = 4, 2
@@ -853,7 +869,7 @@ def test_add_raw_buffers_from_inactive_is_noop(device: str):
 # ============================================================================
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 @pytest.mark.parametrize("num_envs", [1, 10, 100])
 @pytest.mark.parametrize("num_bodies", [1, 3, 5])
 def test_add_forces_mask(device: str, num_envs: int, num_bodies: int):
@@ -908,7 +924,7 @@ def test_add_forces_mask(device: str, num_envs: int, num_bodies: int):
         ), f"Mask vs index torque mismatch (envs={num_envs}, bodies={num_bodies})"
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 @pytest.mark.parametrize("num_envs", [1, 10, 100])
 @pytest.mark.parametrize("num_bodies", [1, 3, 5])
 def test_add_forces_mask_global(device: str, num_envs: int, num_bodies: int):
@@ -963,7 +979,49 @@ def test_add_forces_mask_global(device: str, num_envs: int, num_bodies: int):
 # ============================================================================
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("env_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("body_dtype", [torch.int32, torch.int64])
+def test_index_dtype_combinations_preserve_selected_wrench_cells(
+    env_dtype: torch.dtype, body_dtype: torch.dtype
+) -> None:
+    """Set, add, and reset selected cells with either index width."""
+    composer = WrenchComposer(create_mock_asset(num_envs=3, num_bodies=3, device="cpu"))
+    env_ids = torch.tensor([2, 0], dtype=env_dtype)
+    body_ids = torch.tensor([1, 2], dtype=body_dtype)
+    reset_env_ids = env_ids[:1]
+    set_forces_np = np.arange(1, 13, dtype=np.float32).reshape(2, 2, 3)
+    set_torques_np = set_forces_np + 20.0
+    add_forces_np = np.full((2, 2, 3), 100.0, dtype=np.float32)
+    add_torques_np = np.full((2, 2, 3), 200.0, dtype=np.float32)
+
+    composer.set_forces_and_torques_index(
+        forces=wp.from_numpy(set_forces_np, dtype=wp.vec3f, device="cpu"),
+        torques=wp.from_numpy(set_torques_np, dtype=wp.vec3f, device="cpu"),
+        env_ids=env_ids,
+        body_ids=body_ids,
+    )
+    composer.add_forces_and_torques_index(
+        forces=wp.from_numpy(add_forces_np, dtype=wp.vec3f, device="cpu"),
+        torques=wp.from_numpy(add_torques_np, dtype=wp.vec3f, device="cpu"),
+        env_ids=env_ids,
+        body_ids=body_ids,
+    )
+
+    expected_forces = np.zeros((3, 3, 3), dtype=np.float32)
+    expected_torques = np.zeros_like(expected_forces)
+    expected_forces[np.ix_([2, 0], [1, 2])] = set_forces_np + add_forces_np
+    expected_torques[np.ix_([2, 0], [1, 2])] = set_torques_np + add_torques_np
+    np.testing.assert_array_equal(composer.local_force_b.numpy(), expected_forces)
+    np.testing.assert_array_equal(composer.local_torque_b.numpy(), expected_torques)
+
+    composer.reset(env_ids=reset_env_ids)
+    expected_forces[2] = 0.0
+    expected_torques[2] = 0.0
+    np.testing.assert_array_equal(composer.local_force_b.numpy(), expected_forces)
+    np.testing.assert_array_equal(composer.local_torque_b.numpy(), expected_torques)
+
+
+@pytest.mark.parametrize("device", test_devices())
 def test_set_forces_overwrites_previous_add(device: str):
     """Test that set_forces_and_torques_index clears previously accumulated values."""
     num_envs, num_bodies = 4, 2
@@ -992,7 +1050,7 @@ def test_set_forces_overwrites_previous_add(device: str):
     )
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_set_forces_clears_targeted_envs_only(device: str):
     """Test that set_forces_and_torques_index clears only the targeted environments."""
     num_envs, num_bodies = 4, 3
@@ -1063,7 +1121,7 @@ def test_set_forces_clears_targeted_envs_only(device: str):
 # ============================================================================
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_partial_reset_zeros_only_specified_envs(device: str):
     """Test that partial reset zeros only the specified environments and leaves others intact."""
     num_envs, num_bodies = 8, 3
@@ -1114,9 +1172,10 @@ def test_partial_reset_zeros_only_specified_envs(device: str):
     assert composer._dirty
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
-def test_full_reset_clears_active_flag(device: str):
-    """Test that full reset (no args) clears the _active flag."""
+@pytest.mark.parametrize("device", test_devices())
+@pytest.mark.parametrize("env_ids", [None, slice(None)], ids=["none", "full_slice"])
+def test_full_reset_clears_active_flag(device: str, env_ids: slice | None):
+    """Test that either full-reset selector clears the _active flag."""
     num_envs, num_bodies = 4, 2
 
     mock_asset = create_mock_asset(num_envs, num_bodies, device)
@@ -1128,7 +1187,7 @@ def test_full_reset_clears_active_flag(device: str):
     )
     assert composer.active
 
-    composer.reset()
+    composer.reset(env_ids=env_ids)
     assert not composer.active
     assert not composer._dirty
 
@@ -1138,7 +1197,7 @@ def test_full_reset_clears_active_flag(device: str):
 # ============================================================================
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_composed_force_emits_deprecation_warning(device: str):
     """Test that accessing composed_force emits a DeprecationWarning."""
     num_envs, num_bodies = 2, 1
@@ -1158,7 +1217,7 @@ def test_composed_force_emits_deprecation_warning(device: str):
     assert np.allclose(result.warp.numpy(), composer.out_force_b.warp.numpy(), atol=1e-7)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_composed_torque_emits_deprecation_warning(device: str):
     """Test that accessing composed_torque emits a DeprecationWarning."""
     num_envs, num_bodies = 2, 1
@@ -1177,7 +1236,7 @@ def test_composed_torque_emits_deprecation_warning(device: str):
     assert np.allclose(result.warp.numpy(), composer.out_torque_b.warp.numpy(), atol=1e-7)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_deprecated_add_forces_and_torques_emits_warning(device: str):
     """Test that the deprecated add_forces_and_torques wrapper emits a warning and works."""
     num_envs, num_bodies = 4, 2
@@ -1202,7 +1261,7 @@ def test_deprecated_add_forces_and_torques_emits_warning(device: str):
 # ============================================================================
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_set_forces_mask_overwrites_previous_add(device: str):
     """Test that set_forces_and_torques_mask clears previously accumulated values."""
     num_envs, num_bodies = 4, 2
@@ -1231,7 +1290,7 @@ def test_set_forces_mask_overwrites_previous_add(device: str):
     )
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_set_forces_mask_clears_targeted_envs_only(device: str):
     """Test that set_forces_and_torques_mask clears only the masked environments."""
     num_envs, num_bodies = 4, 3
@@ -1301,7 +1360,7 @@ def test_set_forces_mask_clears_targeted_envs_only(device: str):
     )
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_set_forces_mask_matches_set_forces_index(device: str):
     """Test that set_forces_and_torques_mask produces the same result as the index variant."""
     num_envs, num_bodies = 6, 3
@@ -1351,7 +1410,7 @@ def test_set_forces_mask_matches_set_forces_index(device: str):
 # ============================================================================
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_out_force_b_triggers_lazy_composition(device: str):
     """Test that accessing out_force_b without explicit compose_to_body_frame still returns correct results."""
     num_envs, num_bodies = 4, 2
@@ -1378,7 +1437,7 @@ def test_out_force_b_triggers_lazy_composition(device: str):
     )
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_out_torque_b_triggers_lazy_composition(device: str):
     """Test that accessing out_torque_b without explicit compose_to_body_frame still returns correct results."""
     num_envs, num_bodies = 4, 2
@@ -1405,7 +1464,7 @@ def test_out_torque_b_triggers_lazy_composition(device: str):
     )
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_lazy_composition_tracks_dirty_flag(device: str):
     """Test that the dirty flag is correctly managed through add/compose/add cycles."""
     num_envs, num_bodies = 2, 1
@@ -1442,7 +1501,7 @@ def test_lazy_composition_tracks_dirty_flag(device: str):
     assert np.allclose(composer.out_force_b.warp.numpy(), expected, atol=1e-4, rtol=1e-5)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_compose_is_idempotent(device: str):
     """Calling compose_to_body_frame twice without intervening writes produces the same result."""
     rng = np.random.default_rng(seed=456)
@@ -1493,7 +1552,7 @@ def test_compose_is_idempotent(device: str):
 # ============================================================================
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_global_force_with_com_offset(device: str):
     """Test that torque correction uses CoM position, not link position, when they differ."""
     num_envs, num_bodies = 2, 1
@@ -1514,7 +1573,13 @@ def test_global_force_with_com_offset(device: str):
         link_quat=torch.from_numpy(link_quat_np),
     )
     # Set CoM pose separately (pos=[1,0,0], quat=identity)
-    com_pose = torch.cat([torch.from_numpy(com_pos_np), torch.from_numpy(link_quat_np)], dim=-1)
+    com_pose = torch.cat(
+        (
+            torch.from_numpy(com_pos_np),
+            torch.tensor([0.0, 0.0, 0.0, 1.0]).view(1, 1, 4).expand(num_envs, num_bodies, 4),
+        ),
+        dim=-1,
+    )
     mock_asset.data.set_body_com_pose_w(com_pose)
 
     composer = WrenchComposer(mock_asset)
@@ -1548,7 +1613,7 @@ def test_global_force_with_com_offset(device: str):
     assert np.allclose(composer.out_force_b.warp.numpy(), forces_np, atol=1e-4, rtol=1e-5)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_global_force_at_com_no_torque_with_com_offset(device: str):
     """Test that a global force at CoM position produces zero torque even with CoM offset."""
     num_envs, num_bodies = 2, 1
@@ -1569,7 +1634,13 @@ def test_global_force_at_com_no_torque_with_com_offset(device: str):
         link_pos=torch.from_numpy(link_pos_np),
         link_quat=torch.from_numpy(link_quat_np),
     )
-    com_pose = torch.cat([torch.from_numpy(com_pos_np), torch.from_numpy(link_quat_np)], dim=-1)
+    com_pose = torch.cat(
+        (
+            torch.from_numpy(com_pos_np),
+            torch.tensor([0.0, 0.0, 0.0, 1.0]).view(1, 1, 4).expand(num_envs, num_bodies, 4),
+        ),
+        dim=-1,
+    )
     mock_asset.data.set_body_com_pose_w(com_pose)
 
     composer = WrenchComposer(mock_asset)
@@ -1594,7 +1665,7 @@ def test_global_force_at_com_no_torque_with_com_offset(device: str):
     )
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_com_offset_with_rotation(device: str):
     """Test torque correction with both CoM offset and non-identity rotation."""
     num_envs, num_bodies = 1, 1
@@ -1615,7 +1686,13 @@ def test_com_offset_with_rotation(device: str):
         link_pos=torch.from_numpy(link_pos_np),
         link_quat=torch.from_numpy(link_quat_np),
     )
-    com_pose = torch.cat([torch.from_numpy(com_pos_np), torch.from_numpy(link_quat_np)], dim=-1)
+    com_pose = torch.cat(
+        (
+            torch.from_numpy(com_pos_np),
+            torch.tensor([0.0, 0.0, 0.0, 1.0]).view(1, 1, 4).expand(num_envs, num_bodies, 4),
+        ),
+        dim=-1,
+    )
     mock_asset.data.set_body_com_pose_w(com_pose)
 
     composer = WrenchComposer(mock_asset)
@@ -1652,7 +1729,7 @@ def test_com_offset_with_rotation(device: str):
 # ============================================================================
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_deprecated_set_forces_and_torques_emits_warning(device: str):
     """Test that the deprecated set_forces_and_torques wrapper emits a warning and works."""
     num_envs, num_bodies = 4, 2
@@ -1672,7 +1749,7 @@ def test_deprecated_set_forces_and_torques_emits_warning(device: str):
     assert np.allclose(composer.out_force_b.warp.numpy(), forces_np, atol=1e-4, rtol=1e-5)
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+@pytest.mark.parametrize("device", test_devices())
 def test_deprecated_set_forces_and_torques_clears_previous(device: str):
     """Test that deprecated set_forces_and_torques actually replaces previous values."""
     num_envs, num_bodies = 4, 2

@@ -13,22 +13,14 @@ to be deprecated and removed.
 from __future__ import annotations
 
 import logging
-import os
 import warnings
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
-import warp as wp
 
 from pxr import Usd, UsdGeom, UsdShade
 
-from isaaclab.sim import SimulationContext
-
-if TYPE_CHECKING:
-    from isaaclab.cloner import ClonePlan
-
-
-__all__ = ["replace_newton_shape_colors"]
+__all__ = ["replace_newton_builder_shape_colors"]
 
 logger = logging.getLogger(__name__)
 
@@ -42,39 +34,15 @@ _OMNIPBR_DEFAULTS: dict[str, tuple[float, float, float]] = {
 _UNBOUND_DEFAULT_FALLBACK_GRAY = (0.18, 0.18, 0.18)
 
 
-@wp.func
-def _linear_channel_to_srgb_warp(c: float) -> float:
-    """Per-channel sRGB OETF on device: linear ``[0, 1]`` to sRGB-encoded ``[0, 1]``."""
+def _linear_channel_to_srgb(c: float) -> float:
+    """Per-channel sRGB OETF on host: linear ``[0, 1]`` to sRGB-encoded ``[0, 1]``."""
     if c <= 0.0:
         return 0.0
     if c <= 0.0031308:
         return 12.92 * c
     if c >= 1.0:
         return 1.0
-    return 1.055 * wp.pow(c, 1.0 / 2.4) - 0.055
-
-
-@wp.func
-def _linear_rgb_to_srgb_warp(linear_rgb: wp.vec3) -> wp.vec3:
-    """Apply sRGB OETF per channel: linear RGB ``[0, 1]`` to sRGB-encoded ``[0, 1]``."""
-    return wp.vec3(
-        _linear_channel_to_srgb_warp(linear_rgb[0]),
-        _linear_channel_to_srgb_warp(linear_rgb[1]),
-        _linear_channel_to_srgb_warp(linear_rgb[2]),
-    )
-
-
-@wp.kernel
-def _scatter_shape_color_rows_kernel(
-    shape_colors: wp.array(dtype=wp.vec3),  # type: ignore
-    row_indices: wp.array(dtype=wp.int32),  # type: ignore
-    row_colors: wp.array(dtype=wp.vec3),  # type: ignore
-):
-    """Write per-row sRGB colors into ``shape_colors``."""
-    tid = wp.tid()
-    index = row_indices[tid]
-    color = row_colors[tid]
-    shape_colors[index] = _linear_rgb_to_srgb_warp(color)
+    return 1.055 * (c ** (1.0 / 2.4)) - 0.055
 
 
 def _canonical_prim_lookup_key(prim: Usd.Prim) -> str:
@@ -201,130 +169,6 @@ def _get_primvar_display_color(shape_prim: Usd.Prim) -> tuple[float, float, floa
     return _coerce_color(primvar.Get())
 
 
-def _build_clone_source_map(missing_keys: set[str], clone_plan: ClonePlan) -> dict[str, str]:
-    """Map missing destination prim paths to their clone-plan source prim paths in one pass.
-
-    In the Newton headless path USD cloning is skipped, so only the source env (env_0) has
-    real USD prims.  Shape labels for all other envs point to paths that don't exist in the
-    stage.  This function resolves them back to the source prim that was cloned into each env
-    so the correct material color can be read from an existing prim.
-
-    Example:
-        Given a clone plan with source ``/World/envs/env_0/Robot`` cloned into envs 0-3, and
-        missing keys for envs 1-3::
-
-            missing_keys = {
-                "/World/envs/env_1/Robot/Mesh",
-                "/World/envs/env_2/Robot/Mesh",
-                "/World/envs/env_3/Robot/Mesh",
-            }
-
-        The function returns::
-
-            {
-                "/World/envs/env_1/Robot/Mesh": "/World/envs/env_0/Robot/Mesh",
-                "/World/envs/env_2/Robot/Mesh": "/World/envs/env_0/Robot/Mesh",
-                "/World/envs/env_3/Robot/Mesh": "/World/envs/env_0/Robot/Mesh",
-            }
-
-        In a heterogeneous scene where ``RobotA`` populates envs 0 and 2, and ``RobotB``
-        populates envs 1 and 3, env_2 maps to ``RobotA``'s source and env_3 to ``RobotB``'s::
-
-            {
-                "/World/envs/env_2/Robot/Mesh": "/World/envs/env_0/RobotA/Mesh",
-                "/World/envs/env_3/Robot/Mesh": "/World/envs/env_1/RobotB/Mesh",
-            }
-
-    Instead of querying the clone plan once per missing key (which scans all rows and applies a
-    compiled regex per call via :func:`~isaaclab.cloner.cloner_utils.iter_clone_plan_matches`),
-    this function iterates the clone-plan rows once and matches all missing keys against each source
-    using simple string prefix and digit checks.  The total cost is O(R × K_miss) with a low
-    constant factor, where R is the number of clone-plan rows and K_miss = ``len(missing_keys)``.
-
-    Rows are processed in decreasing order of instantiated template length so that more-specific
-    (deeper) templates take priority, matching
-    :func:`~isaaclab.cloner.cloner_utils.iter_clone_plan_matches` semantics.
-
-    Args:
-        missing_keys: Destination prim paths absent from the USD stage.
-        clone_plan: Active clone plan.
-
-    Returns:
-        Dict mapping each resolvable missing path to its clone-source prim path.
-    """
-    from dataclasses import dataclass
-
-    @dataclass
-    class _Source:
-        root: str
-        template_prefix: str  # template prefix before the "{}" env-slot
-        template_suffix: str  # template suffix after the "{}" env-slot
-        env_ids: frozenset[int]
-
-        def instantiated_length(self) -> int:
-            """Length of the template when formatted with the smallest env id."""
-            return len(self.template_prefix) + len(str(min(self.env_ids))) + len(self.template_suffix)
-
-    result: dict[str, str] = {}
-    if not missing_keys:
-        return result
-
-    # Pre-process rows: strip trailing slashes, split the template at the env-slot placeholder,
-    # and collect the populated env ids as a frozenset for O(1) membership checks.
-    sources: list[_Source] = []
-    for row_idx, (root, dest_template) in enumerate(zip(clone_plan.sources, clone_plan.destinations)):
-        if "{}" not in dest_template:
-            continue
-        env_ids: frozenset[int] = frozenset(
-            int(j) for j in clone_plan.clone_mask[row_idx].nonzero(as_tuple=False).flatten().tolist()
-        )
-        if not env_ids:
-            continue
-        template_prefix, template_suffix = dest_template.rstrip("/").split("{}", 1)
-        sources.append(
-            _Source(
-                root=root.rstrip("/"), template_prefix=template_prefix, template_suffix=template_suffix, env_ids=env_ids
-            )
-        )
-
-    # Sort by instantiated template length descending, matching iter_clone_plan_matches semantics.
-    sources.sort(key=lambda r: r.instantiated_length(), reverse=True)
-
-    # Match each destination prim path against one of the sources.
-    remaining_dest = set(missing_keys)
-    for source in sources:
-        if not remaining_dest:
-            break
-        resolved: set[str] = set()
-        for prim_path in remaining_dest:
-            # Reject paths that don't start with this source's template prefix.
-            if not prim_path.startswith(source.template_prefix):
-                continue
-
-            # Extract the env-slot token: the path segment immediately after the prefix.
-            rest = prim_path[len(source.template_prefix) :]
-            slash = rest.find("/")
-            slot_str = rest[:slash] if slash >= 0 else rest
-
-            # Reject if the slot is not a digit or doesn't belong to this source's env ids.
-            if not slot_str.isdigit() or int(slot_str) not in source.env_ids:
-                continue
-
-            # Reject if the template_suffix-slot portion of the path doesn't match the template suffix.
-            after_slot = rest[len(slot_str) :]
-            if not after_slot.startswith(source.template_suffix):
-                continue
-
-            # Everything after the instantiated template root is the asset suffix;
-            # prepend the source root to form the source prim path.
-            result[prim_path] = source.root + after_slot[len(source.template_suffix) :]
-            resolved.add(prim_path)
-
-        remaining_dest -= resolved
-
-    return result
-
-
 def _resolve_shape_color(
     stage: Usd.Stage,
     prim_path: str,
@@ -332,11 +176,8 @@ def _resolve_shape_color(
 ) -> tuple[float, float, float] | None:
     """Resolve replacement linear RGB for one prim path (sRGB encoding is applied in the scatter kernel).
 
-    The caller is responsible for remapping missing destination prim paths to their clone-source
-    equivalents before calling this function (see :func:`_build_clone_source_map`).
-
     Returns:
-        Linear RGB to pass to :func:`_scatter_shape_color_rows_kernel`, or ``None`` to leave the row unchanged.
+        Linear RGB to pass, or ``None`` to leave the row unchanged.
     """
     shape_prim = stage.GetPrimAtPath(prim_path)
     if not shape_prim.IsValid():
@@ -364,43 +205,29 @@ def _resolve_shape_color(
     return material_color
 
 
-def replace_newton_shape_colors(model: Any, stage: Usd.Stage | None = None) -> int:
-    """Align Newton visualization colors with the USD stage.
+def replace_newton_builder_shape_colors(builder: Any, stage: Usd.Stage) -> int:
+    """Align a Newton ``ModelBuilder``'s shape colors with the USD stage before clone replication.
 
-    Newton assigns a per-shape palette to ``shape_color``. This overwrites those rows so rendering matches authored USD
-    data where supported:
+    Overwrites entries in ``builder.shape_color`` so that colors match the authored USD data:
 
-    - **No bound material**: use authored ``primvars:displayColor`` (treated as linear RGB), or a neutral 18% linear
-      gray if ``displayColor`` is not authored; linear values are encoded to sRGB in the scatter kernel.
-    - **OmniPBR**: use ``diffuse_color_constant`` times ``diffuse_tint`` (linear RGB, with MDL defaults when inputs are
-      not authored), encoded to sRGB in the scatter kernel.
-    - **Other materials**: leave the existing Newton color for that shape.
-    - **Guide purpose** prims (``UsdGeom.Tokens.guide``): leave unchanged so guide visualization stays on the palette.
+    - **No bound material**: use authored ``primvars:displayColor`` (treated as linear RGB), or a
+      neutral 18% linear gray if ``displayColor`` is not authored.
+    - **OmniPBR**: use ``diffuse_color_constant`` × ``diffuse_tint`` (linear RGB, with MDL defaults
+      when inputs are not authored).
+    - **Other materials**: leave the existing Newton color for that shape unchanged.
+    - **Guide purpose** prims (``UsdGeom.Tokens.guide``): leave unchanged so guide visualization
+      stays on the Newton palette.
+
+    Linear RGB values are encoded to sRGB before being written into ``builder.shape_color``.
 
     Args:
-        model: Object with ``shape_label`` (``list`` of USD prim paths) and ``shape_color`` (``wp.array`` of
-            ``wp.vec3``), typically a finalized Newton model.
-        stage: USD stage to read from. If ``None``, uses :func:`~isaaclab.sim.utils.stage.get_current_stage`.
+        builder: Object with ``shape_label`` (``list`` of USD prim paths) and ``shape_color``
+            (``list`` of RGB triples), typically a Newton ``ModelBuilder`` before finalization.
+        stage: USD stage to read material and primvar data from.
 
     Returns:
         Number of shapes that had their colors replaced.
-
-    Note:
-        Set ``ISAACLAB_REPLACE_NEWTON_SHAPE_COLORS`` to ``0``, ``false``, ``off``, or ``no`` to skip this pass
-        entirely (returns ``0``).
-
-        This pass exists only while Isaac Lab and Isaac Sim content still relies on NVIDIA-specific MDL and OmniPBR
-        materials; after migration to neutral USD materials that Newton can consume directly, this path is expected to
-        be deprecated and removed.
-
-        Wall time for USD resolution and the GPU scatter is measured with :class:`~isaaclab.utils.timer.Timer`, which
-        may print a timing summary when the timer is enabled.
     """
-    env_val = os.getenv("ISAACLAB_REPLACE_NEWTON_SHAPE_COLORS")
-    if env_val is not None and env_val.strip().lower() in ["false", "0", "off", "no"]:
-        logger.debug("Newton shape color replacement is disabled")
-        return 0
-
     warnings.warn(
         "Newton shape color replacement is enabled; this workaround will be deprecated in a future release.",
         FutureWarning,
@@ -408,94 +235,38 @@ def replace_newton_shape_colors(model: Any, stage: Usd.Stage | None = None) -> i
     )
 
     # Use duck typing to avoid introducing hard dependencies on newton.
-    shape_labels = getattr(model, "shape_label", None)
-    shape_colors = getattr(model, "shape_color", None)
+    shape_labels = getattr(builder, "shape_label", None)
+    shape_colors = getattr(builder, "shape_color", None)
 
     if not isinstance(shape_labels, list):
         logger.debug("shape_label must be a list, got %s", type(shape_labels))
         return 0
 
-    if not isinstance(shape_colors, wp.array):
-        logger.debug("shape_color must be a Warp array, got %s", type(shape_colors))
+    if not isinstance(shape_colors, list):
+        logger.debug("shape_color must be a list, got %s", type(shape_colors))
         return 0
 
-    num_shapes = len(shape_labels)
-    if num_shapes == 0:
-        logger.debug("Found empty list of shape labels")
-        return 0
-
-    if num_shapes != len(shape_colors):
-        logger.debug("Mismatching length of shape_labels and shape_colors: %d != %d", num_shapes, len(shape_colors))
-        return 0
+    if len(shape_labels) != len(shape_colors):
+        raise ValueError(
+            f"Mismatching length of shape_label and shape_color: {len(shape_labels)} != {len(shape_colors)}"
+        )
 
     from isaaclab.utils.timer import Timer
 
-    num_color_updates = 0
-
-    with Timer(f"[INFO]: Time taken for replace_newton_shape_colors for {num_shapes} shapes", enable=False):
-        if stage is None:
-            from .stage import get_current_stage
-
-            stage = get_current_stage()
-
-        sim = SimulationContext.instance()
-        clone_plan = sim.get_clone_plan() if sim is not None else None
-
-        # Collect canonical lookup keys, tracking which labels had no prim in the stage.
-        # Missing labels are kept verbatim so _build_clone_source_map can map them back to
-        # their clone-source equivalents (Newton headless path skips USD cloning for env_1-N).
-        shape_keys: list[str] = []
-        missing_key_set: set[str] = set()
-        for label in shape_labels:
-            prim = stage.GetPrimAtPath(label)
-            if prim.IsValid():
-                shape_keys.append(_canonical_prim_lookup_key(prim))
-            else:
-                shape_keys.append(label)
-                missing_key_set.add(label)
-
-        # shape_keys must stay the same length as shape labels, to guarantee the correctness of
-        # shape indices that will be used in the scatter kernel.
-        assert num_shapes == len(shape_keys)
-
-        # Pre-build the dest -> source map for all missing keys in one clone-plan pass instead of
-        # calling iter_clone_plan_matches once per key (which applies a regex per call).
-        clone_source_map = (
-            _build_clone_source_map(missing_key_set, clone_plan) if missing_key_set and clone_plan else {}
-        )
-
-        resolved_color_cache: dict[str, tuple[float, float, float] | None] = {}
+    with Timer(
+        f"[INFO]: Time taken for replace_newton_builder_shape_colors for {len(shape_labels)} shapes", enable=False
+    ):
+        num_color_updates = 0
         material_color_cache: dict[str, tuple[float, float, float] | None] = {}
-
-        unique_keys = dict.fromkeys(shape_keys)
-        for key in unique_keys:
-            lookup = clone_source_map.get(key, key)
-            resolved_color_cache[key] = _resolve_shape_color(stage, lookup, material_color_cache)
-
-        # Prepare the indices and colors for the scatter kernel:
-        # - Indices point to the slots in the shape_colors array that should be updated
-        # - Colors are the new values to write into the slots
-        indices_np = np.empty(num_shapes, dtype=np.int32)
-        colors_np = np.empty((num_shapes, 3), dtype=np.float32)
-
-        for i, shape_key in enumerate(shape_keys):
-            if rgb := resolved_color_cache.get(shape_key):
-                indices_np[num_color_updates] = i
-                colors_np[num_color_updates] = rgb
+        for i, label in enumerate(shape_labels):
+            rgb = _resolve_shape_color(stage, label, material_color_cache)
+            if rgb is not None:
+                shape_colors[i] = (
+                    _linear_channel_to_srgb(rgb[0]),
+                    _linear_channel_to_srgb(rgb[1]),
+                    _linear_channel_to_srgb(rgb[2]),
+                )
                 num_color_updates += 1
 
-        # If there are any color updates, launch the scatter kernel to update the shape_colors array.
-        if num_color_updates != 0:
-            indices_wp = wp.from_numpy(indices_np[:num_color_updates], dtype=wp.int32, device=shape_colors.device)
-            colors_wp = wp.from_numpy(colors_np[:num_color_updates], dtype=wp.vec3, device=shape_colors.device)
-
-            wp.launch(
-                kernel=_scatter_shape_color_rows_kernel,
-                dim=num_color_updates,
-                inputs=[shape_colors, indices_wp, colors_wp],
-                device=shape_colors.device,
-            )
-
-        logger.debug("Replaced colors for %d / %d shapes", num_color_updates, num_shapes)
-
-    return num_color_updates
+        logger.debug("Replaced builder colors for %d / %d shapes", num_color_updates, len(shape_labels))
+        return num_color_updates

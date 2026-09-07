@@ -6,8 +6,8 @@
 """Environment adapters for NeRD-backed Isaac Lab environments."""
 
 import gymnasium as gym
-from isaaclab_tasks.manager_based.classic.cartpole import agents as cartpole_agents
-from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c import agents as anymal_c_agents
+from isaaclab_tasks.core.cartpole import agents as cartpole_agents
+from isaaclab_tasks.contrib.velocity.config.anymal_c import agents as anymal_c_agents
 
 from .anymal_nerd_env import NerdAnymalCFlatEnv, NerdAnymalCFlatEnvCfg
 from .anymal_c_dataset_gen_cfg import AnymalCDatasetGenFlatEnvCfg, AnymalCDatasetGenRoughEnvCfg

@@ -13,7 +13,7 @@ from isaaclab_neural.envs.anymal_c_dataset_gen_cfg import (
     _raise_root_above_terrain,
 )
 
-from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c.rough_env_cfg import AnymalCRoughEnvCfg
+from isaaclab_tasks.contrib.velocity.config.anymal_c.rough_env_cfg import AnymalCRoughEnvCfg
 
 
 def test_rough_dataset_config_uses_uniform_terrain_level_sampling() -> None:
