@@ -39,7 +39,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-check-log-override", action="store_true")
     parser.add_argument("--cfg-overrides", default="", type=str, help="Pairs of dotted config keys and values.")
 
-    from isaaclab_tasks.utils import add_launcher_args
+    from isaaclab.app import add_launcher_args
 
     add_launcher_args(parser)
     return parser

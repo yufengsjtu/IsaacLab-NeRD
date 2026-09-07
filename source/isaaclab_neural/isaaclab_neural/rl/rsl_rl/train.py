@@ -53,9 +53,9 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     cli_args.add_rsl_rl_args(parser)
     cli_args.add_nerd_args(parser)
 
-    from isaaclab_tasks.utils import add_launcher_args
+    from isaaclab.app import add_launcher_args
 
-    # Provides --device / --headless / etc. Do not add --device before this.
+    # Provides --device / --viz / etc. Do not add --device before this.
     add_launcher_args(parser)
     return parser.parse_known_args()
 

@@ -78,7 +78,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="Reward plot output path. Defaults to <video-dir>/rewards.png.",
     )
 
-    from isaaclab_tasks.utils import add_launcher_args
+    from isaaclab.app import add_launcher_args
 
     add_launcher_args(parser)
     return parser.parse_known_args()
