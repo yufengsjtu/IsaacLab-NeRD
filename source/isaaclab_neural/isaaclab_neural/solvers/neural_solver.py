@@ -316,13 +316,24 @@ class NeuralSolver(SolverBase):
     def eval(self):
         self.neural_model.eval()
 
-    def reset(self, env_ids=None):
-        """Reset solver state.
+    def reset(self, env_ids=None, world_mask=None, flags=None):
+        """Reset solver auxiliary state.
+
+        Isaac Lab 3 calls :meth:`newton.solvers.SolverBase.reset` as
+        ``reset(state, world_mask=..., flags=0)`` from
+        :meth:`~isaaclab_newton.physics.newton_manager.NewtonManager._reset_solver_internals`.
+        That path has no NeRD internals to clear. History and force-head state
+        are reset with ``env_ids``.
 
         Args:
             env_ids: Optional environment ids whose auxiliary predictions
                 should be cleared. Clears all environments when omitted.
+                Newton-style calls pass the Newton ``State`` here.
+            world_mask: Unused Newton SolverBase reset mask.
+            flags: Unused Newton SolverBase reset flags.
         """
+        if world_mask is not None or flags is not None:
+            return
         predicted_forces = getattr(self, "predicted_body_net_contact_forces_b", None)
         if predicted_forces is None:
             return
