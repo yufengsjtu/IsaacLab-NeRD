@@ -27,8 +27,17 @@ def _parse_scalar(value: str):
         return False
     if value in ("null", "None"):
         return None
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [_parse_scalar(part.strip()) for part in inner.split(",")]
     try:
         return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
     except ValueError:
         return value
 

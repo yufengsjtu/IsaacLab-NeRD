@@ -1,0 +1,175 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Tests for overlaying the uploaded Isaac Lab tree on the OSMO image."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+OSMO_SCRIPTS = REPO_ROOT / "osmo_scripts"
+
+
+def _write_source_package(project_root: Path, name: str, marker: str) -> Path:
+    package_root = project_root / "source" / name
+    module_dir = package_root / name
+    module_dir.mkdir(parents=True)
+    (package_root / "pyproject.toml").write_text(f'[project]\nname = "{name}"\n', encoding="utf-8")
+    (module_dir / "__init__.py").write_text(f"MARKER = {marker!r}\n", encoding="utf-8")
+    return package_root
+
+
+def test_core_submodule_order_matches_install_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
+    from isaaclab.cli.commands.install import CORE_ISAACLAB_SUBMODULES
+    from lib.local_isaaclab import CORE_ISAACLAB_SUBMODULES as osmo_core
+
+    assert osmo_core == list(CORE_ISAACLAB_SUBMODULES)
+
+
+def test_source_packages_installs_core_then_neural(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
+    from lib.local_isaaclab import source_packages
+
+    names = [path.name for path in source_packages(REPO_ROOT)]
+    assert names[0] == "isaaclab"
+    assert "isaaclab_neural" in names
+    assert names.index("isaaclab") < names.index("isaaclab_neural")
+    assert (REPO_ROOT / "source" / "isaaclab" / "pyproject.toml").is_file()
+
+
+def test_init_sh_bootstraps_uploaded_isaaclab_tree() -> None:
+    text = (OSMO_SCRIPTS / "init.sh").read_text(encoding="utf-8")
+    assert "local_isaaclab.py" in text
+    assert "bootstrap" in text
+    assert "source/isaaclab_neural" not in text
+
+
+def test_cli_export_pythonpath_accepts_project_root_after_command() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(OSMO_SCRIPTS / "lib" / "local_isaaclab.py"),
+            "export-pythonpath",
+            "--project-root",
+            str(REPO_ROOT),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    entries = result.stdout.strip().split(os.pathsep)
+    assert str((REPO_ROOT / "source" / "isaaclab").resolve()) == entries[0]
+    assert str((REPO_ROOT / "source" / "isaaclab_neural").resolve()) in entries
+
+
+def test_entrypoint_reexports_uploaded_isaaclab_pythonpath() -> None:
+    text = (OSMO_SCRIPTS / "entrypoint.sh").read_text(encoding="utf-8")
+    assert "export-pythonpath" in text
+    assert "local_isaaclab.py verify" in text
+    assert "export PYTHONPATH=" in text
+
+
+def test_entrypoint_prefers_image_venv_over_kit_python() -> None:
+    text = (OSMO_SCRIPTS / "entrypoint.sh").read_text(encoding="utf-8")
+    venv_offset = text.index("/opt/isaaclab-venv")
+    fallback_offset = text.index('Using Isaac Sim python.sh')
+    assert "export VIRTUAL_ENV=" in text
+    assert venv_offset < fallback_offset
+    assert 'return' in text[venv_offset:fallback_offset]
+
+
+def test_init_sh_fails_fast_without_venv_deps() -> None:
+    text = (OSMO_SCRIPTS / "init.sh").read_text(encoding="utf-8")
+    bootstrap_offset = text.index("bootstrap")
+    lazy_offset = text.index('import lazy_loader')
+    assert lazy_offset > bootstrap_offset
+
+
+def test_install_local_packages_force_reinstalls_without_deps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
+    from lib.local_isaaclab import install_local_packages
+
+    _write_source_package(tmp_path, "isaaclab", "uploaded")
+    _write_source_package(tmp_path, "isaaclab_neural", "uploaded")
+    calls: list[tuple[list[str], bool]] = []
+
+    def fake_run(cmd, check=False):
+        calls.append((list(cmd), bool(check)))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr("lib.local_isaaclab.subprocess.run", fake_run)
+    packages = install_local_packages(tmp_path)
+
+    assert [path.name for path in packages] == ["isaaclab", "isaaclab_neural"]
+    uninstall_cmd, uninstall_check = calls[0]
+    assert uninstall_cmd[3] == "uninstall"
+    assert uninstall_cmd[-2:] == ["isaaclab", "isaaclab_neural"]
+    assert uninstall_check is False
+    assert len(calls) == 2
+    install_cmd, install_check = calls[1]
+    assert "--no-deps" in install_cmd
+    assert "--force-reinstall" in install_cmd
+    assert install_cmd.count("--editable") == 2
+    assert install_check is True
+
+
+def test_verify_local_imports_rejects_image_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
+    from lib import local_isaaclab
+
+    _write_source_package(tmp_path, "isaaclab", "uploaded")
+    image_origin = tmp_path / "image" / "isaaclab" / "__init__.py"
+    monkeypatch.setattr(local_isaaclab, "apply_sys_path", lambda _root: [])
+    monkeypatch.setattr(local_isaaclab, "_module_origin", lambda _name: image_origin)
+    with pytest.raises(RuntimeError, match="container image"):
+        local_isaaclab.verify_local_imports(tmp_path)
+
+
+def test_sys_path_hook_shadows_image_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
+    from lib.local_isaaclab import write_sys_path_hook
+
+    project_root = tmp_path / "repo"
+    _write_source_package(project_root, "isaaclab", "uploaded")
+    image_site = tmp_path / "image_site"
+    image_pkg = image_site / "isaaclab"
+    image_pkg.mkdir(parents=True)
+    (image_pkg / "__init__.py").write_text("MARKER = 'image'\n", encoding="utf-8")
+    hook_site = tmp_path / "hook_site"
+    write_sys_path_hook(project_root, site_packages=hook_site)
+
+    probe = r"""
+import importlib.util
+import site
+import sys
+site.addsitedir(sys.argv[1])
+spec = importlib.util.find_spec("isaaclab")
+print(spec.origin)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe, str(hook_site)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(image_site),
+            "PYTHONNOUSERSITE": "1",
+        },
+    )
+    origin = Path(result.stdout.strip()).resolve()
+    assert origin.is_relative_to((project_root / "source" / "isaaclab").resolve())
+    assert "image_site" not in origin.as_posix()

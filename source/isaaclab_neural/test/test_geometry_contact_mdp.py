@@ -71,6 +71,34 @@ def test_body_contacts_reads_contact_tokens(monkeypatch):
     )
 
 
+def test_body_contacts_prefers_newton_body_ids_over_encoder_slots(monkeypatch):
+    adapter = _install_adapter(monkeypatch)
+    adapter.contact_representation = "contact_tokens"
+    adapter.contact_tokens = torch.zeros((1, 1, CONTACT_TOKEN_DIM))
+    adapter.contact_tokens[0, 0, CONTACT_TOKEN_VALID_INDEX] = 1.0
+    adapter.contact_tokens[0, 0, CONTACT_TOKEN_BODY_SLOT_INDEX] = 0
+    adapter.contact_tokens[0, 0, CONTACT_TOKEN_GAP_INDEX] = -0.01
+    adapter.contact_token_body_ids = torch.tensor([[7]])
+    adapter.body_local_ids = torch.full((8,), -1, dtype=torch.long)
+    adapter.body_local_ids[7] = 2
+
+    torch.testing.assert_close(body_contacts([2]), torch.tensor([[True]]))
+    torch.testing.assert_close(body_contacts([0]), torch.tensor([[False]]))
+
+
+def test_body_contacts_ignores_padded_newton_body_ids(monkeypatch):
+    adapter = _install_adapter(monkeypatch)
+    adapter.contact_representation = "contact_tokens"
+    adapter.contact_tokens = torch.zeros((1, 1, CONTACT_TOKEN_DIM))
+    adapter.contact_tokens[0, 0, CONTACT_TOKEN_VALID_INDEX] = 1.0
+    adapter.contact_tokens[0, 0, CONTACT_TOKEN_BODY_SLOT_INDEX] = 0
+    adapter.contact_tokens[0, 0, CONTACT_TOKEN_GAP_INDEX] = -0.01
+    adapter.contact_token_body_ids = torch.tensor([[-1]])
+    adapter.body_local_ids = torch.arange(4, dtype=torch.long)
+
+    torch.testing.assert_close(body_contacts([0]), torch.tensor([[False]]))
+
+
 def test_geometry_feet_air_time_rewards_touchdown_after_air(monkeypatch):
     adapter = _install_adapter(monkeypatch)
     adapter.contact_masks.zero_()

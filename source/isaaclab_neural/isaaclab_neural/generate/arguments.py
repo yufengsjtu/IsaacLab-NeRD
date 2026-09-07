@@ -32,13 +32,42 @@ def get_parser() -> argparse.ArgumentParser:
         help="Source of trajectory initial generalized states.",
     )
     parser.add_argument(
-        "--initial-states-pool", type=str, default=None, help="Optional torch file with initial states."
+        "--initial-states-pool",
+        type=str,
+        default=None,
+        help=(
+            "Optional initial-state pool. Accepts a rank-2/3 torch tensor file or an HDF5 "
+            "dataset with data/states shaped [num_trajectories, horizon, state_dim]."
+        ),
     )
     parser.add_argument(
         "--policy-checkpoint", type=str, default=None, help="Optional RSL-RL policy checkpoint for policy mode."
     )
+    parser.add_argument(
+        "--policy-action-noise-std",
+        type=float,
+        default=0.0,
+        help=(
+            "Isotropic Gaussian std added to policy actions in policy mode. "
+            "Noise is resampled on each control tick (env decimation) and held "
+            "between ticks. Disabled when 0."
+        ),
+    )
+    parser.add_argument(
+        "--no-clip-policy-action-noise",
+        action="store_true",
+        help="Leave noisy policy actions unclipped. Default clips to env action bounds.",
+    )
     parser.add_argument("--policy-agent", type=str, default="rsl_rl_cfg_entry_point")
     parser.add_argument("--step-granularity", choices=["frame", "env"], default="frame")
+    parser.add_argument(
+        "--resample-actions-every-frame",
+        action="store_true",
+        help=(
+            "Sample a new action on every recorded physics frame instead of holding "
+            "the action across env decimation. Used for G1 pool-perturb."
+        ),
+    )
     parser.add_argument("--num-transitions", type=int, default=100_000, help="Number of transitions to collect.")
     parser.add_argument("--trajectory-length", type=int, default=100, help="Number of env steps per trajectory.")
     parser.add_argument("--num-envs", type=int, default=1024, help="Number of vectorized environments.")
@@ -62,6 +91,10 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kp-max", type=float, default=80.0, help="Maximum randomized actuator stiffness.")
     parser.add_argument("--kd-min", type=float, default=0.5, help="Minimum randomized actuator damping.")
     parser.add_argument("--kd-max", type=float, default=4.0, help="Maximum randomized actuator damping.")
+    parser.add_argument("--kp-scale-min", type=float, default=0.8, help="Minimum G1 nominal-stiffness scale.")
+    parser.add_argument("--kp-scale-max", type=float, default=1.2, help="Maximum G1 nominal-stiffness scale.")
+    parser.add_argument("--kd-scale-min", type=float, default=0.8, help="Minimum G1 nominal-damping scale.")
+    parser.add_argument("--kd-scale-max", type=float, default=1.2, help="Maximum G1 nominal-damping scale.")
     parser.add_argument("--render", action="store_true", help="Render while generating trajectories.")
     parser.add_argument(
         "--contact-mode",

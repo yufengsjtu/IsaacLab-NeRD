@@ -20,6 +20,58 @@ from isaaclab_neural.contacts.contact_set_schema import (
 from isaaclab_neural.generate.adapter import DataGenerationAdapter
 
 
+def perturb_policy_action(
+    action: torch.Tensor,
+    noise_std: float,
+    action_low: torch.Tensor,
+    action_high: torch.Tensor,
+    *,
+    clip_to_bounds: bool = True,
+) -> torch.Tensor:
+    """Add isotropic Gaussian noise, optionally clipping to action bounds.
+
+    Args:
+        action: Policy actions, shape ``[num_envs, action_dim]``.
+        noise_std: Isotropic Gaussian standard deviation. No noise when ``<= 0``.
+        action_low: Per-dimension lower action bounds, shape ``[action_dim]``.
+        action_high: Per-dimension upper action bounds, shape ``[action_dim]``.
+        clip_to_bounds: When True, clamp noisy actions to ``[action_low, action_high]``.
+
+    Returns:
+        Noisy actions, optionally clipped to ``[action_low, action_high]``.
+    """
+    if noise_std <= 0.0:
+        return action
+    noisy = action + float(noise_std) * torch.randn_like(action)
+    if clip_to_bounds:
+        return torch.clamp(noisy, min=action_low, max=action_high)
+    return noisy
+
+
+def action_hold_period(
+    step_granularity: str,
+    env_decimation: int,
+    *,
+    resample_actions_every_frame: bool = False,
+) -> int:
+    """Return how many recorded frames share one sampled action.
+
+    Args:
+        step_granularity: ``frame`` records physics frames; ``env`` records env steps.
+        env_decimation: Control-to-physics ratio from the Isaac Lab env.
+        resample_actions_every_frame: If True, sample a new action every recorded
+            frame. Used by G1 pool-perturb to match the Lab-policy generator.
+
+    Returns:
+        Hold period in recorded frames. ``1`` means a new action every frame.
+    """
+    if step_granularity == "env" or resample_actions_every_frame:
+        return 1
+    if step_granularity == "frame":
+        return max(1, int(env_decimation))
+    raise ValueError(f"Unsupported step_granularity: {step_granularity}")
+
+
 def build_native_contact_rollout(
     frames: list[dict[str, torch.Tensor]],
     valid_trajectories: torch.Tensor,
@@ -324,12 +376,16 @@ class ActionTrajectorySampler:
         initial_states_source: str = "sample",
         initial_states_pool: torch.Tensor | None = None,
         step_granularity: str = "frame",
+        resample_actions_every_frame: bool = False,
         render: bool = False,
     ) -> dict[str, Any]:
         """Collect trajectories with sampled actions."""
-        decimation = 1
-        if step_granularity == "frame":
-            decimation = max(1, int(getattr(getattr(self.adapter.env, "cfg", None), "decimation", 1)))
+        env_decimation = int(getattr(getattr(self.adapter.env, "cfg", None), "decimation", 1) or 1)
+        decimation = action_hold_period(
+            step_granularity,
+            env_decimation,
+            resample_actions_every_frame=resample_actions_every_frame,
+        )
         held_action: torch.Tensor | None = None
 
         def reset_held_action() -> None:
@@ -401,6 +457,8 @@ class ActionTrajectorySampler:
         env_wrapped=None,
         initial_states_source: str = "env",
         render: bool = False,
+        action_noise_std: float = 0.0,
+        clip_action_noise: bool = True,
     ) -> dict[str, Any]:
         """Collect trajectories driven by a callable policy."""
         decimation = max(1, int(getattr(getattr(self.adapter.env, "cfg", None), "decimation", 1)))
@@ -424,7 +482,13 @@ class ActionTrajectorySampler:
                     obs = self.adapter.env.get_observations()
                 else:
                     obs = self.adapter.env.obs_buf
-                policy_action = policy(obs)
+                policy_action = perturb_policy_action(
+                    policy(obs),
+                    action_noise_std,
+                    self.action_low,
+                    self.action_high,
+                    clip_to_bounds=clip_action_noise,
+                )
             if policy_action is None:
                 raise RuntimeError("Policy did not produce an action before stepping.")
             self.adapter.step_action_frame(policy_action, process_action=should_process_action)

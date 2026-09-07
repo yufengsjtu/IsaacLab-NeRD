@@ -40,6 +40,8 @@ OSMO_STORAGE_OVERRIDE=""
 OSMO_PLATFORM_OVERRIDE=""
 OSMO_POOL_OVERRIDE=""
 OSMO_PRIORITY_OVERRIDE=""
+OSMO_IMAGE_OVERRIDE=""
+OSMO_REGISTRY_CREDENTIAL_OVERRIDE=""
 
 NGC_API_KEY="${NGC_API_KEY:-}"
 NVDATASET_TENANTID="${NVDATASET_TENANTID:-}"
@@ -73,6 +75,8 @@ Common options:
   --platform NAME            Override preset OSMO platform
   --pool NAME                OSMO pool passed to validate and submit
   --priority LEVEL           Submit priority: HIGH, NORMAL, or LOW
+  --image NAME               Override preset container image
+  --registry-credential NAME OSMO REGISTRY credential for a private image
   --enable-wandb             Enable Weights & Biases logging in the OSMO pod
   --wandb-project NAME       W&B project (default: nerd-newton)
   --wandb-exp-name NAME      W&B run name (default: workflow/dataset subdir)
@@ -178,6 +182,14 @@ while (($#)); do
             ;;
         --priority)
             OSMO_PRIORITY_OVERRIDE="${2:?Missing value for --priority}"
+            shift 2
+            ;;
+        --image)
+            OSMO_IMAGE_OVERRIDE="${2:?Missing value for --image}"
+            shift 2
+            ;;
+        --registry-credential)
+            OSMO_REGISTRY_CREDENTIAL_OVERRIDE="${2:?Missing value for --registry-credential}"
             shift 2
             ;;
         --enable-wandb)
@@ -301,6 +313,12 @@ fi
 if [[ -n "$OSMO_PLATFORM_OVERRIDE" ]]; then
     resolve_args+=(--platform "$OSMO_PLATFORM_OVERRIDE")
 fi
+if [[ -n "$OSMO_IMAGE_OVERRIDE" ]]; then
+    resolve_args+=(--image "$OSMO_IMAGE_OVERRIDE")
+fi
+if [[ -n "$OSMO_REGISTRY_CREDENTIAL_OVERRIDE" ]]; then
+    resolve_args+=(--registry-credential "$OSMO_REGISTRY_CREDENTIAL_OVERRIDE")
+fi
 eval "$(python3 "$SCRIPT_DIR/lib/preset.py" resolve-submit "${resolve_args[@]}")"
 
 TMP_DIR="$(mktemp -d)"
@@ -358,10 +376,11 @@ if [[ "$CODE_ONLY" == "1" ]]; then
 fi
 
 credential_exists() {
+    local credential_name="${1:-$STORAGE_CREDENTIAL}"
     local credential_list
 
     credential_list="$(osmo credential list 2>/dev/null || true)"
-    [[ "$credential_list" == *"$STORAGE_CREDENTIAL"* ]]
+    [[ "$credential_list" == *"$credential_name"* ]]
 }
 
 if [[ "$REFRESH_CREDENTIAL" != "1" ]] && credential_exists; then
@@ -413,6 +432,36 @@ else
     fi
 fi
 
+if [[ -n "${OSMO_REGISTRY_CREDENTIAL:-}" ]]; then
+    if [[ "$REFRESH_CREDENTIAL" != "1" ]] && credential_exists "$OSMO_REGISTRY_CREDENTIAL"; then
+        echo "=== Reusing existing OSMO registry credential: $OSMO_REGISTRY_CREDENTIAL ==="
+    else
+        echo "=== Setting OSMO registry credential: $OSMO_REGISTRY_CREDENTIAL ==="
+        registry_host_file="$TMP_DIR/dockerhub-registry"
+        registry_user_file="$TMP_DIR/dockerhub-username"
+        registry_auth_file="$TMP_DIR/dockerhub-token"
+        printf '%s' "docker.io" > "$registry_host_file"
+        chmod 600 "$registry_host_file"
+        python3 "$SCRIPT_DIR/lib/registry_credential.py" write-payload-files \
+            --username-file "$registry_user_file" \
+            --auth-file "$registry_auth_file" >/dev/null
+        if ! credential_output="$(
+            osmo credential set "$OSMO_REGISTRY_CREDENTIAL" --type REGISTRY \
+                --payload-file registry="$registry_host_file" username="$registry_user_file" auth="$registry_auth_file" 2>&1
+        )"; then
+            echo "$credential_output" >&2
+            if [[ "$credential_output" == *"duplicate key value"* || "$credential_output" == *"already exists"* ]]; then
+                echo "Credential $OSMO_REGISTRY_CREDENTIAL already exists; reusing it."
+            else
+                echo "[FATAL] Failed to set OSMO registry credential $OSMO_REGISTRY_CREDENTIAL." >&2
+                exit 1
+            fi
+        else
+            echo "$credential_output"
+        fi
+    fi
+fi
+
 SUBMIT_ARGS=(
     --set
     "num_gpu=$OSMO_NUM_GPU"
@@ -450,6 +499,9 @@ SUBMIT_ARGS=(
     "nvdataset_output_description=$NVDATASET_OUTPUT_DESCRIPTION"
     "nvdataset_index_url=$NVDATASET_INDEX_URL"
 )
+if [[ -n "${OSMO_IMAGE:-}" ]]; then
+    SUBMIT_ARGS+=("image=$OSMO_IMAGE")
+fi
 if [[ "$ENABLE_WANDB" == "1" ]]; then
     SUBMIT_ARGS+=(
         "enable_wandb=true"
@@ -468,7 +520,7 @@ if [[ -n "$OSMO_PRIORITY_OVERRIDE" ]]; then
     OSMO_SUBMIT_ONLY_ARGS+=(--priority "$OSMO_PRIORITY_OVERRIDE")
 fi
 
-echo "=== Resolved OSMO resources: gpu=$OSMO_NUM_GPU cpu=$OSMO_NUM_CPU memory=$OSMO_MEMORY storage=$OSMO_STORAGE platform=$OSMO_PLATFORM pool=${OSMO_POOL_OVERRIDE:-<default>} ==="
+echo "=== Resolved OSMO resources: gpu=$OSMO_NUM_GPU cpu=$OSMO_NUM_CPU memory=$OSMO_MEMORY storage=$OSMO_STORAGE platform=$OSMO_PLATFORM pool=${OSMO_POOL_OVERRIDE:-<default>} image=${OSMO_IMAGE:-<workflow-default>} registry=${OSMO_REGISTRY_CREDENTIAL:-<none>} ==="
 
 echo "=== Validating OSMO workflow ==="
 osmo workflow validate "${SUBMIT_ARGS[@]}" "${OSMO_RESOURCE_ARGS[@]}" "${OSMO_ARGS[@]}" -- "$WORKFLOW_FILE"

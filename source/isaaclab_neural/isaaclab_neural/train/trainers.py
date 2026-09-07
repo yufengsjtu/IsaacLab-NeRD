@@ -33,6 +33,7 @@ from isaaclab_neural.data import (
     collate_fn_BatchTransitionDataset,
     create_batch_transition_dataset,
     create_trajectory_dataset,
+    create_weighted_trajectory_dataset,
 )
 from isaaclab_neural.eval.training_evaluator import TrainingRolloutEvaluator
 from isaaclab_neural.models.models import ModelMixedInput
@@ -330,7 +331,11 @@ class VanillaTrainer:
             "contact_packing_policy": solver_cfg.get("contact_packing_policy"),
             "contact_filter": solver_cfg.get("contact_filter", "none"),
         }
-        self.get_datasets(algo_cfg["dataset"].get("train_dataset_path"), algo_cfg["dataset"].get("valid_datasets"))
+        self.get_datasets(
+            dataset_cfg.get("train_dataset_path"),
+            dataset_cfg.get("valid_datasets"),
+            dataset_cfg.get("train_datasets"),
+        )
         self._validate_force_label_datasets()
 
         if cli_cfg["train"]:
@@ -636,7 +641,9 @@ class VanillaTrainer:
         else:
             self.optimizer = torch.optim.Adam(self.neural_model.parameters(), lr=self.lr_start, betas=self.betas)
 
-    def get_datasets(self, train_dataset_path, valid_datasets_cfg) -> None:
+    def get_datasets(self, train_dataset_path, valid_datasets_cfg, train_datasets_cfg=None) -> None:
+        if train_datasets_cfg is not None:
+            raise ValueError("Weighted train_datasets are only supported by SequenceModelTrainer.")
         self.train_dataset = create_batch_transition_dataset(
             load_mode=self.dataset_load_mode,
             batch_size=self.batch_size,
@@ -1241,17 +1248,36 @@ class SequenceModelTrainer(VanillaTrainer):
         self.sample_sequence_length = cfg["algorithm"].get("sample_sequence_length", 1)
         super().__init__(neural_env, cfg, checkpoint, device)
 
-    def get_datasets(self, train_dataset_path, valid_datasets_cfg) -> None:
+    def get_datasets(self, train_dataset_path, valid_datasets_cfg, train_datasets_cfg=None) -> None:
         self.train_dataset_rank_sharded = self.is_distributed and self.dataset_load_mode == "eager"
-        self.train_dataset = create_trajectory_dataset(
-            load_mode=self.dataset_load_mode,
-            sample_sequence_length=self.sample_sequence_length,
-            hdf5_dataset_path=train_dataset_path,
-            max_capacity=self.dataset_max_capacity,
-            rank=self.rank if self.train_dataset_rank_sharded else 0,
-            world_size=self.world_size if self.train_dataset_rank_sharded else 1,
+        dataset_kwargs = {
+            "load_mode": self.dataset_load_mode,
+            "sample_sequence_length": self.sample_sequence_length,
+            "max_capacity": self.dataset_max_capacity,
+            "rank": self.rank if self.train_dataset_rank_sharded else 0,
+            "world_size": self.world_size if self.train_dataset_rank_sharded else 1,
             **self.dataset_contact_projection,
-        )
+        }
+        if train_datasets_cfg is not None:
+            if train_dataset_path is not None:
+                raise ValueError("Configure either dataset.train_dataset_path or dataset.train_datasets, not both.")
+            self.train_dataset = create_weighted_trajectory_dataset(
+                train_datasets=train_datasets_cfg,
+                **dataset_kwargs,
+            )
+            if self.is_main_process:
+                weights = {
+                    name: float(weight)
+                    for name, weight in zip(self.train_dataset.source_names, self.train_dataset.weights)
+                }
+                print_info(f"Weighted training datasets: {weights}")
+        else:
+            if train_dataset_path is None:
+                raise ValueError("Configure dataset.train_dataset_path or dataset.train_datasets.")
+            self.train_dataset = create_trajectory_dataset(
+                hdf5_dataset_path=train_dataset_path,
+                **dataset_kwargs,
+            )
         if valid_datasets_cfg is not None and (not self.is_distributed or self.is_main_process):
             for valid_dataset_name, valid_dataset_path in valid_datasets_cfg.items():
                 self.valid_datasets[valid_dataset_name] = create_trajectory_dataset(

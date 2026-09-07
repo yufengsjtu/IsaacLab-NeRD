@@ -31,9 +31,27 @@ def _native_contact_adapter():
     from isaaclab_neural.physics import NewtonNerdManager
 
     adapter = NewtonNerdManager._nerd_contact_adapter
-    if adapter is None:
-        raise RuntimeError("Geometry contact MDP terms require an active NeRD native-contact adapter.")
+    contact_mode = getattr(NewtonNerdManager, "_nerd_contact_mode", "newton_native")
+    if adapter is None or contact_mode != "newton_native":
+        raise RuntimeError("Geometry contact MDP terms require NeRD contact_mode='newton_native'.")
     return adapter
+
+
+def _token_owner_local_ids(adapter, tokens: torch.Tensor) -> torch.Tensor:
+    """Map packed tokens to Isaac-Lab local body indices.
+
+    Encoder ``body_slot`` is a compact primary-body index and can disagree with
+    :class:`~isaaclab.managers.SceneEntityCfg` ``body_ids``. Prefer packed Newton
+    body ids converted through ``body_local_ids`` when the adapter provides them.
+    """
+    token_body_ids = getattr(adapter, "contact_token_body_ids", None)
+    local_lookup = getattr(adapter, "body_local_ids", None)
+    if token_body_ids is None or local_lookup is None:
+        return tokens[..., CONTACT_TOKEN_BODY_SLOT_INDEX].to(dtype=torch.long)
+
+    safe = token_body_ids.clamp(min=0)
+    local_ids = local_lookup[safe]
+    return torch.where(token_body_ids >= 0, local_ids, torch.full_like(local_ids, -1))
 
 
 def body_contacts(
@@ -64,8 +82,8 @@ def body_contacts(
         active = (tokens[..., CONTACT_TOKEN_VALID_INDEX] > 0.5) & (
             tokens[..., CONTACT_TOKEN_GAP_INDEX] <= maximum_separation
         )
-        body_slots = tokens[..., CONTACT_TOKEN_BODY_SLOT_INDEX].to(dtype=torch.long)
-        selected_bodies = body_slots.unsqueeze(-1) == selected
+        owner_local_ids = _token_owner_local_ids(adapter, tokens)
+        selected_bodies = owner_local_ids.unsqueeze(-1) == selected
         return torch.any(active.unsqueeze(-1) & selected_bodies, dim=1)
 
     active = adapter.contact_masks & (adapter.contact_depths <= maximum_separation)

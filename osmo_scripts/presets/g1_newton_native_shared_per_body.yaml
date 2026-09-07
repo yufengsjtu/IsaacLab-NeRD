@@ -1,0 +1,69 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+workflow:
+  base_name: g1-newton-native-shared-per-body-mixed
+  dataset_subdir: g1-newton-native-contact-tokens-v3-active-mixed-20m-ckpt3-1499-stock
+  image: docker.io/rowany28070/isaac-lab-nerd:g1-develop
+
+resources:
+  num_gpu: 8
+  num_cpu: 80
+  memory: 512Gi
+  storage: 512Gi
+  platform: ovx-l40s
+
+experiment:
+  env_name: G1-Native-ContactTokens
+  robot_name: G1
+  data_gen_task: Isaac-Velocity-Flat-G1-Dataset-Gen-v0
+  deployment_task: Isaac-Velocity-Flat-G1
+  policy_checkpoint: ./pretrained/control_policy/g1_flat_terrain/model_1499.pt
+  require_policy_checkpoint: true
+  train_task: Isaac-Velocity-Flat-G1-NeRD-v0
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/G1/transformer_native_shared_per_body.yaml
+  num_gpus: 8
+  contact_mode: newton_native
+  contact_representation: contact_tokens
+  contact_filter: solver_active
+  num_contacts_per_env: 64
+  max_contact_tokens: 64
+  contact_packing_policy: body_round_robin_pair_atomic
+  sample_mode: action
+  initial_states_source: env
+  randomize_pd_gains: true
+  kp_scale_range: [0.8, 1.2]
+  kd_scale_range: [0.8, 1.2]
+  train_transitions: 20000000
+  data_gen_num_envs: 1024
+  train_num_envs: 64
+  # 250 Lab-policy control ticks * 4 physics frames.
+  trajectory_length: 1000
+  write_chunk_transitions: 819200
+  update_dataset_statistics: true
+  # Train mix only. Ratio 0 skips that train file, not the matching valid file.
+  # policy, random, zero, policy_noise, rl_ckpts, policy_pool_perturbed
+  dataset_mix:
+    ratios: [2, 0, 0, 2, 2, 4]
+    # 100 physics frames with a new random action every frame (jiex
+    # --perturbed-trajectory-length 100). Dedicated policy pool has the same
+    # transition count as the perturb train split (8M here) and walking clip
+    # length trajectory_length (1000), not perturbed_trajectory_length.
+    perturbed_trajectory_length: 100
+    perturbed_random_fraction: 1.0
+    reset_trajectory_length: 500
+    policy_checkpoint_dir: pretrained/control_policy/g1_flat_terrain/checkpoint_mix
+    policy_checkpoint_iters: [500, 1000, 1499]
+    # Always generated, independent of train ratios:
+    #   policy      dataset_valid.hdf5
+    #   random      dataset_random_action_valid.hdf5
+    #   zero        dataset_zero_action_valid.hdf5
+    #   deployment  dataset_deployment_policy_valid.hdf5
+    # This recipe also adds extras for enabled train sources:
+    #   policy_noise            dataset_policy_noisy_valid.hdf5
+    #   policy_pool_perturbed   dataset_pool_perturbed_random_valid.hdf5
+    valid:
+      transitions: 250000
+      always: [policy, random, zero, deployment]

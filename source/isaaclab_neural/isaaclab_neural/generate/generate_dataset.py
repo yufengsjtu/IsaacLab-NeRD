@@ -34,6 +34,8 @@ def _default_robot_name(name: str) -> str:
         return "Anymal-C"
     if "Cartpole" in name:
         return "Cartpole"
+    if "G1" in name:
+        return "G1"
     return name
 
 
@@ -44,13 +46,23 @@ def _sampler_spec(
     randomize_pd_gains: bool,
     kp_range: tuple[float, float],
     kd_range: tuple[float, float],
+    kp_scale_range: tuple[float, float] = (0.8, 1.2),
+    kd_scale_range: tuple[float, float] = (0.8, 1.2),
 ):
     """Return sampler class and kwargs for a dataset-generation task."""
     from isaaclab_neural.generate.sampler import ActionTrajectorySampler
     from isaaclab_neural.generate.samplers import AnymalCTrajectorySampler, CartpoleTrajectorySampler
+    from isaaclab_neural.generate.samplers.g1 import G1TrajectorySampler
 
     if robot_name == "Cartpole":
         return CartpoleTrajectorySampler, {}
+
+    if robot_name == "G1":
+        return G1TrajectorySampler, {
+            "randomize_pd_gains": randomize_pd_gains,
+            "kp_scale_range": kp_scale_range,
+            "kd_scale_range": kd_scale_range,
+        }
 
     if robot_name == "Anymal-C":
         dataset_style_task = "Dataset" in task or "Dataset" in env_name
@@ -180,6 +192,8 @@ def main(env_cfg, agent_cfg=None) -> None:
             args_cli.randomize_pd_gains,
             (args_cli.kp_min, args_cli.kp_max),
             (args_cli.kd_min, args_cli.kd_max),
+            (args_cli.kp_scale_min, args_cli.kp_scale_max),
+            (args_cli.kd_scale_min, args_cli.kd_scale_max),
         )
         sampler = sampler_cls(
             adapter,
@@ -193,14 +207,20 @@ def main(env_cfg, agent_cfg=None) -> None:
             joint_f_lim=JOINT_F_LIM.get(robot_name),
             **sampler_kwargs,
         )
-        initial_states_pool = (
-            torch.load(args_cli.initial_states_pool, map_location=args_cli.device)
-            if args_cli.initial_states_pool
-            else None
-        )
+        initial_states_pool = None
+        if args_cli.initial_states_source == "input_states_pool" and not args_cli.initial_states_pool:
+            raise ValueError("--initial-states-pool is required when --initial-states-source=input_states_pool.")
+        if args_cli.initial_states_pool:
+            from isaaclab_neural.generate.initial_states import load_initial_states_pool
+
+            initial_states_pool = load_initial_states_pool(args_cli.initial_states_pool, args_cli.device)
         policy = None
         env_wrapped = None
         runner = None
+        if args_cli.policy_action_noise_std < 0.0:
+            raise ValueError("--policy-action-noise-std must be non-negative.")
+        if args_cli.policy_action_noise_std > 0.0 and args_cli.sample_mode != "policy":
+            raise ValueError("--policy-action-noise-std requires --sample-mode policy.")
         if args_cli.sample_mode == "policy":
             if args_cli.policy_checkpoint is None:
                 raise ValueError("--policy-checkpoint is required when --sample-mode policy.")
@@ -232,6 +252,8 @@ def main(env_cfg, agent_cfg=None) -> None:
                     env_wrapped=env_wrapped,
                     initial_states_source=args_cli.initial_states_source,
                     render=args_cli.render,
+                    action_noise_std=args_cli.policy_action_noise_std,
+                    clip_action_noise=not getattr(args_cli, "no_clip_policy_action_noise", False),
                 )
             return sampler.sample_trajectories_action_mode(
                 num_transitions,
@@ -239,6 +261,7 @@ def main(env_cfg, agent_cfg=None) -> None:
                 initial_states_source=args_cli.initial_states_source,
                 initial_states_pool=initial_states_pool,
                 step_granularity=args_cli.step_granularity,
+                resample_actions_every_frame=bool(args_cli.resample_actions_every_frame),
                 render=args_cli.render,
             )
 

@@ -19,6 +19,14 @@ Select OpenStack Swift with `--storage-backend swift`. The equivalent default
 containers are `isaaclab-nerd-code`, `isaaclab-nerd-datasets`, and
 `isaaclab-nerd-output`.
 
+The workflow image still supplies Isaac Sim and third-party runtime
+dependencies. After the uploaded tarball is extracted, `init.sh` editable-installs
+every local `source/isaaclab*` package (not only `isaaclab_neural`) and installs
+a `sys.path` hook so Python imports the submitted repository instead of the
+Isaac Lab distribution bundled in the image. Pods prefer the image uv
+environment at `/opt/isaaclab-venv` when it exists, and fall back to Isaac Sim
+`python.sh` on older images that only expose Kit Python.
+
 ## Public presets
 
 - `cartpole_newton_native`: contact-free Cartpole using
@@ -63,6 +71,15 @@ Example:
   --pool <osmo-pool>
 ```
 
+G1 presets use the public image
+`docker.io/rowany28070/isaac-lab-nerd:g1-develop` (no OSMO registry
+credential). Anymal and Cartpole still default to
+`nvcr.io/nvidia/isaac-lab:3.0.0-beta2`.
+
+```bash
+./osmo_scripts/start.sh --preset g1_newton_native_smoke --pool <osmo-pool>
+```
+
 Use `--code-only` to upload the packaged source without submitting a workflow.
 Run `./osmo_scripts/start.sh --help` for resource, storage, cache, and W&B
 options.
@@ -105,6 +122,7 @@ error; it is not translated to native contacts.
 - `presets/`: maintained experiment definitions.
 - `lib/nvdataset_io.py`: NV-Datasets transfers.
 - `lib/swift_io.py`: Swift transfers.
+- `lib/local_isaaclab.py`: overlay the uploaded Isaac Lab tree on the image.
 
 For the overall learning path, see the
 [IsaacLab Neural documentation](../source/isaaclab_neural/docs/README.md).

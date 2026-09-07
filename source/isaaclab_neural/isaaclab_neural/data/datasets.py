@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -833,6 +834,97 @@ class LazyTrajectoryDataset(Dataset):
         self.close()
 
 
+class WeightedMixedTrajectoryDataset(Dataset):
+    """Weighted virtual dataset over multiple trajectory-window datasets.
+
+    The virtual dataset has the combined length of its sources. Its index space
+    allocates samples according to normalized source weights and cycles through
+    a source when its allocation exceeds the source length.
+    """
+
+    def __init__(self, datasets: Mapping[str, Dataset], weights: Mapping[str, float]):
+        if not datasets:
+            raise ValueError("Weighted trajectory mixing requires at least one dataset.")
+        if set(datasets) != set(weights):
+            raise ValueError("Mixed trajectory dataset names and weight names must match.")
+
+        self.datasets = dict(datasets)
+        self.source_names = list(self.datasets)
+        raw_weights = np.asarray([float(weights[name]) for name in self.source_names], dtype=np.float64)
+        if not np.all(np.isfinite(raw_weights)) or np.any(raw_weights <= 0.0):
+            raise ValueError("Mixed trajectory dataset weights must be finite and positive.")
+        self.weights = raw_weights / raw_weights.sum()
+
+        source_lengths = np.asarray([len(self.datasets[name]) for name in self.source_names], dtype=np.int64)
+        if np.any(source_lengths <= 0):
+            empty_sources = [name for name, length in zip(self.source_names, source_lengths) if length <= 0]
+            raise ValueError(f"Mixed trajectory datasets must be non-empty: {empty_sources}.")
+
+        self.length = int(source_lengths.sum())
+        weighted_counts = self.weights * self.length
+        self.source_counts = np.floor(weighted_counts).astype(np.int64)
+        remainder = self.length - int(self.source_counts.sum())
+        if remainder:
+            fractional_order = np.argsort(-(weighted_counts - self.source_counts), kind="stable")
+            self.source_counts[fractional_order[:remainder]] += 1
+        self.source_boundaries = np.cumsum(self.source_counts)
+
+        reference_keys = set(self.datasets[self.source_names[0]][0])
+        for name in self.source_names[1:]:
+            keys = set(self.datasets[name][0])
+            if keys != reference_keys:
+                raise ValueError(
+                    f"Mixed trajectory dataset {name!r} has incompatible keys: "
+                    f"missing={sorted(reference_keys - keys)}, extra={sorted(keys - reference_keys)}."
+                )
+
+    @property
+    def data_keys(self):
+        """Return data keys from the first mixed source."""
+        return getattr(self.datasets[self.source_names[0]], "data_keys", ())
+
+    def __len__(self) -> int:
+        """Return the weighted virtual dataset length."""
+        return self.length
+
+    def source_for_index(self, index: int) -> tuple[str, int]:
+        """Resolve a virtual index to a source name and local sample index."""
+        if index < 0:
+            index += self.length
+        if index < 0 or index >= self.length:
+            raise IndexError(f"Index {index} out of range for dataset of length {self.length}.")
+        source_index = int(np.searchsorted(self.source_boundaries, index, side="right"))
+        source_start = 0 if source_index == 0 else int(self.source_boundaries[source_index - 1])
+        source_name = self.source_names[source_index]
+        local_index = (index - source_start) % len(self.datasets[source_name])
+        return source_name, local_index
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        """Return one sample from the weighted source selected by ``index``."""
+        source_name, local_index = self.source_for_index(index)
+        return self.datasets[source_name][local_index]
+
+    def shuffle(self) -> None:
+        """Shuffle each source dataset when it supports explicit shuffling."""
+        for dataset in self.datasets.values():
+            shuffle = getattr(dataset, "shuffle", None)
+            if shuffle is not None:
+                shuffle()
+
+    def close(self) -> None:
+        """Close all source datasets that own open resources."""
+        datasets = getattr(self, "datasets", None)
+        if not datasets:
+            return
+        for dataset in datasets.values():
+            close = getattr(dataset, "close", None)
+            if close is not None:
+                close()
+
+    def __del__(self) -> None:
+        self.close()
+
+
 def create_batch_transition_dataset(
     *,
     load_mode: DatasetLoadMode = "eager",
@@ -914,3 +1006,42 @@ def create_trajectory_dataset(
             contact_filter=contact_filter,
         )
     raise ValueError(f"Unsupported dataset load_mode: {load_mode!r}. Expected 'eager' or 'lazy'.")
+
+
+def create_weighted_trajectory_dataset(
+    *,
+    train_datasets: Mapping[str, Mapping[str, Any]],
+    load_mode: DatasetLoadMode = "eager",
+    sample_sequence_length: int = 10,
+    max_capacity: int = 100_000_000,
+    rank: int = 0,
+    world_size: int = 1,
+    contact_representation: str | None = None,
+    num_contacts_per_env: int | None = None,
+    max_contact_tokens: int | None = None,
+    contact_packing_policy: str | None = None,
+    contact_filter: str = "none",
+) -> WeightedMixedTrajectoryDataset:
+    """Create a weighted mixture of eager or lazy trajectory datasets."""
+    datasets: dict[str, Dataset] = {}
+    weights: dict[str, float] = {}
+    for name, source_cfg in train_datasets.items():
+        if not isinstance(source_cfg, Mapping):
+            raise TypeError(f"Training dataset {name!r} must be configured as a mapping.")
+        if "path" not in source_cfg or "weight" not in source_cfg:
+            raise ValueError(f"Training dataset {name!r} must define both 'path' and 'weight'.")
+        datasets[name] = create_trajectory_dataset(
+            load_mode=load_mode,
+            hdf5_dataset_path=source_cfg["path"],
+            sample_sequence_length=sample_sequence_length,
+            max_capacity=int(source_cfg.get("max_capacity", max_capacity)),
+            rank=rank,
+            world_size=world_size,
+            contact_representation=contact_representation,
+            num_contacts_per_env=num_contacts_per_env,
+            max_contact_tokens=max_contact_tokens,
+            contact_packing_policy=contact_packing_policy,
+            contact_filter=contact_filter,
+        )
+        weights[name] = float(source_cfg["weight"])
+    return WeightedMixedTrajectoryDataset(datasets, weights)

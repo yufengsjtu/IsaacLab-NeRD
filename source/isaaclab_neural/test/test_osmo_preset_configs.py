@@ -27,6 +27,14 @@ PUBLIC_PRESETS = {
     "anymal_rough_newton_native_shared_per_body_rope_formal.yaml": "Anymal-C-Rough-Native-v2",
     "anymal_rough_newton_native_shared_per_body_contact_force_rope.yaml": ("Anymal-C-Rough-Native-Force-v2"),
 }
+G1_PRESET_FILES = {
+    "g1_newton_native_shared_per_body.yaml",
+    "g1_newton_native_shared_per_body_perturb.yaml",
+    "g1_newton_native_smoke.yaml",
+}
+ADDITIONAL_TRACKED_PRESETS = {
+    "anymal_rough_newton_native_shared_per_body_contact_force_rope_active_filter.yaml",
+}
 
 
 def _load_yaml(path: Path) -> dict:
@@ -35,7 +43,9 @@ def _load_yaml(path: Path) -> dict:
 
 
 def test_public_preset_surface_is_intentional() -> None:
-    assert {path.name for path in PRESET_DIR.glob("*.yaml")} == set(PUBLIC_PRESETS)
+    assert {path.name for path in PRESET_DIR.glob("*.yaml")} == (
+        set(PUBLIC_PRESETS) | G1_PRESET_FILES | ADDITIONAL_TRACKED_PRESETS
+    )
 
 
 def test_public_presets_have_valid_unique_training_mappings() -> None:

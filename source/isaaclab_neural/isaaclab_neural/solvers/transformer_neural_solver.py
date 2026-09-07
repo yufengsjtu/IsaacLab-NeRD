@@ -101,9 +101,21 @@ class TransformerNeuralSolver(NeuralSolver):
     def reset(self, env_ids=None, world_mask=None, flags=None):
         """Reset transformer history globally or for selected environments.
 
+        A full reset (``env_ids is None`` or every environment) drops the
+        history window so later steps refill it the same way as episode start.
+        A partial reset copies the current post-reset solver inputs into the
+        selected rows. Zero-filling those rows previously fed the model a
+        window of invalid zero poses and caused immediate re-falls.
+
         Isaac Lab 3's Newton manager also calls this as
         ``reset(state, world_mask=..., flags=0)``. That path has no history to
         clear; history is reset with ``env_ids``.
+
+        Args:
+            env_ids: Environment indices to reset. ``None`` resets every
+                environment. Newton-style calls pass the Newton ``State`` here.
+            world_mask: Unused Newton SolverBase reset mask.
+            flags: Unused Newton SolverBase reset flags.
         """
         if world_mask is not None or flags is not None:
             super().reset(env_ids, world_mask=world_mask, flags=flags)
@@ -113,18 +125,31 @@ class TransformerNeuralSolver(NeuralSolver):
             self.reset_states_history()
             return
 
+        env_ids = torch.unique(self._normalize_env_ids(env_ids))
+        if env_ids.numel() == 0:
+            return
+        all_env_ids = torch.arange(self.num_envs, device=env_ids.device, dtype=env_ids.dtype)
+        if torch.equal(env_ids, all_env_ids):
+            self.reset_states_history()
+            return
         if len(self.states_history) == 0:
             return
 
-        env_ids = self._normalize_env_ids(env_ids)
-        if env_ids.numel() == 0:
-            return
+        self._fill_history_rows_from_current_state(env_ids)
+        self._mark_history_rows_for_rebuild(env_ids)
 
+    def _fill_history_rows_from_current_state(self, env_ids: torch.Tensor) -> None:
+        """Replace selected history rows with the current solver snapshot."""
+        snapshot = self._history_snapshot()
         for history_entry in self.states_history:
-            for value in history_entry.values():
-                value[env_ids] = 0.0
-        # Re-encode only modified rows from raw history on the next forward.
-        # This preserves exact behavior for normalized inputs and biased encoders.
+            for key, value in history_entry.items():
+                source = snapshot.get(key)
+                if source is None:
+                    continue
+                value.index_copy_(0, env_ids, source.index_select(0, env_ids).to(dtype=value.dtype))
+
+    def _mark_history_rows_for_rebuild(self, env_ids: torch.Tensor) -> None:
+        """Rebuild cached transformer features for the selected environments."""
         if self.feature_cache_rebuild_env_ids is None:
             self.feature_cache_rebuild_env_ids = env_ids
         else:

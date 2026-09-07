@@ -21,6 +21,7 @@ from typing import TextIO, cast
 
 import h5py
 import numpy as np
+from lib.g1_dataset_mix import expand_g1_dataset_mix
 from lib.simple_yaml import load_yaml
 
 NATIVE_CONTACT_DATASET_SCHEMA_VERSION = 3
@@ -34,6 +35,14 @@ class DatasetSpec:
     task_kind: str
     zero_actions: bool
     use_policy: bool
+    num_transitions: int | None = None
+    policy_checkpoint: str | None = None
+    policy_action_noise_std: float = 0.0
+    clip_policy_action_noise: bool = True
+    trajectory_length: int | None = None
+    initial_states_source: str | None = None
+    initial_states_pool: str | None = None
+    resample_actions_every_frame: bool = False
 
 
 class Tee(io.TextIOBase):
@@ -65,8 +74,18 @@ def load_preset(name: str, preset_file: str | None = None) -> dict:
 
 
 def parse_dataset_specs(experiment: dict) -> list[DatasetSpec]:
+    if experiment.get("dataset_mix") is not None:
+        items = expand_g1_dataset_mix(experiment)
+    else:
+        items = experiment.get("dataset_specs", [])
     specs = []
-    for item in experiment.get("dataset_specs", []):
+    for item in items:
+        use_policy = bool(item.get("use_policy", False))
+        policy_action_noise_std = float(item.get("policy_action_noise_std", 0.0) or 0.0)
+        if policy_action_noise_std < 0.0:
+            raise ValueError(f"Dataset {item.get('filename')!r} policy_action_noise_std must be non-negative.")
+        if policy_action_noise_std > 0.0 and not use_policy:
+            raise ValueError(f"Dataset {item.get('filename')!r} sets policy_action_noise_std but use_policy is false.")
         specs.append(
             DatasetSpec(
                 filename=str(item["filename"]),
@@ -74,19 +93,49 @@ def parse_dataset_specs(experiment: dict) -> list[DatasetSpec]:
                 split=str(item.get("split", "valid")),
                 task_kind=str(item.get("task_kind", "default")),
                 zero_actions=bool(item.get("zero_actions", False)),
-                use_policy=bool(item.get("use_policy", False)),
+                use_policy=use_policy,
+                num_transitions=int(item["num_transitions"]) if item.get("num_transitions") is not None else None,
+                policy_checkpoint=(
+                    str(item["policy_checkpoint"]) if item.get("policy_checkpoint") is not None else None
+                ),
+                policy_action_noise_std=policy_action_noise_std,
+                clip_policy_action_noise=bool(item.get("clip_policy_action_noise", True)),
+                trajectory_length=(
+                    int(item["trajectory_length"]) if item.get("trajectory_length") is not None else None
+                ),
+                initial_states_source=(
+                    str(item["initial_states_source"]) if item.get("initial_states_source") else None
+                ),
+                initial_states_pool=(str(item["initial_states_pool"]) if item.get("initial_states_pool") else None),
+                resample_actions_every_frame=bool(item.get("resample_actions_every_frame", False)),
             )
         )
     if not specs:
-        raise ValueError("Preset must define at least one dataset spec.")
+        raise ValueError("Preset must define dataset_specs or dataset_mix.")
     return specs
 
 
+def resolve_spec_transitions(experiment: dict, spec: DatasetSpec) -> int:
+    """Resolve the transition count for one dataset specification."""
+    transitions = (
+        spec.num_transitions
+        if spec.num_transitions is not None
+        else experiment["train_transitions"]
+        if spec.split == "train"
+        else experiment["valid_transitions"]
+    )
+    transitions = int(transitions)
+    if transitions <= 0:
+        raise ValueError(f"Dataset {spec.filename!r} must request a positive number of transitions.")
+    return transitions
+
+
 def required_dataset_files(experiment: dict, specs: list[DatasetSpec]) -> list[str]:
-    policy_checkpoint = experiment.get("policy_checkpoint", "")
+    require_policy_checkpoint = bool(experiment.get("require_policy_checkpoint", False))
     required_files = []
     for spec in specs:
-        if spec.use_policy and policy_checkpoint and not Path(policy_checkpoint).is_file():
+        checkpoint = spec.policy_checkpoint or str(experiment.get("policy_checkpoint", "") or "")
+        if spec.use_policy and not require_policy_checkpoint and checkpoint and not Path(checkpoint).is_file():
             continue
         required_files.append(spec.filename)
     return required_files
@@ -174,10 +223,10 @@ def dataset_cache_complete(
             data_group = cast(h5py.Group, handle["data"])
             spec = specs_by_filename[filename]
             states = cast(h5py.Dataset, data_group["states"]) if "states" in data_group else None
-            expected_transitions = int(
-                experiment["train_transitions"] if spec.split == "train" else experiment["valid_transitions"]
+            expected_transitions = resolve_spec_transitions(experiment, spec)
+            expected_trajectory_length = int(
+                spec.trajectory_length if spec.trajectory_length is not None else experiment["trajectory_length"]
             )
-            expected_trajectory_length = int(experiment["trajectory_length"])
             if (
                 data_group.attrs.get("mode") != "trajectory"
                 or data_group.attrs.get("env") != experiment["env_name"]
@@ -432,16 +481,22 @@ def contact_args(experiment: dict) -> list[str]:
 
 
 def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -> list[str] | None:
-    policy_checkpoint = str(experiment.get("policy_checkpoint", ""))
+    policy_checkpoint = spec.policy_checkpoint or str(experiment.get("policy_checkpoint", "") or "")
     if spec.use_policy:
+        if spec.policy_checkpoint is not None and not Path(spec.policy_checkpoint).is_file():
+            raise FileNotFoundError(spec.policy_checkpoint)
         if not policy_checkpoint or not Path(policy_checkpoint).is_file():
+            if experiment.get("require_policy_checkpoint"):
+                raise FileNotFoundError(
+                    f"Policy dataset generation is required but checkpoint was not found: {policy_checkpoint}"
+                )
             print(f"Skipping policy validation dataset; checkpoint not found: {policy_checkpoint}")
             return None
         sample_mode = "policy"
     else:
         sample_mode = str(experiment.get("sample_mode", "action"))
 
-    transitions = experiment["train_transitions"] if spec.split == "train" else experiment["valid_transitions"]
+    transitions = resolve_spec_transitions(experiment, spec)
     task = experiment.get("deployment_task") if spec.task_kind == "deployment" else experiment.get("data_gen_task")
 
     args = [
@@ -460,17 +515,16 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
         "--sample-mode",
         sample_mode,
         "--initial-states-source",
-        str(experiment.get("initial_states_source", "env")),
+        str(spec.initial_states_source or experiment.get("initial_states_source", "env")),
         *contact_args(experiment),
         "--num-envs",
         str(experiment["data_gen_num_envs"]),
         "--num-transitions",
         str(transitions),
         "--trajectory-length",
-        str(experiment["trajectory_length"]),
+        str(spec.trajectory_length if spec.trajectory_length is not None else experiment["trajectory_length"]),
         "--seed",
         str(spec.seed),
-        "--headless",
         "--force-overwrite",
     ]
 
@@ -484,8 +538,53 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
         args.append("--zero-actions")
     if spec.use_policy:
         args += ["--policy-checkpoint", policy_checkpoint]
-    if experiment.get("randomize_pd_gains") and spec.task_kind == "default" and not spec.zero_actions:
-        args += ["--randomize-pd-gains", "--kp-min", "30.0", "--kp-max", "200.0", "--kd-min", "0.0", "--kd-max", "4.0"]
+    if spec.policy_action_noise_std > 0.0:
+        args += ["--policy-action-noise-std", str(spec.policy_action_noise_std)]
+        if not spec.clip_policy_action_noise:
+            args.append("--no-clip-policy-action-noise")
+    if spec.initial_states_pool:
+        pool_path = Path(spec.initial_states_pool)
+        if not pool_path.is_absolute():
+            pool_path = dataset_dir / str(experiment["env_name"]) / pool_path
+        args += ["--initial-states-pool", str(pool_path)]
+    if spec.resample_actions_every_frame:
+        args.append("--resample-actions-every-frame")
+    apply_pd_randomization = bool(experiment.get("randomize_pd_gains")) and spec.task_kind == "default"
+    initial_states_source = str(spec.initial_states_source or experiment.get("initial_states_source", "env"))
+    # Lab-policy pool-perturb starts from walking states and does not randomize PD.
+    if initial_states_source == "input_states_pool":
+        apply_pd_randomization = False
+    # G1 env-reset random/zero still uses relative PD scale variation.
+    if spec.zero_actions and experiment.get("robot_name") != "G1":
+        apply_pd_randomization = False
+    if apply_pd_randomization:
+        args.append("--randomize-pd-gains")
+        if experiment.get("robot_name") == "G1":
+            kp_scale = experiment.get("kp_scale_range", [0.8, 1.2])
+            kd_scale = experiment.get("kd_scale_range", [0.8, 1.2])
+            args += [
+                "--kp-scale-min",
+                str(kp_scale[0]),
+                "--kp-scale-max",
+                str(kp_scale[1]),
+                "--kd-scale-min",
+                str(kd_scale[0]),
+                "--kd-scale-max",
+                str(kd_scale[1]),
+            ]
+        else:
+            kp_range = experiment.get("kp_range", [30.0, 200.0])
+            kd_range = experiment.get("kd_range", [0.0, 4.0])
+            args += [
+                "--kp-min",
+                str(kp_range[0]),
+                "--kp-max",
+                str(kp_range[1]),
+                "--kd-min",
+                str(kd_range[0]),
+                "--kd-max",
+                str(kd_range[1]),
+            ]
     return args
 
 
@@ -508,7 +607,6 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
         str(experiment["train_num_envs"]),
         "--seed",
         "0",
-        "--headless",
         "--skip-check-log-override",
     ]
     if experiment.get("update_dataset_statistics"):
@@ -564,7 +662,6 @@ def run_context_diagnostic(experiment: dict, specs: list[DatasetSpec], dataset_d
         "--step",
         str(experiment.get("diagnostic_step", 0)),
         "--require-terrain-context",
-        "--headless",
         *contact_args(experiment),
     ]
     if experiment.get("states_frame"):

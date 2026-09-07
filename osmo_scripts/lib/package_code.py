@@ -37,6 +37,8 @@ EXCLUDED_GLOBS = (
     "*credential*.sh",
     "*credentials*.sh",
 )
+# Gitignored runtime assets required by G1 OSMO generate/train jobs.
+FORCE_INCLUDED_GLOBS = ("pretrained/control_policy/g1_flat_terrain/**/*",)
 
 
 def _should_skip(path: Path) -> bool:
@@ -50,23 +52,51 @@ def _should_skip(path: Path) -> bool:
     return any(fnmatch.fnmatch(path.name, pattern) or fnmatch.fnmatch(path_str, pattern) for pattern in EXCLUDED_GLOBS)
 
 
-def package_code(project_root: Path, archive_path: Path):
-    """Create a tarball from tracked and untracked non-ignored files."""
+def _git_listed_files(project_root: Path) -> list[Path]:
     result = subprocess.run(
         ["git", "ls-files", "-co", "-z", "--exclude-standard"],
         cwd=project_root,
         check=True,
         capture_output=True,
     )
-    relative_paths = [Path(item.decode()) for item in result.stdout.split(b"\0") if item]
-    files = [path for path in relative_paths if (project_root / path).is_file() and not _should_skip(path)]
+    return [Path(item.decode()) for item in result.stdout.split(b"\0") if item]
+
+
+def force_included_files(project_root: Path) -> list[Path]:
+    """Return gitignored G1 assets that must ship in the OSMO code tarball."""
+    files: list[Path] = []
+    for pattern in FORCE_INCLUDED_GLOBS:
+        for path in sorted(project_root.glob(pattern)):
+            if path.is_file():
+                files.append(path.relative_to(project_root))
+    return files
+
+
+def collect_packaged_files(project_root: Path) -> list[Path]:
+    """Return relative files included in the OSMO code archive."""
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for path in (*_git_listed_files(project_root), *force_included_files(project_root)):
+        if path in seen:
+            continue
+        seen.add(path)
+        if (project_root / path).is_file() and not _should_skip(path):
+            files.append(path)
+    return files
+
+
+def package_code(project_root: Path, archive_path: Path):
+    """Create a tarball from tracked files plus required gitignored G1 assets."""
+    files = collect_packaged_files(project_root)
+    force_included = {path.as_posix() for path in force_included_files(project_root)}
+    force_included_count = sum(1 for path in files if path.as_posix() in force_included)
 
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive_path, "w:gz") as archive:
         for path in files:
             archive.add(project_root / path, arcname=Path("IsaacLab-NeRD") / path, recursive=False)
 
-    print(f"Created {archive_path} with {len(files)} file(s).")
+    print(f"Created {archive_path} with {len(files)} file(s) ({force_included_count} force-included G1 asset(s)).")
 
 
 def main():

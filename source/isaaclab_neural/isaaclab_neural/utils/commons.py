@@ -130,10 +130,22 @@ ANYMAL_C_KP_RANGE = (20.0, 80.0)
 ANYMAL_C_KD_RANGE = (0.5, 4.0)
 """Default Anymal-C actuator damping randomization range."""
 
+G1_BASE_Q_MIN = (-10.0, 0.5, -10.0, 0.0, 0.0, 0.0, 1.0)
+"""Default G1 floating-base position and quaternion lower bounds [m, unitless]."""
+
+G1_BASE_Q_MAX = (10.0, 1.2, 10.0, 0.0, 0.0, 0.0, 1.0)
+"""Default G1 floating-base position and quaternion upper bounds [m, unitless]."""
+
+G1_BASE_QD_LIM = (1.0, 1.0, 1.0, np.pi, np.pi, np.pi)
+"""Default absolute G1 floating-base velocity bounds [m/s, rad/s]."""
+
 __all__ = [
     "ANYMAL_C_KD_RANGE",
     "ANYMAL_C_KP_RANGE",
     "DATASET_MODES",
+    "G1_BASE_Q_MAX",
+    "G1_BASE_Q_MIN",
+    "G1_BASE_QD_LIM",
     "JOINT_F_LIM",
     "JOINT_Q_MAX",
     "JOINT_Q_MIN",

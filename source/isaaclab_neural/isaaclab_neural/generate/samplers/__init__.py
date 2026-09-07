@@ -7,5 +7,6 @@
 
 from .anymal_c import AnymalCTrajectorySampler
 from .cartpole import CartpoleTrajectorySampler
+from .g1 import G1TrajectorySampler
 
-__all__ = ["AnymalCTrajectorySampler", "CartpoleTrajectorySampler"]
+__all__ = ["AnymalCTrajectorySampler", "CartpoleTrajectorySampler", "G1TrajectorySampler"]

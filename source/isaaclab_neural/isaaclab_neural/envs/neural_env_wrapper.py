@@ -174,6 +174,11 @@ class NerdManagerBasedRLEnv(ManagerBasedRLEnv):
             cfg.sim.physics.solver_cfg = solver_cfg
         if neural_model_path is not None:
             cfg.sim.physics.solver_cfg.neural_model_path = neural_model_path
+        self._configure_solver_dependent_mdp(cfg)
 
         super().__init__(cfg=cfg, **kwargs)
         self.neural_adapter = NeuralEnvAdapter(self)
+
+    def _configure_solver_dependent_mdp(self, cfg) -> None:
+        """Update task MDP terms after applying a runtime solver override."""
+        pass
