@@ -44,7 +44,6 @@ class NewtonNerdManager(NewtonManager):
         "_graph_capture_pending",
         "_usdrt_stage",
         "_model_changes",
-        "_views",
         "_newton_contact_sensors",
         "_report_contacts",
     )
@@ -87,6 +86,10 @@ class NewtonNerdManager(NewtonManager):
         if cls is NewtonManager:
             return
         for attr_name in cls._UPSTREAM_SYNC_ATTRS:
+            # Skip names removed or renamed on NewtonManager / PhysicsManager
+            # (Isaac Lab 3 moved ``_views`` to ``PhysicsManager.views``).
+            if not hasattr(cls, attr_name):
+                continue
             setattr(NewtonManager, attr_name, getattr(cls, attr_name))
 
     @classmethod
