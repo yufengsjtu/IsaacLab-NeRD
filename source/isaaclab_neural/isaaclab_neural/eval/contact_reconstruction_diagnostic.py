@@ -127,7 +127,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--max-contact-tokens", type=int, default=64)
     parser.add_argument("--states-frame", choices=("world", "body", "body_translation_only"), default="body")
 
-    from isaaclab_tasks.utils import add_launcher_args
+    from isaaclab.app import add_launcher_args
 
     add_launcher_args(parser)
     return parser.parse_known_args()
