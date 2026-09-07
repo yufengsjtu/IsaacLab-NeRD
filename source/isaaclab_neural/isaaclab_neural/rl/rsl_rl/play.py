@@ -74,7 +74,9 @@ def main(env_cfg, agent_cfg) -> None:
     """Play a trained RSL-RL policy on a NeRD env."""
     from rsl_rl.runners import OnPolicyRunner
 
-    from isaaclab_tasks.utils import get_checkpoint_path, launch_simulation
+    from isaaclab.app import launch_simulation
+
+    from isaaclab_tasks.utils import get_checkpoint_path
 
     if args_cli.checkpoint is None and not getattr(agent_cfg, "load_checkpoint", None):
         raise SystemExit("Play requires --checkpoint PATH to an RSL-RL policy file.")

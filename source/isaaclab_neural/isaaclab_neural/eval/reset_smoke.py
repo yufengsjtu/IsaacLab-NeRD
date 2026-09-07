@@ -259,7 +259,7 @@ def main(env_cfg, agent_cfg) -> None:
     configure_env(env_cfg, args_cli)
     solver_cfg = build_solver_cfg(args_cli)
 
-    from isaaclab_tasks.utils import launch_simulation
+    from isaaclab.app import launch_simulation
 
     with launch_simulation(build_launch_cfg(env_cfg), args_cli):
         import gymnasium as gym

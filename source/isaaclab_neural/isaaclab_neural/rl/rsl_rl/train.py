@@ -70,7 +70,9 @@ def main(env_cfg, agent_cfg) -> None:
     """Train with RSL-RL on a NeRD env."""
     from rsl_rl.runners import OnPolicyRunner
 
-    from isaaclab_tasks.utils import get_checkpoint_path, launch_simulation
+    from isaaclab.app import launch_simulation
+
+    from isaaclab_tasks.utils import get_checkpoint_path
 
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, metadata.version("rsl-rl-lib"))
