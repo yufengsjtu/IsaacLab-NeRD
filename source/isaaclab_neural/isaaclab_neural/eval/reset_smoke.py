@@ -40,7 +40,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--contact-mode", choices=["fixed_ground", "newton_native"], default=None)
     parser.add_argument("--num-contacts-per-env", type=int, default=None)
 
-    from isaaclab_tasks.utils import add_launcher_args
+    from isaaclab.app import add_launcher_args
 
     add_launcher_args(parser)
     return parser.parse_known_args()

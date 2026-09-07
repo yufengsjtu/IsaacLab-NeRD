@@ -115,7 +115,7 @@ def get_parser() -> argparse.ArgumentParser:
         "--force-overwrite", action="store_true", help="Overwrite an existing dataset without prompting."
     )
 
-    from isaaclab_tasks.utils import add_launcher_args
+    from isaaclab.app import add_launcher_args
 
     add_launcher_args(parser)
     return parser

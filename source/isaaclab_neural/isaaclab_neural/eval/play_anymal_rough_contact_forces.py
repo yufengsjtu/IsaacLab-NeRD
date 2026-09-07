@@ -105,7 +105,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         help="Hide force arrows below this magnitude [N].",
     )
 
-    from isaaclab_tasks.utils import add_launcher_args
+    from isaaclab.app import add_launcher_args
 
     add_launcher_args(parser)
     return parser.parse_known_args()
