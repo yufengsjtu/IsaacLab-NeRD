@@ -104,8 +104,16 @@ class TransformerNeuralSolver(NeuralSolver):
         if self.use_kv_cache:
             self.kv_cache_rebuild_env_ids = torch.arange(self.num_envs, device=self.torch_device)
 
-    def reset(self, env_ids=None):
-        """Reset transformer history globally or for selected environments."""
+    def reset(self, env_ids=None, world_mask=None, flags=None):
+        """Reset transformer history globally or for selected environments.
+
+        Isaac Lab 3's Newton manager also calls this as
+        ``reset(state, world_mask=..., flags=0)``. That path has no history to
+        clear; history is reset with ``env_ids``.
+        """
+        if world_mask is not None or flags is not None:
+            super().reset(env_ids, world_mask=world_mask, flags=flags)
+            return
         super().reset(env_ids)
         if env_ids is None:
             self.reset_states_history()
