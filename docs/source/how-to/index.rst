@@ -40,8 +40,8 @@ a fixed base robot. This guide goes over the various considerations and steps to
 Spawning Multiple Assets
 ------------------------
 
-This guide explains how to import and configure different assets in each environment. This is
-useful when you want to create diverse environments with different objects.
+This guide explains how to batch rigid objects into a collection and configure different asset
+variants across environments.
 
 .. toctree::
     :maxdepth: 1
@@ -82,23 +82,12 @@ This guide demonstrates how to estimate the number of cameras one can run on the
 Configure Rendering
 -------------------
 
-This guide demonstrates how to select rendering mode presets and overwrite preset rendering settings.
+This guide demonstrates how to customize the RTX rendering settings.
 
 .. toctree::
     :maxdepth: 1
 
     configure_rendering
-
-Drawing Markers
----------------
-
-This guide explains how to use the :class:`~isaaclab.markers.VisualizationMarkers` class to draw markers in
-Isaac Lab.
-
-.. toctree::
-    :maxdepth: 1
-
-    draw_markers
 
 
 Using Visualizers
@@ -134,18 +123,32 @@ These guides explain how to interface with reinforcement learning environments i
 
     wrap_rl_env
     add_own_library
+    run_state_machines
+
+
+Transferring Policies Between Physics Backends
+-----------------------------------------------
+
+This guide explains how to validate and evaluate policies trained in PhysX and deployed in Newton,
+and policies trained in Newton and deployed in PhysX.
+
+.. toctree::
+    :maxdepth: 1
+
+    transfer_policies_between_physx_and_newton
 
 
 Recording an Animation and Video
 --------------------------------
 
-This guide explains how to record an animation and video in Isaac Lab.
+This guide explains how to record an animation and capture sensor frames in Isaac Lab. For
+recording training video, see :doc:`/source/features/record_video`.
 
 .. toctree::
     :maxdepth: 1
 
     record_animation
-    record_video
+    capture_sensor_frames
 
 
 Dynamically Modifying Environment Parameters With CurriculumTerm
@@ -194,30 +197,6 @@ with directional force feedback in Isaac Lab.
     :maxdepth: 1
 
     haply_teleoperation
-
-
-Understanding Simulation Performance
-------------------------------------
-
-This guide provides tips on optimizing simulation performance for different simulation use cases.
-Additional resources are also linked to provide relevant performance guides for Isaac Sim and
-Omniverse Physics.
-
-.. toctree::
-    :maxdepth: 1
-
-    simulation_performance
-
-
-Optimize Stage Creation
------------------------
-
-This guide explains 2 features that can speed up stage initialization, **fabric cloning** and **stage in memory**.
-
-.. toctree::
-    :maxdepth: 1
-
-    optimize_stage_creation
 
 
 Profiling Isaac Lab with Nsight Systems

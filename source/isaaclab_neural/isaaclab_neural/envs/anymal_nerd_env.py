@@ -19,9 +19,9 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils.configclass import configclass
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
 
-import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
-from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c.flat_env_cfg import AnymalCFlatEnvCfg
-from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c.rough_env_cfg import AnymalCRoughEnvCfg
+import isaaclab_tasks.core.velocity.mdp as mdp
+from isaaclab_tasks.contrib.velocity.config.anymal_c.flat_env_cfg import AnymalCFlatEnvCfg
+from isaaclab_tasks.contrib.velocity.config.anymal_c.rough_env_cfg import AnymalCRoughEnvCfg
 
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode

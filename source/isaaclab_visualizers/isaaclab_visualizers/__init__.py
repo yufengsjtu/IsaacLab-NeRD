@@ -5,11 +5,18 @@
 
 """Visualizer backends for Isaac Lab.
 
-Visualizers are loaded lazily by type (kit, newton, rerun, viser) via the factory in
-isaaclab.visualizers. Import a specific backend only when needed:
+Concrete visualizer configs carry their implementation in ``class_type``, which is resolved lazily
+when the visualizer is constructed. Import a specific backend only when needed:
 
   from isaaclab_visualizers.kit import KitVisualizer, KitVisualizerCfg
-  from isaaclab_visualizers.newton import NewtonVisualizer, NewtonVisualizerCfg
+  from isaaclab_visualizers.newton import NewtonGLVisualizer, NewtonGLVisualizerCfg
   from isaaclab_visualizers.rerun import RerunVisualizer, RerunVisualizerCfg
   from isaaclab_visualizers.viser import ViserVisualizer, ViserVisualizerCfg
 """
+
+import importlib.metadata
+
+try:
+    __version__ = importlib.metadata.version("isaaclab_visualizers")
+except importlib.metadata.PackageNotFoundError:
+    __version__ = "0.0.0"

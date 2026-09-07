@@ -12,12 +12,14 @@ import importlib
 import inspect
 import os
 import re
+import warnings
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import gymnasium as gym
 import yaml
 
-from isaaclab_tasks.utils.hydra import resolve_presets
+from isaaclab_tasks.utils.hydra import _user_stacklevel, resolve_task_config
 
 if TYPE_CHECKING:
     from isaaclab.envs import DirectRLEnvCfg, ManagerBasedRLEnvCfg
@@ -60,13 +62,32 @@ def load_cfg_from_registry(task_name: str, entry_point_key: str) -> dict | objec
     Raises:
         ValueError: If the entry point key is not available in the gym registry for the task.
     """
+    spec = gym.spec(task_name.split(":")[-1])
+    # Emit a FutureWarning when loading the env cfg for a retired task
+    # registered as a deprecation alias. The migration metadata lives in the
+    # gym.register kwargs under the ``deprecated`` key as a dict whose
+    # ``alias`` field is the equivalent CLI command, e.g.
+    # ``"deprecated": {"alias": "--task=Isaac-Cartpole-Camera-Direct presets=rgb"}``.
+    # FutureWarning (vs DeprecationWarning) matches the existing convention
+    # for end-user-facing IsaacLab deprecations (cfg fields, preset-name
+    # aliases) and is shown by Python's default filter regardless of which
+    # frame the warning is attributed to.
+    if entry_point_key == "env_cfg_entry_point":
+        deprecation = spec.kwargs.get("deprecated") or {}
+        new_command = deprecation.get("alias")
+        if new_command:
+            warnings.warn(
+                f"Task '{spec.id}' is deprecated and will be removed in a future release. Use '{new_command}'.",
+                FutureWarning,
+                stacklevel=_user_stacklevel(),
+            )
     # obtain the configuration entry point
-    cfg_entry_point = gym.spec(task_name.split(":")[-1]).kwargs.get(entry_point_key)
+    cfg_entry_point = spec.kwargs.get(entry_point_key)
     # check if entry point exists
     if cfg_entry_point is None:
         # get existing agents and algorithms
         agents = collections.defaultdict(list)
-        for k in gym.spec(task_name.split(":")[-1]).kwargs:
+        for k in spec.kwargs:
             if k.endswith("_cfg_entry_point") and k != "env_cfg_entry_point":
                 spec = (
                     k.replace("_cfg_entry_point", "")
@@ -124,7 +145,11 @@ def load_cfg_from_registry(task_name: str, entry_point_key: str) -> dict | objec
 
 
 def parse_env_cfg(
-    task_name: str, device: str = "cuda:0", num_envs: int | None = None, use_fabric: bool | None = None
+    task_name: str,
+    device: str = "cuda:0",
+    num_envs: int | None = None,
+    use_fabric: bool | None = None,
+    overrides: Sequence[str] = (),
 ) -> ManagerBasedRLEnvCfg | DirectRLEnvCfg:
     """Parse configuration for an environment and override based on inputs.
 
@@ -135,6 +160,12 @@ def parse_env_cfg(
         use_fabric: Whether to enable/disable fabric interface. If false, all read/write operations go through USD.
             This slows down the simulation but allows seeing the changes in the USD through the USD stage.
             Defaults to None, in which case it is left unchanged.
+        overrides: Hydra-style ``key=value`` overrides (e.g. ``["physics=isaacsim_physx"]``) applied on top of the
+            task's registered configuration, using the same syntax as the ``physics=``/``renderer=``/``presets=``
+            selectors documented for Hydra-driven scripts. Defaults to an empty sequence, in which case the task's
+            registered defaults are used unchanged. A single override must still be wrapped in a list or tuple
+            (e.g. ``["physics=isaacsim_physx"]``, not ``"physics=isaacsim_physx"``); a bare string is itself a
+            ``Sequence[str]`` of characters and would otherwise be split one character at a time.
 
     Returns:
         The parsed configuration object.
@@ -142,21 +173,21 @@ def parse_env_cfg(
     Raises:
         RuntimeError: If the configuration for the task is not a class. We assume users always use a class for the
             environment configuration.
+        TypeError: If ``overrides`` is a bare string instead of a list or tuple of override strings.
     """
-    # load the default configuration
-    cfg = load_cfg_from_registry(task_name.split(":")[-1], "env_cfg_entry_point")
+    if isinstance(overrides, str):
+        raise TypeError(
+            f"'overrides' must be a list or tuple of 'key=value' strings, not a bare string: {overrides!r}. Wrap"
+            f" it in a list, e.g. overrides=[{overrides!r}]."
+        )
+
+    # Compose the registered task through the same boundary used by Hydra entry points.
+    cfg, _ = resolve_task_config(task_name, None, overrides=overrides)
 
     # check that it is not a dict
     # we assume users always use a class for the configuration
     if isinstance(cfg, dict):
         raise RuntimeError(f"Configuration for the task: '{task_name}' is not a class. Please provide a class.")
-
-    # Resolve any PresetCfg wrappers to their default preset so the config
-    # is usable without a Hydra CLI override (e.g. in tests).
-    # Must happen BEFORE attribute overrides, otherwise overrides on PresetCfg wrapper
-    # fields (e.g. cfg.scene when scene is a PresetCfg) get discarded when the wrapper
-    # is replaced by its .default.
-    cfg = resolve_presets(cfg)
 
     # simulation device
     cfg.sim.device = device
@@ -226,7 +257,8 @@ def get_checkpoint_path(
             run_path = os.path.join(runs[-1], *other_dirs)
         else:
             run_path = runs[-1]
-    except IndexError:
+    # os.scandir raises FileNotFoundError when the directory is absent; same meaning: no runs.
+    except (IndexError, FileNotFoundError):
         raise ValueError(f"No runs present in the directory: '{log_path}' match: '{run_dir}'.")
 
     # prefer ``preferred_checkpoint`` when given and it matches; otherwise fall back to the general

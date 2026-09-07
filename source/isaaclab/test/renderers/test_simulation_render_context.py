@@ -7,9 +7,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
 from typing import Any, cast
-from unittest.mock import patch
 
 import pytest
 
@@ -26,23 +24,38 @@ pytest.importorskip("isaaclab_ov")
 from isaaclab_newton.renderers import NewtonWarpRendererCfg
 from isaaclab_physx.renderers import IsaacRtxRendererCfg
 
+pytestmark = [pytest.mark.integration, pytest.mark.rendering]
+
 
 class _FakeBackend(BaseRenderer):
     """Test double for :class:`BaseRenderer`; does not load PhysX/Newton/OV renderer classes."""
 
-    __slots__ = ("_prepare_hits", "_update_transforms_hits", "_event_log")
+    __slots__ = (
+        "_prepare_hits",
+        "_update_transforms_hits",
+        "_update_geometries_hits",
+        "_event_log",
+        "_close_hits",
+        "_close_raises",
+    )
 
     def __init__(
         self,
         *,
         prepare_hits: list[int] | None = None,
         update_transforms_hits: list[int] | None = None,
+        update_geometries_hits: list[int] | None = None,
         event_log: list[str] | None = None,
+        close_hits: list[Any] | None = None,
+        close_raises: bool = False,
     ) -> None:
         super().__init__()
         self._prepare_hits = prepare_hits
         self._update_transforms_hits = update_transforms_hits
+        self._update_geometries_hits = update_geometries_hits
         self._event_log = event_log
+        self._close_hits = close_hits
+        self._close_raises = close_raises
 
     def supported_output_types(self) -> dict[RenderBufferKind, RenderBufferSpec]:
         return {}
@@ -63,6 +76,12 @@ class _FakeBackend(BaseRenderer):
         if self._event_log is not None:
             self._event_log.append("ut")
 
+    def update_geometries(self) -> None:
+        if self._update_geometries_hits is not None:
+            self._update_geometries_hits.append(1)
+        if self._event_log is not None:
+            self._event_log.append("geo")
+
     def update_camera(self, render_data: Any, positions: Any, orientations: Any, intrinsics: Any) -> None:
         pass
 
@@ -77,36 +96,49 @@ class _FakeBackend(BaseRenderer):
     def cleanup(self, render_data: Any) -> None:
         pass
 
+    def close(self) -> None:
+        if self._close_hits is not None:
+            self._close_hits.append(self)
+        if self._close_raises:
+            raise RuntimeError("backend failed to close")
+
 
 def _set_entries(ctx: RenderContext, *cfg_backend_pairs: tuple[RendererCfg, BaseRenderer]) -> None:
     ctx._renderer_entries = list(cfg_backend_pairs)  # type: ignore[assignment]  # noqa: SLF001
 
 
-@pytest.fixture(autouse=True)
-def _patch_renderer_factory() -> Generator[None, None, None]:
-    """Never construct :class:`~isaaclab.renderers.renderer.Renderer` (real backends) in this module."""
-
-    with patch(
-        "isaaclab.renderers.render_context.Renderer",
-        side_effect=lambda *_args, **_kwargs: _FakeBackend(),
-    ):
-        yield
+def _constructable(cfg: RendererCfg) -> RendererCfg:
+    """Bind a lightweight implementation class to one renderer cfg."""
+    cfg.class_type = lambda _cfg: _FakeBackend()
+    return cfg
 
 
 def test_get_renderer_returns_equal_cfg_singleton():
     ctx = RenderContext()
-    cfg = IsaacRtxRendererCfg()
+    cfg = _constructable(IsaacRtxRendererCfg())
     r1 = ctx.get_renderer(cfg)
     r2 = ctx.get_renderer(cfg)
     assert r1 is r2
+
+
+def test_get_renderer_constructs_class_type_with_its_config():
+    ctx = RenderContext()
+    seen = []
+    cfg = RendererCfg()
+    cfg.class_type = lambda actual: seen.append(actual) or _FakeBackend()
+
+    renderer = ctx.get_renderer(cfg)
+
+    assert isinstance(renderer, _FakeBackend)
+    assert seen == [cfg]
 
 
 def test_get_renderer_two_different_concrete_types_coexist():
     """Different renderer_cfg concrete classes register distinct backends (no error)."""
 
     ctx = RenderContext()
-    rtx = ctx.get_renderer(IsaacRtxRendererCfg())
-    nw = ctx.get_renderer(NewtonWarpRendererCfg())
+    rtx = ctx.get_renderer(_constructable(IsaacRtxRendererCfg()))
+    nw = ctx.get_renderer(_constructable(NewtonWarpRendererCfg()))
     assert rtx is not nw
 
 
@@ -133,24 +165,33 @@ def test_ensure_prepare_stage_num_envs_mismatch():
         ctx.ensure_prepare_stage(None, 8)
 
 
-def test_update_transforms_dedupes_per_physics_step():
-    """All backends' update_transforms run once per physics step index."""
+def test_update_scene_state_dedupes_per_physics_step():
+    """All backends' scene state hooks run once per physics step index."""
 
     ctx = RenderContext()
-    hits: list[int] = []
+    transform_hits: list[int] = []
+    geometry_hits: list[int] = []
     cfg = NewtonWarpRendererCfg()
-    _set_entries(ctx, (cfg, _FakeBackend(update_transforms_hits=hits)))
+    _set_entries(
+        ctx,
+        (
+            cfg,
+            _FakeBackend(update_transforms_hits=transform_hits, update_geometries_hits=geometry_hits),
+        ),
+    )
 
-    ctx.update_transforms(1)
-    ctx.update_transforms(1)
-    assert len(hits) == 1
+    ctx.update_scene_state(1)
+    ctx.update_scene_state(1)
+    assert len(transform_hits) == 1
+    assert len(geometry_hits) == 1
 
-    ctx.update_transforms(2)
-    assert len(hits) == 2
+    ctx.update_scene_state(2)
+    assert len(transform_hits) == 2
+    assert len(geometry_hits) == 2
 
 
 def test_render_into_camera_calls_update_render_read_order():
-    """render_into_camera runs update_transforms then render then read_output; dedupes UT per step."""
+    """render_into_camera runs scene sync then render then read_output; dedupes sync per step."""
     ctx = RenderContext()
     events: list[str] = []
     cfg = IsaacRtxRendererCfg()
@@ -160,10 +201,10 @@ def test_render_into_camera_calls_update_render_read_order():
     rd = object()
     cam_data = CameraData()
     ctx.render_into_camera(cast(BaseRenderer, fake), rd, cam_data, physics_step_count=1)
-    assert events == ["ut", "render", "read"]
+    assert events == ["ut", "geo", "render", "read"]
 
     ctx.render_into_camera(cast(BaseRenderer, fake), rd, cam_data, physics_step_count=1)
-    assert events == ["ut", "render", "read", "render", "read"]
+    assert events == ["ut", "geo", "render", "read", "render", "read"]
 
 
 def test_reset_stage_prepare_flag_allows_second_prepare_stage():
@@ -183,18 +224,59 @@ def test_reset_stage_prepare_flag_allows_second_prepare_stage():
     assert len(prepares) == 2
 
 
-def test_reset_transform_cadence_allows_repeat_update_transforms_same_step():
-    """reset_transform_cadence clears step dedupe so the same physics_step_count can sync again."""
+def test_reset_scene_state_cadence_allows_repeat_update_scene_state_same_step():
+    """reset_scene_state_cadence clears step dedupe so the same physics_step_count can update again."""
     ctx = RenderContext()
     hits: list[int] = []
     cfg = IsaacRtxRendererCfg()
     _set_entries(ctx, (cfg, _FakeBackend(update_transforms_hits=hits)))
 
-    ctx.update_transforms(1)
+    ctx.update_scene_state(1)
     assert len(hits) == 1
-    ctx.update_transforms(1)
+    ctx.update_scene_state(1)
     assert len(hits) == 1
 
-    ctx.reset_transform_cadence()
-    ctx.update_transforms(1)
+    ctx.reset_scene_state_cadence()
+    ctx.update_scene_state(1)
     assert len(hits) == 2
+
+
+def test_close_closes_every_backend_once_and_drops_them():
+    """``close`` closes each registered backend exactly once and empties the context."""
+    ctx = RenderContext()
+    closed: list[Any] = []
+    first = _FakeBackend(close_hits=closed)
+    second = _FakeBackend(close_hits=closed)
+    _set_entries(ctx, (IsaacRtxRendererCfg(), first), (NewtonWarpRendererCfg(), second))
+
+    ctx.close()
+    assert closed == [first, second]
+
+    ctx.close()
+    assert closed == [first, second]
+
+
+def test_close_raises_only_after_every_backend_is_closed():
+    """A failing backend must not strand the others, and its failure must not go unreported."""
+    ctx = RenderContext()
+    closed: list[Any] = []
+    failing = _FakeBackend(close_hits=closed, close_raises=True)
+    healthy = _FakeBackend(close_hits=closed)
+    _set_entries(ctx, (IsaacRtxRendererCfg(), failing), (NewtonWarpRendererCfg(), healthy))
+
+    with pytest.raises(RuntimeError, match="1 renderer\\(s\\) failed to close"):
+        ctx.close()
+
+    assert closed == [failing, healthy]
+
+
+def test_close_resets_stage_and_step_bookkeeping():
+    """After ``close`` the context holds no backend, so a later ``ensure_prepare_stage`` is an error."""
+    ctx = RenderContext()
+    _set_entries(ctx, (IsaacRtxRendererCfg(), _FakeBackend()))
+    ctx.ensure_prepare_stage(None, 4)
+
+    ctx.close()
+
+    with pytest.raises(RuntimeError, match="get_renderer must be called"):
+        ctx.ensure_prepare_stage(None, 4)

@@ -14,10 +14,10 @@ through the auto-tune functionality.
 .. code-block:: bash
 
     # Usage with GUI
-    ./isaaclab.sh -p scripts/benchmarks/benchmark_cameras.py -h
+    uv run python scripts/benchmarks/benchmark_cameras.py -h
 
     # Usage with headless
-    ./isaaclab.sh -p scripts/benchmarks/benchmark_cameras.py -h --headless
+    uv run python scripts/benchmarks/benchmark_cameras.py -h
 
 """
 
@@ -226,17 +226,18 @@ parser.add_argument(
 
 # Benchmark arguments
 parser.add_argument(
-    "--benchmark_backend",
+    "--benchmark_formatter",
     type=str,
     default="omniperf",
     choices=["json", "osmo", "omniperf", "summary"],
-    help="Benchmarking backend options, defaults omniperf",
+    help="Benchmark output formatter, defaults omniperf",
 )
 parser.add_argument("--output_path", type=str, default=".", help="Path to output benchmark results.")
 
 
 AppLauncher.add_app_launcher_args(parser)
-args_cli = parser.parse_args()
+# forward unrecognized args as Hydra-style task config overrides
+args_cli, hydra_overrides = parser.parse_known_args()
 args_cli.enable_cameras = True
 
 if args_cli.autotune:
@@ -260,6 +261,7 @@ import torch
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObject, RigidObjectCfg
+from isaaclab.benchmark import BaseIsaacLabBenchmark, DictMeasurement, SingleMeasurement
 from isaaclab.scene.interactive_scene import InteractiveScene
 from isaaclab.sensors import (
     Camera,
@@ -268,10 +270,9 @@ from isaaclab.sensors import (
     RayCasterCameraCfg,
     patterns,
 )
-from isaaclab.test.benchmark import BaseIsaacLabBenchmark, DictMeasurement, SingleMeasurement
 from isaaclab.utils.math import orthogonalize_perspective_depth, unproject_depth
 
-from isaaclab_tasks.utils import load_cfg_from_registry
+from isaaclab_tasks.utils import parse_env_cfg
 
 """
 Camera Creation
@@ -527,9 +528,7 @@ def inject_cameras_into_task(
     num_cameras_per_env: int = 1,
 ) -> gym.Env:
     """Loads the task, sticks cameras into the config, and creates the environment."""
-    cfg = load_cfg_from_registry(task, "env_cfg_entry_point")
-    cfg.sim.device = args_cli.device
-    cfg.sim.use_fabric = args_cli.use_fabric
+    cfg = parse_env_cfg(task, device=args_cli.device, use_fabric=args_cli.use_fabric, overrides=hydra_overrides)
     scene_cfg = cfg.scene
 
     num_envs = int(num_cams / num_cameras_per_env)
@@ -777,13 +776,13 @@ def main():
         num_cameras = args_cli.num_ray_caster_cameras
 
     # Create the benchmark
-    backend_type = args_cli.benchmark_backend
+    formatter_type = args_cli.benchmark_formatter
     benchmark = BaseIsaacLabBenchmark(
         benchmark_name="benchmark_cameras",
-        backend_type=backend_type,
+        formatter_type=formatter_type,
         output_path=args_cli.output_path,
         use_recorders=True,
-        frametime_recorders=backend_type in ("summary", "omniperf"),
+        frametime_recorders=formatter_type in ("summary", "omniperf"),
         output_prefix="benchmark_cameras",
         workflow_metadata={
             "metadata": [
@@ -952,7 +951,7 @@ def main():
 
     # Finalize benchmark
     benchmark.update_manual_recorders()
-    benchmark._finalize_impl()
+    benchmark.finalize()
 
 
 if __name__ == "__main__":

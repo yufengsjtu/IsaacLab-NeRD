@@ -36,7 +36,7 @@ class BaseContactSensor(SensorBase):
     The sensor can be configured to report the contact forces on a set of bodies with a given
     filter pattern using the :attr:`ContactSensorCfg.filter_prim_paths_expr`. This is useful
     when you want to report the contact forces between the sensor bodies and a specific set of
-    bodies in the scene. The data can be accessed using the :attr:`ContactSensorData.force_matrix_w`.
+    bodies in the scene. The data can be accessed using the :attr:`ContactSensorData.normal_force_matrix_w`.
 
     The PhysX backend only supports one-to-many filtered contact reporting: a single sensor
     body filtered against multiple partners. For many-to-many, create separate sensors per
@@ -61,6 +61,18 @@ class BaseContactSensor(SensorBase):
         # check that config is valid
         if cfg.history_length < 0:
             raise ValueError(f"History length must be greater than 0! Received: {cfg.history_length}")
+
+    def update(self, dt: float, force_recompute: bool = False) -> None:
+        """Advance the sensor timestamp and update history-bearing buffers.
+
+        Args:
+            dt: Time elapsed since the previous sensor update [s].
+            force_recompute: Whether to recompute the sensor buffers regardless of their
+                configured update period. Defaults to False.
+        """
+        super().update(dt, force_recompute=force_recompute)
+        if self._is_initialized and self.cfg.history_length > 0:
+            self._update_outdated_buffers()
 
     def __str__(self) -> str:
         """Returns: A string containing information about the instance."""

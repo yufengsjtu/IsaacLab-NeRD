@@ -33,9 +33,11 @@ Guidelines for modifications:
 * James Tigue
 * Kelly (Yunrong) Guo
 * Matthew Trepte
+* Maximilian Krause
 * Mayank Mittal
 * Mike Yan Michelis
 * Mikhail Yurasov
+* Mustafa Haiderbhai
 * Nikita Rudin
 * Octi (Zhengyu) Zhang
 * Ossama Ahmed
@@ -44,17 +46,21 @@ Guidelines for modifications:
 
 ## Contributors
 
+* Advait Jayant
+* Agon Serifi
 * Alessandro Assirelli
 * Alex Omar
 * Alexander Millane
 * Alice Zhou
 * Amr Mousa
+* Andrei Aristarkhov
 * Andrej Orsula
 * Anke Zhao
 * Anton Bjørndahl Mortensen
 * Antonin Raffin
 * Arjun Bhardwaj
 * Ashwin Varghese Kuruttukulam
+* Asier Arranz
 * Bikram Pandit
 * Bingjie Tang
 * Bocheng Zou
@@ -67,13 +73,17 @@ Guidelines for modifications:
 * Cameron Upright
 * Cathy Y. Li
 * Cheng-Rong Lai
+* Chenyu Cao
 * Chenyu Yang
 * Connor Smith
 * CY (Chien-Ying) Chen
+* David Cao-Mueller
 * David Leon
 * David Yang
+* Daniela Hasenbring
 * Dhananjay Shendre
 * Dhyan Thakkar
+* Diego Ferigo
 * Dongxuan Fan
 * Dorsa Rohani
 * Ege Sekkin
@@ -89,6 +99,7 @@ Guidelines for modifications:
 * Grzegorz Malczyk
 * Haoran Zhou
 * Harsh Patel
+* Henry Hu
 * HoJin Jeon
 * Hongwei Xiong
 * Hongyu Li
@@ -109,14 +120,18 @@ Guidelines for modifications:
 * Jingzhou Liu
 * Jinqi Wei
 * Jinyeob Kim
+* Jiwen Cai
 * Johnson Sun
 * Juana Du
+* Kai Pei
 * Kaixi Bao
 * Kourosh Darvish
 * Kousheek Chakraborty
 * Kris Wilson
 * Krishna Lakhi
+* Lin He
 * Lionel Gulich
+* Lior Ben Horin
 * Lorenz Wellhausen
 * Lotus Li
 * Louis Le Lay
@@ -125,10 +140,12 @@ Guidelines for modifications:
 * Marco Alesiani
 * Masoud Moghani
 * Mateo Guaman Castro
+* Matthew Taylor
 * Maurice Rahme
 * Michael Gussert
 * Michael Lin
 * Michael Noseworthy
+* Michal Hapala
 * Miguel Alonso Jr
 * Mihir Kulkarni
 * Mingxue Gu
@@ -151,19 +168,22 @@ Guidelines for modifications:
 * Peter Verswyvelen
 * Philipp Reist
 * Piotr Barejko
+* Pranav Shirgur
 * Pulkit Goyal
 * Qian Wan
 * Qingyang Jiang
 * Qinxi Yu
 * Rafael Wiltz
-* Rebecca Zhang
+* Rebecca (Rui) Zhang
 * Renaud Poncelet
 * René Zurbrügg
+* Richard Lei
 * Richard Schmitt
 * RinZ27
 * Ritvik Singh
 * Rosario Scalise
 * Ruben D'Sa
+* Ruben Grandia
 * Ryan Gresia
 * Ryley McCarroll
 * Sahara Yuta
@@ -182,8 +202,10 @@ Guidelines for modifications:
 * Tsz Ki GAO
 * Tyler Lum
 * Victor Khaustov
+* Vidur Vij
 * Virgilio Gómez Lambo
 * Vladimir Fokow
+* Wang Ke
 * Wei Yang
 * Weihua Zhang
 * Welf Rehberg
@@ -201,6 +223,7 @@ Guidelines for modifications:
 * Yun Liu
 * YuTeh Shen
 * Zehao Wang
+* Zeng Qingcheng
 * Zijian Li
 * Ziqi Fan
 * Zoe McCarthy

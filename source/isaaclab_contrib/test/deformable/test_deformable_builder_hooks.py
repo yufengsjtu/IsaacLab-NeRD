@@ -4,13 +4,20 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
+import sys
+from types import SimpleNamespace
 
 import pytest
 import warp as wp
+from isaaclab_newton.physics import NewtonManager
 from isaaclab_newton.sim.spawners.materials import NewtonDeformableMaterialCfg
 
-from isaaclab_contrib.deformable import DeformableObject, VBDSolverCfg
-from isaaclab_contrib.deformable.deformable_object import DeformableRegistryEntry, add_deformable_entry_to_builder
+from isaaclab_contrib.deformable import DeformableObject
+from isaaclab_contrib.deformable.deformable_object import (
+    DeformableRegistryEntry,
+    add_deformable_entry_to_builder,
+    setup_registered_deformable_fabric_sync,
+)
 
 
 class _FakeBuilder:
@@ -23,12 +30,37 @@ class _FakeBuilder:
         self.particle_count += len(kwargs["vertices"])
 
 
+class _FakePath:
+    def __init__(self, path: str):
+        self.pathString = path
+
+
+class _FakePrim:
+    def __init__(self, path: str, *, valid: bool = True):
+        self._path = path
+        self._valid = valid
+
+    def IsValid(self) -> bool:
+        return self._valid
+
+    def GetPath(self) -> _FakePath:
+        return _FakePath(self._path)
+
+
+class _FakeStage:
+    def __init__(self, prims: dict[str, _FakePrim]):
+        self._prims = prims
+
+    def GetPrimAtPath(self, path: str) -> _FakePrim:
+        return self._prims.get(path, _FakePrim(path, valid=False))
+
+
 def _make_surface_entry() -> DeformableRegistryEntry:
     half_sqrt = math.sqrt(0.5)
     return DeformableRegistryEntry(
-        prim_path="/World/envs/env_.*/cloth",
-        sim_mesh_prim_path="/World/envs/env_.*/cloth/mesh",
-        vis_mesh_prim_path="/World/envs/env_.*/cloth/mesh",
+        prim_path="{ENV_REGEX_NS}/cloth",
+        sim_mesh_prim_path="{ENV_REGEX_NS}/cloth/mesh",
+        vis_mesh_prim_path="{ENV_REGEX_NS}/cloth/mesh",
         vertices=[
             wp.vec3(0.0, 0.0, 0.0),
             wp.vec3(1.0, 0.0, 0.0),
@@ -48,7 +80,6 @@ def _vec3_as_tuple(value) -> tuple[float, float, float]:
 def test_deformable_package_exports_public_symbols():
     """Test that deformable symbols are exported from the package root."""
     assert DeformableObject.__name__ == "DeformableObject"
-    assert VBDSolverCfg.__name__ == "VBDSolverCfg"
 
 
 def test_newton_material_defaults_match_registry_defaults():
@@ -98,3 +129,41 @@ def test_builder_hook_resets_entry_offsets_on_first_environment():
 
     assert entry.particle_offsets == [0]
     assert entry.particles_per_body == 3
+
+
+def test_fabric_particle_sync_skips_missing_fabric_prim(monkeypatch):
+    """Test that missing Fabric prims are skipped before attributes are authored."""
+    entry = _make_surface_entry()
+    entry.particle_offsets = [7]
+    entry.particles_per_body = 3
+    resolved_path = "/World/envs/env_0/cloth/mesh"
+
+    class _FakeManager:
+        _clone_physics_only = False
+        _deformable_registry = [entry]
+        marked = False
+        synced = False
+
+        @classmethod
+        def _mark_particles_dirty(cls):
+            cls.marked = True
+
+        @classmethod
+        def sync_particles_to_usd(cls):
+            cls.synced = True
+
+    usd_stage = _FakeStage({resolved_path: _FakePrim(resolved_path)})
+    fabric_stage = _FakeStage({})
+
+    monkeypatch.setattr(
+        "isaaclab.sim.utils.stage.get_current_stage", lambda fabric=False: fabric_stage if fabric else usd_stage
+    )
+    monkeypatch.setattr(NewtonManager, "_usdrt_stage", fabric_stage)
+    monkeypatch.setitem(
+        sys.modules, "usdrt", SimpleNamespace(Sdf=SimpleNamespace(ValueTypeNames=SimpleNamespace(UInt=object())))
+    )
+
+    setup_registered_deformable_fabric_sync(_FakeManager)
+
+    assert not _FakeManager.marked
+    assert not _FakeManager.synced

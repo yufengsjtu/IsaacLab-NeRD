@@ -283,20 +283,25 @@ def _add_annotation_types(cls):
             continue
         # get base class annotations
         ann = base.__dict__.get("__annotations__", {})
-        # directly add all annotations from base class
-        hints.update(ann)
         # iterate over base class members
         # Note: Do not change this to dir(base) since it orders the members alphabetically.
         #   This is not desirable since the order of the members is important in some cases.
+        # Note: We add annotated members while iterating over the class members (instead of
+        #   bulk-adding all annotations beforehand) to preserve the declaration order when
+        #   only some members have type annotations. Otherwise, annotated members would jump
+        #   ahead of non-annotated ones in the resulting field order.
         for key in base.__dict__:
             # get class member
             value = getattr(base, key)
             # skip members
             if _skippable_class_member(key, value, hints):
                 continue
+            # add type annotations for members that have explicit type annotations
+            if key in ann:
+                hints[key] = ann[key]
             # add type annotations for members that don't have explicit type annotations
             # for these, we deduce the type from the default value
-            if not isinstance(value, type):
+            elif not isinstance(value, type):
                 if key not in hints:
                     # check if var type is not MISSING
                     # we cannot deduce type from MISSING!
@@ -312,6 +317,10 @@ def _add_annotation_types(cls):
                 #   the name of the type matches the name of the variable.
                 # since Python 3.10, type hints are stored as strings
                 hints[key] = f"type[{value.__name__}]"
+        # add remaining annotations that do not have a corresponding class member (e.g. annotation-only
+        # declarations) or whose member was skipped above. For keys already present in the hints,
+        # this only refreshes the type and keeps their original position.
+        hints.update(ann)
 
     # Note: Do not change this line. `cls.__dict__.get("__annotations__", {})` is different from
     #   `cls.__annotations__` because of inheritance.
@@ -595,49 +604,6 @@ def _return_f(f: Any) -> Callable[[], Any]:
             return deepcopy(f)
 
     return _wrap
-
-
-def resolve_cfg_presets(cfg: object) -> object:
-    """Recursively replace preset-wrapper fields with their *default* preset.
-
-    Task configs may use two preset-selector patterns to support multiple physics backends
-    (PhysX / Newton) or observation modes. Both patterns produce wrapper objects that are
-    **not** valid as the concrete cfg that downstream managers / scene builders expect.
-    This function resolves them in-place so the config can be used without a Hydra CLI
-    override (e.g. in unit tests or when creating environments directly).
-
-    Supported patterns:
-
-    * **New style** (``PresetCfg`` subclass): a configclass whose MRO contains a class named
-      ``PresetCfg``. The active variant is stored in the ``default`` attribute.
-    * **Old style** (``presets`` dict): a configclass that has a ``presets: dict[str, Cfg]``
-      attribute with a ``"default"`` key.
-
-    Args:
-        cfg: Any configclass instance (or any object; non-configclasses are returned as-is).
-
-    Returns:
-        The same ``cfg`` object, modified in-place with preset wrappers replaced.
-    """
-    if not hasattr(cfg, "__dataclass_fields__"):
-        return cfg
-    for field_name in list(cfg.__dataclass_fields__):
-        value = getattr(cfg, field_name, None)
-        if value is None or not hasattr(value, "__dataclass_fields__"):
-            continue
-        # New-style PresetCfg: class hierarchy contains a class named "PresetCfg".
-        if any(cls.__name__ == "PresetCfg" for cls in type(value).__mro__):
-            resolved = value.default
-            setattr(cfg, field_name, resolved)
-            resolve_cfg_presets(resolved)
-        # Old-style preset: configclass with a ``presets`` dict that has a ``"default"`` key.
-        elif isinstance(getattr(value, "presets", None), dict) and "default" in value.presets:
-            resolved = value.presets["default"]
-            setattr(cfg, field_name, resolved)
-            resolve_cfg_presets(resolved)
-        else:
-            resolve_cfg_presets(value)
-    return cfg
 
 
 def checked_apply(src: Any, target: Any) -> None:

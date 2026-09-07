@@ -653,7 +653,7 @@ def main() -> None:
         hydra_args = ["presets=newton_mjwarp", *hydra_args]
     sys.argv = [sys.argv[0], *hydra_args]
 
-    import isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c  # noqa: F401
+    import isaaclab_tasks.contrib.velocity.config.anymal_c  # noqa: F401
     from isaaclab_tasks.utils.hydra import hydra_task_config
 
     agent_entry_point = args.policy_agent if args.action_mode == "policy" else ""
