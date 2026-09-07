@@ -98,6 +98,17 @@ class NewtonNerdManager(NewtonManager):
         cls._sync_upstream_newton_state()
 
     @classmethod
+    def _reset_solver_internals(cls, world_mask) -> None:
+        """Skip Newton SolverBase.reset; NeRD history is reset in reset_neural_solver.
+
+        Isaac Lab 3's :meth:`NewtonManager.forward` calls this hook as
+        ``solver.reset(state, world_mask=..., flags=0)``. Neural solvers do not
+        own Newton constraint buffers, so the default hook would hit
+        :meth:`TransformerNeuralSolver.reset` with the wrong signature.
+        """
+        del world_mask
+
+    @classmethod
     def _disable_cuda_graph_for_nerd(cls) -> None:
         """NeRD neural solver steps include PyTorch and cannot use upstream CUDA graphs."""
         cfg = PhysicsManager._cfg

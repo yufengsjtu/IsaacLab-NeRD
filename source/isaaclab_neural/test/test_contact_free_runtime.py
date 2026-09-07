@@ -25,6 +25,7 @@ from isaaclab_neural.generate.sampler import ActionTrajectorySampler
 from isaaclab_neural.physics import NerdSolverCfg
 from isaaclab_neural.physics.nerd_newton_manager import NewtonNerdManager
 from isaaclab_neural.rl.rsl_rl.cli_args import apply_neural_model_to_env_cfg
+from isaaclab_neural.solvers.neural_solver import NeuralSolver
 from isaaclab_neural.train.trainers import VanillaTrainer
 from isaaclab_newton.physics.newton_manager import NewtonManager
 
@@ -289,3 +290,14 @@ def test_upstream_sync_attrs_exist_on_nerd_manager() -> None:
     ]
     assert missing == [], f"Stale NewtonManager sync attrs: {missing}"
     NewtonNerdManager._sync_upstream_newton_state()
+
+
+def test_nerd_manager_skips_newton_solver_internal_reset() -> None:
+    """Isaac Lab 3 forward() must not call NeuralSolver.reset(state, world_mask=...)."""
+    NewtonNerdManager._reset_solver_internals(object())
+
+
+def test_neural_solver_reset_accepts_newton_world_mask_kwargs() -> None:
+    solver = NeuralSolver.__new__(NeuralSolver)
+    solver.predicted_body_net_contact_forces_b = None
+    solver.reset(object(), world_mask=object(), flags=0)
