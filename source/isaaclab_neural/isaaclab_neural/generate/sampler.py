@@ -364,6 +364,14 @@ class ActionTrajectorySampler:
         print(f"\nTotal number of transitions generated: {total_transitions}")
         return self._merge_rollout_batches(rollout_batches)
 
+    def _on_action_rollout_reset(self, *, constrain_sampled_actions: bool = True) -> None:
+        """Hook after each action-mode env reset, before the first recorded step."""
+        pass
+
+    def _constrain_sampled_action(self, action: torch.Tensor) -> torch.Tensor:
+        """Optionally rewrite a sampled action before it is applied."""
+        return action
+
     def _pre_step_hook(self, step: int) -> None:
         """Hook for environment-specific per-frame effects."""
         pass
@@ -391,6 +399,7 @@ class ActionTrajectorySampler:
         def reset_held_action() -> None:
             nonlocal held_action
             held_action = None
+            self._on_action_rollout_reset(constrain_sampled_actions=not zero_actions)
 
         def step_fn(step: int) -> torch.Tensor:
             nonlocal held_action
@@ -401,6 +410,8 @@ class ActionTrajectorySampler:
                     if zero_actions
                     else self.adapter.sample_action(self.action_low, self.action_high)
                 )
+                if not zero_actions:
+                    held_action = self._constrain_sampled_action(held_action)
             action = held_action
             if action is None:
                 raise RuntimeError("Action sampling failed before stepping.")

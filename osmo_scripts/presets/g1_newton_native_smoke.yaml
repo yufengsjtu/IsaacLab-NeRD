@@ -5,7 +5,7 @@
 
 workflow:
   base_name: g1-newton-native-shared-per-body-smoke
-  dataset_subdir: g1-newton-native-contact-tokens-v3-active-smoke-mixed-ckpt1499-valid3200-stock
+  dataset_subdir: g1-newton-native-contact-tokens-v3-active-smoke-mixed-ckpt1499-valid3200-stock-holdhand
   image: docker.io/rowany28070/isaac-lab-nerd:g1-develop
 
 resources:

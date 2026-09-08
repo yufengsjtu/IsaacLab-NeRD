@@ -68,6 +68,14 @@ def get_parser() -> argparse.ArgumentParser:
             "the action across env decimation. Used for G1 pool-perturb."
         ),
     )
+    parser.add_argument(
+        "--no-hold-g1-hand-actions",
+        action="store_true",
+        help=(
+            "Sample random targets for stock G1 numbered hand joints in action mode. "
+            "Default holds those joints at the trajectory reset pose."
+        ),
+    )
     parser.add_argument("--num-transitions", type=int, default=100_000, help="Number of transitions to collect.")
     parser.add_argument("--trajectory-length", type=int, default=100, help="Number of env steps per trajectory.")
     parser.add_argument("--num-envs", type=int, default=1024, help="Number of vectorized environments.")

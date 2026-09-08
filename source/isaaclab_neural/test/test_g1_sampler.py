@@ -93,6 +93,7 @@ def test_g1_sampler_spec_enables_relative_gain_randomization():
         "randomize_pd_gains": True,
         "kp_scale_range": (0.9, 1.1),
         "kd_scale_range": (0.7, 1.3),
+        "hold_hand_actions": True,
     }
 
 
@@ -222,3 +223,57 @@ def test_action_hold_period_resamples_every_frame_for_pool_perturb():
 
     assert action_hold_period("frame", 4, resample_actions_every_frame=True) == 1
     assert action_hold_period("env", 4, resample_actions_every_frame=True) == 1
+
+
+def test_g1_hand_joint_indices_select_numbered_hand_joints():
+    from isaaclab_neural.robots.g1 import g1_hand_joint_indices
+
+    names = [
+        "left_hip_pitch_joint",
+        "left_one_joint",
+        "right_six_joint",
+        "torso_joint",
+        "left_zero_joint",
+    ]
+    assert g1_hand_joint_indices(names) == [1, 2, 4]
+
+
+def test_g1_action_mode_holds_hand_joints_at_reset_pose():
+    adapter = _DummyAdapter()
+    robot = adapter.env.scene["robot"]
+    robot.data.joint_pos = torch.tensor([[0.10, 0.40], [0.10, 0.50]])
+    robot.data.default_joint_pos = torch.zeros((2, 2))
+    term = SimpleNamespace(
+        _joint_names=["left_hip_pitch_joint", "left_one_joint"],
+        _joint_ids=slice(None),
+        _offset=robot.data.default_joint_pos.clone(),
+        _scale=0.5,
+    )
+    adapter.env.action_manager = SimpleNamespace(get_term=lambda name: term)
+
+    sampler = G1TrajectorySampler(adapter, trajectory_length=1, data_device="cpu")
+    sampler._on_action_rollout_reset(constrain_sampled_actions=True)
+
+    action = torch.ones((2, 2))
+    held = sampler._constrain_sampled_action(action.clone())
+    assert held[0, 0] == 1.0
+    assert torch.allclose(held[:, 1], torch.tensor([0.8, 1.0]))
+
+
+def test_g1_action_mode_can_disable_hand_hold():
+    adapter = _DummyAdapter()
+    robot = adapter.env.scene["robot"]
+    robot.data.joint_pos = torch.tensor([[0.0, 0.4], [0.0, 0.4]])
+    robot.data.default_joint_pos = torch.zeros((2, 2))
+    term = SimpleNamespace(
+        _joint_names=["left_hip_pitch_joint", "left_one_joint"],
+        _joint_ids=slice(None),
+        _offset=robot.data.default_joint_pos.clone(),
+        _scale=0.5,
+    )
+    adapter.env.action_manager = SimpleNamespace(get_term=lambda name: term)
+
+    sampler = G1TrajectorySampler(adapter, trajectory_length=1, data_device="cpu", hold_hand_actions=False)
+    sampler._on_action_rollout_reset(constrain_sampled_actions=True)
+    action = torch.ones((2, 2))
+    assert torch.equal(sampler._constrain_sampled_action(action.clone()), action)

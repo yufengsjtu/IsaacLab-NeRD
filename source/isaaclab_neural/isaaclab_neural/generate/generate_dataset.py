@@ -48,6 +48,7 @@ def _sampler_spec(
     kd_range: tuple[float, float],
     kp_scale_range: tuple[float, float] = (0.8, 1.2),
     kd_scale_range: tuple[float, float] = (0.8, 1.2),
+    hold_hand_actions: bool = True,
 ):
     """Return sampler class and kwargs for a dataset-generation task."""
     from isaaclab_neural.generate.sampler import ActionTrajectorySampler
@@ -62,6 +63,7 @@ def _sampler_spec(
             "randomize_pd_gains": randomize_pd_gains,
             "kp_scale_range": kp_scale_range,
             "kd_scale_range": kd_scale_range,
+            "hold_hand_actions": hold_hand_actions,
         }
 
     if robot_name == "Anymal-C":
@@ -194,6 +196,7 @@ def main(env_cfg, agent_cfg=None) -> None:
             (args_cli.kd_min, args_cli.kd_max),
             (args_cli.kp_scale_min, args_cli.kp_scale_max),
             (args_cli.kd_scale_min, args_cli.kd_scale_max),
+            hold_hand_actions=not bool(getattr(args_cli, "no_hold_g1_hand_actions", False)),
         )
         sampler = sampler_cls(
             adapter,

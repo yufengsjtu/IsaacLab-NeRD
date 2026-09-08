@@ -118,7 +118,7 @@ def test_g1_formal_preset_uses_shared_per_body_contact_tokens():
     assert experiment["dataset_mix"]["reset_trajectory_length"] == 500
     assert experiment["dataset_mix"]["valid"]["transitions"] == 250000
     assert experiment["dataset_mix"]["valid"]["always"] == ["policy", "random", "zero", "deployment"]
-    assert "ckpt3-1499-stock" in preset["workflow"]["dataset_subdir"]
+    assert "ckpt3-1499-stock-holdhand" in preset["workflow"]["dataset_subdir"]
     train_cfg = _load_yaml(REPO_ROOT / experiment["train_cfg"])
     assert train_cfg["env"]["neural_solver_cfg"]["contact_representation"] == "contact_tokens"
     assert train_cfg["env"]["neural_solver_cfg"]["contact_filter"] == "solver_active"
@@ -142,7 +142,7 @@ def test_g1_perturb_preset_trains_only_pool_perturb(monkeypatch: pytest.MonkeyPa
     assert experiment["dataset_mix"]["ratios"] == [0, 0, 0, 0, 0, 1]
     assert experiment["dataset_mix"]["perturbed_trajectory_length"] == 100
     assert experiment["dataset_mix"]["perturbed_random_fraction"] == 1.0
-    assert "perturb-20m-pool20m-stock" in preset["workflow"]["dataset_subdir"]
+    assert "perturb-20m-pool20m-stock-holdhand" in preset["workflow"]["dataset_subdir"]
     specs = parse_dataset_specs(experiment)
     by_name = {spec.filename: spec for spec in specs}
     train_names = [spec.filename for spec in specs if spec.split == "train"]
@@ -287,9 +287,7 @@ def test_g1_mix_expands_nonzero_policy_random_zero(monkeypatch: pytest.MonkeyPat
     assert by_name["dataset_policy_train_ckpt_0500.hdf5"]["num_transitions"] == 2_000_000
     assert by_name["dataset_policy_train_ckpt_2999.hdf5"]["num_transitions"] == 2_000_000
     assert by_name["dataset_pool_perturbed_random_train.hdf5"]["num_transitions"] == 2_000_000
-    assert by_name["dataset_pool_perturbed_random_train.hdf5"]["initial_states_pool"] == (
-        "dataset_policy_pool.hdf5"
-    )
+    assert by_name["dataset_pool_perturbed_random_train.hdf5"]["initial_states_pool"] == ("dataset_policy_pool.hdf5")
     assert by_name["dataset_pool_perturbed_random_train.hdf5"]["resample_actions_every_frame"] is True
     assert by_name["dataset_pool_perturbed_zero_train.hdf5"]["resample_actions_every_frame"] is True
     assert by_name["dataset_random_action_train.hdf5"]["trajectory_length"] == 500
@@ -357,7 +355,7 @@ def test_g1_smoke_mix_uses_single_checkpoint(monkeypatch: pytest.MonkeyPatch):
     assert by_name["dataset_pool_perturbed_random_train.hdf5"].resample_actions_every_frame is True
     assert experiment["dataset_mix"]["perturbed_trajectory_length"] == 10
     assert experiment["dataset_mix"]["perturbed_random_fraction"] == 1.0
-    assert "stock" in preset["workflow"]["dataset_subdir"]
+    assert "stock-holdhand" in preset["workflow"]["dataset_subdir"]
     train_cfg = _load_yaml(REPO_ROOT / experiment["train_cfg"])
     expected = mix_train_dataset_entries(experiment)
     actual = train_cfg["algorithm"]["dataset"]["train_datasets"]
@@ -404,15 +402,9 @@ def test_g1_presets_parse_gain_ranges_with_osmo_yaml_loader(monkeypatch: pytest.
             assert experiment["dataset_mix"]["valid"]["transitions"] == 250000
         else:
             assert experiment["dataset_mix"]["ratios"] == [2, 0, 0, 2, 2, 4]
-            assert experiment["dataset_mix"]["perturbed_trajectory_length"] == (
-                100 if name == FORMAL_PRESET else 10
-            )
-            assert experiment["dataset_mix"]["reset_trajectory_length"] == (
-                500 if name == FORMAL_PRESET else 100
-            )
-            assert experiment["dataset_mix"]["valid"]["transitions"] == (
-                250000 if name == FORMAL_PRESET else 3200
-            )
+            assert experiment["dataset_mix"]["perturbed_trajectory_length"] == (100 if name == FORMAL_PRESET else 10)
+            assert experiment["dataset_mix"]["reset_trajectory_length"] == (500 if name == FORMAL_PRESET else 100)
+            assert experiment["dataset_mix"]["valid"]["transitions"] == (250000 if name == FORMAL_PRESET else 3200)
 
 
 def test_g1_nerd_training_does_not_apply_analytical_solver_preset():
@@ -447,9 +439,7 @@ def test_g1_osmo_builds_env_reset_zero_valid_args(monkeypatch: pytest.MonkeyPatc
     from run_experiment import build_dataset_args, parse_dataset_specs
 
     experiment = _load_yaml(PRESET_DIR / FORMAL_PRESET)["experiment"]
-    spec = next(
-        item for item in parse_dataset_specs(experiment) if item.filename == "dataset_zero_action_valid.hdf5"
-    )
+    spec = next(item for item in parse_dataset_specs(experiment) if item.filename == "dataset_zero_action_valid.hdf5")
     args = build_dataset_args(experiment, spec, REPO_ROOT / "data" / "datasets")
     assert args[args.index("--task") + 1] == "Isaac-Velocity-Flat-G1-Dataset-Gen-v0"
     assert args[args.index("--trajectory-length") + 1] == "500"
@@ -466,9 +456,7 @@ def test_g1_osmo_builds_perturbed_dataset_args(monkeypatch: pytest.MonkeyPatch):
 
     experiment = _load_yaml(PRESET_DIR / FORMAL_PRESET)["experiment"]
     spec = next(
-        item
-        for item in parse_dataset_specs(experiment)
-        if item.filename == "dataset_pool_perturbed_random_train.hdf5"
+        item for item in parse_dataset_specs(experiment) if item.filename == "dataset_pool_perturbed_random_train.hdf5"
     )
     args = build_dataset_args(experiment, spec, REPO_ROOT / "data" / "datasets")
     assert args[args.index("--task") + 1] == "Isaac-Velocity-Flat-G1-Dataset-Gen-v0"
@@ -476,6 +464,7 @@ def test_g1_osmo_builds_perturbed_dataset_args(monkeypatch: pytest.MonkeyPatch):
     assert args[args.index("--initial-states-source") + 1] == "input_states_pool"
     assert args[args.index("--initial-states-pool") + 1].endswith("dataset_policy_pool.hdf5")
     assert "--resample-actions-every-frame" in args
+    assert "--no-hold-g1-hand-actions" not in args
     assert "--zero-actions" not in args
     assert "--randomize-pd-gains" not in args
 
@@ -489,9 +478,7 @@ def test_g1_osmo_builds_policy_noisy_dataset_args(tmp_path: Path, monkeypatch: p
     checkpoint.touch()
     experiment = _load_yaml(PRESET_DIR / FORMAL_PRESET)["experiment"]
     experiment["policy_checkpoint"] = str(checkpoint)
-    spec = next(
-        item for item in parse_dataset_specs(experiment) if item.filename == "dataset_policy_noisy_train.hdf5"
-    )
+    spec = next(item for item in parse_dataset_specs(experiment) if item.filename == "dataset_policy_noisy_train.hdf5")
     args = build_dataset_args(experiment, spec, REPO_ROOT / "data" / "datasets")
     assert spec.policy_action_noise_std == 0.2
     assert spec.clip_policy_action_noise is False
@@ -708,7 +695,12 @@ def test_g1_osmo_cache_uses_per_spec_trajectory_length(tmp_path: Path, monkeypat
             "thickness_0",
             "thickness_1",
         ):
-            native.create_dataset(name, data=np.zeros((0,), dtype=np.int64 if "ids" in name or "slots" in name or name == "world_ids" else np.float32))
+            native.create_dataset(
+                name,
+                data=np.zeros(
+                    (0,), dtype=np.int64 if "ids" in name or "slots" in name or name == "world_ids" else np.float32
+                ),
+            )
         for name in (
             "points_0_local",
             "points_1_local",
@@ -772,14 +764,7 @@ def test_package_code_force_includes_gitignored_g1_assets(tmp_path, monkeypatch)
     from lib.package_code import collect_packaged_files, force_included_files
 
     checkpoint = tmp_path / "pretrained" / "control_policy" / "g1_flat_terrain" / "model_1499.pt"
-    mix = (
-        tmp_path
-        / "pretrained"
-        / "control_policy"
-        / "g1_flat_terrain"
-        / "checkpoint_mix"
-        / "model_250.pt"
-    )
+    mix = tmp_path / "pretrained" / "control_policy" / "g1_flat_terrain" / "checkpoint_mix" / "model_250.pt"
     checkpoint.parent.mkdir(parents=True)
     mix.parent.mkdir(parents=True)
     checkpoint.write_bytes(b"pt")

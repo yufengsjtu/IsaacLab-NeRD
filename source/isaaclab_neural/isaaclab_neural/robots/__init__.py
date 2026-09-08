@@ -5,8 +5,10 @@
 
 """Robot articulation configs for isaaclab_neural."""
 
-from .g1 import apply_g1_rich_velocity_commands
+from .g1 import G1_HAND_JOINT_NAME_PATTERN, apply_g1_rich_velocity_commands, g1_hand_joint_indices
 
 __all__ = [
+    "G1_HAND_JOINT_NAME_PATTERN",
     "apply_g1_rich_velocity_commands",
+    "g1_hand_joint_indices",
 ]
