@@ -138,8 +138,19 @@ class NewtonDataGenerationBackend:
         solver.sync_from_newton(self.state, contacts, self.control.joint_f, update_history=False)
 
     def assign_solver_states(self, solver, states: torch.Tensor) -> None:
-        """Write generalized states through the solver's frame-aware helper."""
+        """Write generalized states, then refresh FK and MJWarp internals.
+
+        Direct writes to ``joint_q`` / ``joint_qd`` bypass Articulation
+        ``write_*_to_sim`` helpers, so they must call
+        :meth:`~isaaclab_newton.physics.newton_manager.NewtonManager.invalidate_fk`
+        before :meth:`~isaaclab_newton.physics.newton_manager.NewtonManager.forward`.
+        Otherwise MJWarp keeps the previous ``qacc_warmstart`` and body poses
+        while generalized coordinates already changed, and the next physics
+        step can NaN the world. That NaN then persists across later pool
+        writes (newton-physics/newton#1266).
+        """
         solver._assign_states_from_torch(self.state, states)
+        self._manager.invalidate_fk()
         self._manager.forward()
 
     @contextmanager

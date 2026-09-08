@@ -142,6 +142,9 @@ class NeuralEnvAdapter:
 
         states = initial_states.to(device=self.solver.torch_device)
         self.solver._assign_states_from_torch(self.state, states)
+        # Direct joint_q writes bypass Articulation write_*_to_sim, so the
+        # Isaac Lab 3 forward() path is a no-op unless worlds are marked dirty.
+        self.manager.invalidate_fk()
         self.manager.forward()
         self.sync(update_history=False)
         if reset_history:
