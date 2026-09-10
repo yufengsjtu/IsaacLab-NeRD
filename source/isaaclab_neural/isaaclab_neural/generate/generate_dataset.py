@@ -239,6 +239,7 @@ def main(env_cfg, agent_cfg=None) -> None:
                 initial_states_source=args_cli.initial_states_source,
                 initial_states_pool=initial_states_pool,
                 step_granularity=args_cli.step_granularity,
+                action_hold_frames=args_cli.action_hold_frames,
                 render=args_cli.render,
             )
 

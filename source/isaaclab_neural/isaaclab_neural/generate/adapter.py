@@ -140,6 +140,7 @@ class NewtonDataGenerationBackend:
     def assign_solver_states(self, solver, states: torch.Tensor) -> None:
         """Write generalized states through the solver's frame-aware helper."""
         solver._assign_states_from_torch(self.state, states)
+        self._manager.invalidate_fk()
         self._manager.forward()
 
     @contextmanager
@@ -496,6 +497,20 @@ class DataGenerationAdapter:
         self.env.scene.update(dt=getattr(self.env, "physics_dt", 0.0))
         self.sync()
         return self.neural_inputs()["states"]
+
+    def refresh_policy_mdp(self, dt: float) -> None:
+        """Refresh policy commands and observations without stepping or resetting.
+
+        Args:
+            dt: Elapsed control interval [s].
+        """
+        env = self.env
+        command_manager = getattr(env, "command_manager", None)
+        observation_manager = getattr(env, "observation_manager", None)
+        if command_manager is not None:
+            command_manager.compute(dt=dt)
+        if observation_manager is not None:
+            env.obs_buf = observation_manager.compute(update_history=True)
 
     def step_joint_f_frame(self, joint_f: torch.Tensor):
         """Step one physics frame with direct joint forces, bypassing actuators."""

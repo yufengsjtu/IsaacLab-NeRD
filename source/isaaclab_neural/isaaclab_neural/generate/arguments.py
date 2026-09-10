@@ -39,6 +39,14 @@ def get_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--policy-agent", type=str, default="rsl_rl_cfg_entry_point")
     parser.add_argument("--step-granularity", choices=["frame", "env"], default="frame")
+    parser.add_argument(
+        "--action-hold-frames",
+        type=int,
+        default=0,
+        help=(
+            "Physics frames to hold each sampled action in action mode. 0 holds only for the env control decimation."
+        ),
+    )
     parser.add_argument("--num-transitions", type=int, default=100_000, help="Number of transitions to collect.")
     parser.add_argument("--trajectory-length", type=int, default=100, help="Number of env steps per trajectory.")
     parser.add_argument("--num-envs", type=int, default=1024, help="Number of vectorized environments.")

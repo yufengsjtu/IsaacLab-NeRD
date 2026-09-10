@@ -229,6 +229,7 @@ def test_rope_cached_forward_matches_prefix_and_bounds_evicted_cache():
 def test_solver_kv_cache_rebuilds_only_reset_rows():
     model = _mixed_input_model()
     solver = TransformerNeuralSolver.__new__(TransformerNeuralSolver)
+    solver.num_envs = 2
     solver.num_states_history = 5
     solver.use_feature_cache = False
     solver.use_kv_cache = True
@@ -239,6 +240,13 @@ def test_solver_kv_cache_rebuilds_only_reset_rows():
     solver.kv_cache_rebuild_inputs = None
     solver.neural_model = model
     solver.torch_device = torch.device("cpu")
+    solver.predicted_body_net_contact_forces_b = None
+    solver.root_body_q = torch.zeros(2, 7)
+    solver.states = torch.zeros(2, 4)
+    solver.states_embedding = torch.zeros(2, 4)
+    solver.joint_f = torch.zeros(2, 2)
+    solver.gravity_dir = torch.zeros(2, 3)
+    solver.contacts = {}
     solver.process_neural_model_inputs = lambda inputs: inputs
 
     initial_values = torch.randn(2, 5, 6)
@@ -261,9 +269,9 @@ def test_solver_kv_cache_rebuilds_only_reset_rows():
         expected = model(full_window, single_step=True)
         actual = solver._model_forward(model_inputs)
 
-    # The reset row is rebuilt from its complete zero-padded solver window and
-    # remains exactly equivalent. The uninterrupted row keeps incremental
-    # cache semantics after eviction.
+    # The reset row is rebuilt from its complete solver window and remains
+    # exactly equivalent. The uninterrupted row keeps incremental cache
+    # semantics after eviction.
     torch.testing.assert_close(actual[0], expected[0], atol=1e-6, rtol=1e-5)
     assert model_inputs["observation"].shape == (2, 1, 6)
     assert solver.kv_cache_rebuild_inputs is None
