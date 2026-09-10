@@ -287,6 +287,18 @@ def dataset_cache_complete(
                         f"{missing_projection_context}."
                     )
                     return False
+                if str(experiment.get("contact_token_frame", "root")) == "owner":
+                    pose_key = "primary_body_q"
+                    expected_primary_bodies = int(experiment.get("num_primary_bodies", 17))
+                    pose_dataset = cast(h5py.Dataset, data_group[pose_key]) if pose_key in data_group else None
+                    if (
+                        pose_dataset is None
+                        or pose_dataset.ndim != 4
+                        or pose_dataset.shape[:2] != step_shape
+                        or pose_dataset.shape[-2:] != (expected_primary_bodies, 7)
+                    ):
+                        print(f"Rejected cached dataset without owner-frame primary_body_q poses: {dataset_path}")
+                        return False
             if experiment.get("record_body_net_contact_forces", False):
                 force_key = "body_net_contact_forces_w"
                 expected_primary_bodies = int(experiment.get("num_primary_bodies", 17))
@@ -493,8 +505,10 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
             print(f"Skipping policy validation dataset; checkpoint not found: {policy_checkpoint}")
             return None
         sample_mode = "policy"
+        initial_states_source = "env"
     else:
         sample_mode = str(experiment.get("sample_mode", "action"))
+        initial_states_source = str(spec.initial_states_source or experiment.get("initial_states_source", "env"))
 
     transitions = resolve_spec_transitions(experiment, spec)
     task = experiment.get("deployment_task") if spec.task_kind == "deployment" else experiment.get("data_gen_task")
@@ -515,7 +529,7 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
         "--sample-mode",
         sample_mode,
         "--initial-states-source",
-        str(spec.initial_states_source or experiment.get("initial_states_source", "env")),
+        initial_states_source,
         *contact_args(experiment),
         "--num-envs",
         str(experiment["data_gen_num_envs"]),
@@ -532,6 +546,9 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
         args += ["--states-frame", str(experiment["states_frame"])]
     if experiment.get("write_chunk_transitions"):
         args += ["--write-chunk-transitions", str(experiment["write_chunk_transitions"])]
+    hold_frames = experiment.get("action_hold_frames")
+    if hold_frames and not spec.use_policy:
+        args += ["--action-hold-frames", str(int(hold_frames))]
     if experiment.get("record_body_net_contact_forces", False):
         args.append("--record-body-net-contact-forces")
     if spec.zero_actions:
@@ -550,7 +567,6 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
     if spec.resample_actions_every_frame:
         args.append("--resample-actions-every-frame")
     apply_pd_randomization = bool(experiment.get("randomize_pd_gains")) and spec.task_kind == "default"
-    initial_states_source = str(spec.initial_states_source or experiment.get("initial_states_source", "env"))
     # Lab-policy pool-perturb starts from walking states and does not randomize PD.
     if initial_states_source == "input_states_pool":
         apply_pd_randomization = False

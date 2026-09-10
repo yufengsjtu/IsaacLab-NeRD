@@ -17,6 +17,7 @@ and Isaac Sim's ``python.sh`` fallback.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import os
 import site
@@ -75,9 +76,7 @@ def source_packages(project_root: Path) -> list[Path]:
         if _is_installable(path):
             ordered.append(path)
             seen.add(name)
-    extras = sorted(
-        path for path in source_dir.iterdir() if path.name not in seen and _is_installable(path)
-    )
+    extras = sorted(path for path in source_dir.iterdir() if path.name not in seen and _is_installable(path))
     ordered.extend(extras)
     if not ordered:
         raise RuntimeError(f"No installable Isaac Lab packages found under {source_dir}")
@@ -99,9 +98,7 @@ def apply_sys_path(project_root: Path) -> list[str]:
     local_paths = pythonpath_entries(project_root)
     remainder = [path for path in sys.path if path not in local_paths]
     sys.path[:] = [*local_paths, *remainder]
-    existing = [
-        path for path in os.environ.get("PYTHONPATH", "").split(os.pathsep) if path and path not in local_paths
-    ]
+    existing = [path for path in os.environ.get("PYTHONPATH", "").split(os.pathsep) if path and path not in local_paths]
     os.environ["PYTHONPATH"] = os.pathsep.join([*local_paths, *existing])
     return local_paths
 
@@ -109,10 +106,8 @@ def apply_sys_path(project_root: Path) -> list[str]:
 def _writable_site_packages() -> Path:
     """Return a site-packages directory that this interpreter can write."""
     candidates: list[Path] = []
-    try:
+    with contextlib.suppress(Exception):
         candidates.extend(Path(item) for item in site.getsitepackages())
-    except Exception:
-        pass
     purelib = sysconfig.get_path("purelib")
     if purelib:
         candidates.append(Path(purelib))
@@ -245,9 +240,7 @@ def bootstrap(project_root: Path) -> None:
     env = os.environ.copy()
     uploaded_pythonpath = export_pythonpath(project_root)
     existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        uploaded_pythonpath if not existing else os.pathsep.join((uploaded_pythonpath, existing))
-    )
+    env["PYTHONPATH"] = uploaded_pythonpath if not existing else os.pathsep.join((uploaded_pythonpath, existing))
     subprocess.run(
         [
             sys.executable,

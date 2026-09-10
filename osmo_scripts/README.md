@@ -31,6 +31,10 @@ environment at `/opt/isaaclab-venv` when it exists, and fall back to Isaac Sim
 
 - `cartpole_newton_native`: contact-free Cartpole using
   `Cartpole/transformer.yaml`.
+- `franka_reach_newton_native`: contact-free Franka Reach using
+  `Franka/transformer_reach.yaml`.
+- `franka_reach_policy_train`: contact-free Franka Reach trained on
+  Reach-policy rollouts using `Franka/transformer_reach_policy.yaml`.
 - `anymal_newton_native`: recommended flat baseline with flat native contacts,
   using `Anymal/transformer_native.yaml`.
 - `anymal_rough_newton_native`: recommended rough baseline with flat native
@@ -86,6 +90,11 @@ options.
 
 `start.sh` validates the rendered workflow before submission. Extra arguments
 after `--` are forwarded to OSMO.
+
+Franka Reach presets use the public image
+`docker.io/rowany28070/isaac-lab-nerd:g1-develop` (no OSMO registry
+credential). Anymal and Cartpole still default to
+`nvcr.io/nvidia/isaac-lab:3.0.0-beta2`.
 
 ## Dataset cache
 

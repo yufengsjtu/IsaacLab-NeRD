@@ -29,8 +29,9 @@ def _write_source_package(project_root: Path, name: str, marker: str) -> Path:
 
 def test_core_submodule_order_matches_install_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
-    from isaaclab.cli.commands.install import CORE_ISAACLAB_SUBMODULES
     from lib.local_isaaclab import CORE_ISAACLAB_SUBMODULES as osmo_core
+
+    from isaaclab.cli.commands.install import CORE_ISAACLAB_SUBMODULES
 
     assert osmo_core == list(CORE_ISAACLAB_SUBMODULES)
 
@@ -81,22 +82,20 @@ def test_entrypoint_reexports_uploaded_isaaclab_pythonpath() -> None:
 def test_entrypoint_prefers_image_venv_over_kit_python() -> None:
     text = (OSMO_SCRIPTS / "entrypoint.sh").read_text(encoding="utf-8")
     venv_offset = text.index("/opt/isaaclab-venv")
-    fallback_offset = text.index('Using Isaac Sim python.sh')
+    fallback_offset = text.index("Using Isaac Sim python.sh")
     assert "export VIRTUAL_ENV=" in text
     assert venv_offset < fallback_offset
-    assert 'return' in text[venv_offset:fallback_offset]
+    assert "return" in text[venv_offset:fallback_offset]
 
 
 def test_init_sh_fails_fast_without_venv_deps() -> None:
     text = (OSMO_SCRIPTS / "init.sh").read_text(encoding="utf-8")
     bootstrap_offset = text.index("bootstrap")
-    lazy_offset = text.index('import lazy_loader')
+    lazy_offset = text.index("import lazy_loader")
     assert lazy_offset > bootstrap_offset
 
 
-def test_install_local_packages_force_reinstalls_without_deps(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_install_local_packages_force_reinstalls_without_deps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
     from lib.local_isaaclab import install_local_packages
 
@@ -124,9 +123,7 @@ def test_install_local_packages_force_reinstalls_without_deps(
     assert install_check is True
 
 
-def test_verify_local_imports_rejects_image_origin(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_verify_local_imports_rejects_image_origin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
     from lib import local_isaaclab
 
