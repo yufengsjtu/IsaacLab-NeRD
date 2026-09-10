@@ -27,14 +27,17 @@ Isaac Lab distribution bundled in the image. Pods prefer the image uv
 environment at `/opt/isaaclab-venv` when it exists, and fall back to Isaac Sim
 `python.sh` on older images that only expose Kit Python.
 
+Code archives include untracked source and required G1/Franka policy assets, but
+exclude local workflow outputs, nested worktrees, and viewer state. Policy caches
+from before command/observation refresh are not valid for the updated collector.
+Use `--dataset-cache-mode off` with a new `--dataset-subdir` to regenerate them
+without reusing the old cache. Cache shape checks alone cannot detect stale
+policy observations.
+
 ## Public presets
 
 - `cartpole_newton_native`: contact-free Cartpole using
   `Cartpole/transformer.yaml`.
-- `franka_reach_newton_native`: contact-free Franka Reach using
-  `Franka/transformer_reach.yaml`.
-- `franka_reach_policy_train`: contact-free Franka Reach trained on
-  Reach-policy rollouts using `Franka/transformer_reach_policy.yaml`.
 - `anymal_newton_native`: recommended flat baseline with flat native contacts,
   using `Anymal/transformer_native.yaml`.
 - `anymal_rough_newton_native`: recommended rough baseline with flat native
@@ -55,8 +58,9 @@ environment at `/opt/isaaclab-venv` when it exists, and fall back to Isaac Sim
 - `anymal_rough_newton_native_shared_per_body_contact_force_rope`: rough
   model combining the force head and RoPE.
 
-The release does not expose ablation, diagnostic, or remote smoke presets. A
-small local smoke training YAML remains under the package configuration tree.
+Additional ablation and smoke presets depend on the checked-out branch; see
+`presets/` for the available recipes. Keep their dataset caches separate when
+collection semantics differ.
 
 ## Submit a workflow
 
