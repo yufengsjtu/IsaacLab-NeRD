@@ -218,7 +218,7 @@ def test_canonicalize_contact_sides_prefers_primary_robot_over_dynamic_object():
     torch.testing.assert_close(thickness1, torch.tensor([0.1]))
 
 
-def test_primary_body_mask_uses_first_articulation_per_world():
+def test_primary_body_mask_uses_all_articulation_bodies_per_world():
     adapter = NewtonContactAdapter.__new__(NewtonContactAdapter)
     adapter.device = torch.device("cpu")
     adapter.num_envs = 2
@@ -234,9 +234,9 @@ def test_primary_body_mask_uses_first_articulation_per_world():
 
     torch.testing.assert_close(
         primary_body_mask,
-        torch.tensor([True, True, False, True, True, False]),
+        torch.tensor([True, True, True, True, True, True]),
     )
-    assert rule == "primary_articulation_first"
+    assert rule == "all_articulation_bodies"
 
 
 def test_penetration_priority_sorts_signed_surface_separation():

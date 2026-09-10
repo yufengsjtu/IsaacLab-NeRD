@@ -647,14 +647,14 @@ class NewtonContactAdapter:
         return body_ids
 
     def _is_primary_body(self, body_ids: torch.Tensor) -> torch.Tensor:
-        """Return whether each body belongs to the primary articulation."""
+        """Return whether each body is an articulated contact owner."""
         result = torch.zeros_like(body_ids, dtype=torch.bool)
         valid = (body_ids >= 0) & (body_ids < self.primary_body_mask.shape[0])
         result[valid] = self.primary_body_mask[body_ids[valid]]
         return result
 
     def _derive_primary_body_mask(self) -> tuple[torch.Tensor, str]:
-        """Identify the first articulation in every world as the primary robot."""
+        """Mark every articulated body in each world as a contact owner."""
         articulation_array = self.model.joint_articulation
         parent_array = self.model.joint_parent
         child_array = self.model.joint_child
@@ -673,15 +673,12 @@ class NewtonContactAdapter:
         primary_bodies = torch.zeros(int(self.model.body_count), dtype=torch.bool, device=self.device)
         for world_id in range(self.num_envs):
             world_joints = (joint_world == world_id) & (joint_articulation >= 0)
-            articulation_ids = joint_articulation[world_joints]
-            if articulation_ids.size == 0:
+            if not np.any(world_joints):
                 continue
-            primary_articulation = articulation_ids.min()
-            primary_joints = world_joints & (joint_articulation == primary_articulation)
-            for body_id in (*joint_parent[primary_joints].tolist(), *joint_child[primary_joints].tolist()):
+            for body_id in (*joint_parent[world_joints].tolist(), *joint_child[world_joints].tolist()):
                 if body_id >= 0:
                     primary_bodies[int(body_id)] = True
-        return primary_bodies, "primary_articulation_first"
+        return primary_bodies, "all_articulation_bodies"
 
     def _read_thickness(
         self,

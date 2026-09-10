@@ -24,6 +24,7 @@ from isaaclab_neural.contacts.contact_set_schema import CONTACT_FLAT_VALUE_FIELD
 from isaaclab_neural.contacts.newton_contact_adapter import NewtonContactAdapter
 from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 from isaaclab_neural.solvers.kernels import determine_angular_dofs
+from isaaclab_neural.solvers.world_layout import resolve_neural_solver_layout
 from isaaclab_neural.utils import newton_utils, torch_utils, warp_utils
 from isaaclab_neural.utils.newton_utils import base_joint_type
 
@@ -42,10 +43,11 @@ def _resolve_root_body_ids(model, articulation_starts: np.ndarray, num_envs: int
 
 
 class NeuralSolver(SolverBase):
-    """
-    An integrator that uses a neural network to predict the next state.
-    This integrator only handles articulated rigid body dynamics.
-    The state is represented in generalized coordinates, i.e. joint_q, joint_qd.
+    """Integrator that uses a neural network to predict the next generalized state.
+
+    Each Newton world is one environment. A world may contain multiple
+    articulations when every world is a replica with a contiguous joint layout.
+    The concatenated ``joint_q`` / ``joint_qd`` of that world is the model state.
     """
 
     def __init__(
@@ -109,44 +111,19 @@ class NeuralSolver(SolverBase):
         else:
             self.min_contact_event_threshold = MIN_CONTACT_EVENT_THRESHOLD
 
-        if model.articulation_count == 0:
-            raise ValueError(
-                "NeuralSolver only supports articulated rigid body dynamics, "
-                "so there has to be at least one articulation in the provided Warp sim model."
-            )
-
-        # assume there is one articulation or a duplicated articulations only
-        art_starts = model.articulation_start.numpy()
-        q_starts = model.joint_q_start.numpy()
-        qd_starts = model.joint_qd_start.numpy()
-        i0 = art_starts[0]
-        i1 = art_starts[1]
-        self.dof_q_per_env = int(q_starts[i1] - q_starts[i0])
-        self.dof_qd_per_env = int(qd_starts[i1] - qd_starts[i0])
+        layout = resolve_neural_solver_layout(model)
+        self.dof_q_per_env = layout.dof_q_per_env
+        self.dof_qd_per_env = layout.dof_qd_per_env
         self.state_dim = self.dof_q_per_env + self.dof_qd_per_env
-        self.num_envs = model.articulation_count
-        if int(model.world_count) != self.num_envs:
-            raise ValueError(
-                "NeuralSolver requires one Newton world per articulation, "
-                f"got world_count={model.world_count} and articulation_count={self.num_envs}."
-            )
-        if model.body_count % self.num_envs != 0 or model.joint_count % self.num_envs != 0:
-            raise ValueError("NeuralSolver requires uniform body and joint counts across environments.")
-        self.num_joints_per_env = model.joint_count // self.num_envs
-        self.num_bodies_per_env = model.body_count // self.num_envs
-        self.joint_f_dim = self.model.joint_f.shape[0] // self.num_envs
-        joint_world_array = getattr(model, "joint_world", None)
-        if joint_world_array is None:
-            self.state_world_ids = torch.arange(self.num_envs, device=self.torch_device)
-        else:
-            joint_world = joint_world_array.numpy()
-            self.state_world_ids = torch.as_tensor(
-                joint_world[art_starts[: self.num_envs]], device=self.torch_device, dtype=torch.long
-            )
+        self.num_envs = layout.num_envs
+        self.num_joints_per_env = layout.num_joints_per_env
+        self.num_bodies_per_env = layout.num_bodies_per_env
+        self.joint_f_dim = layout.joint_f_dim
+        self.articulations_per_env = layout.articulations_per_env
+        self.state_world_ids = torch.as_tensor(layout.state_world_ids, device=self.torch_device, dtype=torch.long)
         if sorted(self.state_world_ids.tolist()) != list(range(self.num_envs)):
             raise ValueError(f"Generalized state rows do not map one-to-one to Newton worlds: {self.state_world_ids}.")
-        root_body_ids = _resolve_root_body_ids(model, art_starts, self.num_envs)
-        self.root_body_ids = torch.as_tensor(root_body_ids, device=self.torch_device, dtype=torch.long)
+        self.root_body_ids = torch.as_tensor(layout.root_body_ids, device=self.torch_device, dtype=torch.long)
         if torch.unique(self.root_body_ids).numel() != self.num_envs:
             raise ValueError(f"Articulation root body ids are not unique: {self.root_body_ids}.")
         if model.body_world is None:
@@ -189,11 +166,6 @@ class NeuralSolver(SolverBase):
         self.num_contact_bodies_per_env = getattr(
             self.contact_adapter, "num_primary_bodies_per_env", self.num_bodies_per_env
         )
-
-        # verify that all articulations in the Warp model are the same
-        # (at least in terms of state dimensionality)
-        for i, j in zip(art_starts[1:], q_starts[:: self.num_joints_per_env]):
-            assert q_starts[i] - j == self.dof_q_per_env
 
         # initialize model input variables
         self.root_body_q = torch.empty((self.num_envs, 7), device=self.torch_device)
