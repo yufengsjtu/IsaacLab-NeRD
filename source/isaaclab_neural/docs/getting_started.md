@@ -23,13 +23,16 @@ A NeRD experiment has four stages:
 4. Optionally train an RSL-RL control policy against that environment.
 
 Start with [Cartpole](cartpole.md) to verify the installation. Continue with
-[Anymal-C](anymal.md) for contact-aware dynamics.
+[Anymal-C](anymal.md) for contact-aware locomotion, or [Franka](franka.md) for
+manipulation.
 
 ## Contact configuration
 
 Use `contact_mode: newton_native` for every new configuration.
 
 - Cartpole is contact-free and uses `num_contacts_per_env: 0`.
+- Franka Reach is also contact-free; Franka Lift uses a positive contact
+  capacity like Anymal-C.
 - Anymal-C requires a positive contact capacity; maintained configurations use
   64.
 - `fixed_ground` is deprecated and rejected because its representation is not

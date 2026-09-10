@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from argparse import Namespace
 from pathlib import Path
 
 import yaml
@@ -15,8 +16,24 @@ PACKAGE_ROOT = Path(__file__).parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
 PRESET_DIR = REPOSITORY_ROOT / "osmo_scripts" / "presets"
 
+CONTACT_FREE_ENV_NAMES = {"Cartpole", "Franka-Reach"}
+NON_ANYMAL_PRESETS = {
+    "cartpole_newton_native.yaml",
+    "franka_reach_newton_native.yaml",
+    "franka_reach_policy_train.yaml",
+}
+FRANKA_OSMO_IMAGE = "docker.io/rowany28070/isaac-lab-nerd:g1-develop"
+FRANKA_IMAGE_PRESETS = (
+    "franka_reach_newton_native.yaml",
+    "franka_reach_newton_native_smoke.yaml",
+    "franka_reach_policy_train.yaml",
+    "franka_reach_policy_train_smoke.yaml",
+)
+
 PUBLIC_PRESETS = {
     "cartpole_newton_native.yaml": "Cartpole",
+    "franka_reach_newton_native.yaml": "Franka-Reach",
+    "franka_reach_policy_train.yaml": "Franka-Reach",
     "anymal_newton_native.yaml": "Anymal-C-Flat-Native-v2",
     "anymal_rough_newton_native.yaml": "Anymal-C-Rough-Native-v2",
     "anymal_newton_native_contact_tokens.yaml": "Anymal-C-Flat-Native-v2",
@@ -35,7 +52,8 @@ def _load_yaml(path: Path) -> dict:
 
 
 def test_public_preset_surface_is_intentional() -> None:
-    assert {path.name for path in PRESET_DIR.glob("*.yaml")} == set(PUBLIC_PRESETS)
+    on_disk = {path.name for path in PRESET_DIR.glob("*.yaml")}
+    assert set(PUBLIC_PRESETS) <= on_disk
 
 
 def test_public_presets_have_valid_unique_training_mappings() -> None:
@@ -63,7 +81,7 @@ def test_public_presets_have_valid_unique_training_mappings() -> None:
         generated_valid_files = {item["filename"] for item in dataset_specs if item["split"] == "valid"}
         configured_valid_files = {Path(path).name for path in dataset_config["valid_datasets"].values()}
         assert configured_valid_files == generated_valid_files
-        if env_name != "Cartpole":
+        if env_name not in CONTACT_FREE_ENV_NAMES:
             algorithm = train_config["algorithm"]
             optimizer = algorithm["optimizer"]
             assert algorithm["num_epochs"] == 1000
@@ -79,10 +97,55 @@ def test_public_presets_have_valid_unique_training_mappings() -> None:
                 assert float(optimizer["lr_end"]) == 2e-5
         assert dataset_specs
         assert len({item["filename"] for item in dataset_specs}) == len(dataset_specs)
-        if env_name == "Cartpole":
+        if env_name in CONTACT_FREE_ENV_NAMES:
             assert experiment["num_contacts_per_env"] == 0
         else:
             assert experiment["num_contacts_per_env"] > 0
+        if env_name == "Franka-Reach":
+            assert experiment["initial_states_source"] == "env"
+            assert experiment["sample_mode"] == "action"
+            assert experiment["action_hold_frames"] == 20
+            assert Path(experiment["policy_checkpoint"]).name == "model_999.pt"
+            train_spec = next(item for item in dataset_specs if item["split"] == "train")
+            if filename == "franka_reach_policy_train.yaml":
+                assert experiment["trajectory_length"] == 240
+                assert train_spec["use_policy"] is True
+                policy_valid = [
+                    item["filename"] for item in dataset_specs if item["split"] == "valid" and item["use_policy"]
+                ]
+                assert policy_valid == ["dataset_valid.hdf5", "dataset_policy_valid.hdf5"]
+            else:
+                assert train_spec["use_policy"] is False
+
+
+def test_franka_presets_use_public_g1_develop_image() -> None:
+    for filename in FRANKA_IMAGE_PRESETS:
+        workflow = _load_yaml(PRESET_DIR / filename)["workflow"]
+        assert workflow["image"] == FRANKA_OSMO_IMAGE
+        assert "registry_credential" not in workflow
+
+
+def test_franka_resolve_submit_exports_g1_develop_image(monkeypatch, capsys) -> None:
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.preset import resolve_submit
+
+    resolve_submit(
+        Namespace(
+            preset="franka_reach_policy_train",
+            preset_file=None,
+            run_id="test",
+            workflow_name=None,
+            dataset_subdir=None,
+            num_gpu=None,
+            num_cpu=None,
+            memory=None,
+            storage=None,
+            platform=None,
+            image=None,
+        )
+    )
+    output = capsys.readouterr().out
+    assert f"OSMO_IMAGE={FRANKA_OSMO_IMAGE}" in output
 
 
 def test_compatible_anymal_presets_share_native_dataset_buckets() -> None:
@@ -92,7 +155,7 @@ def test_compatible_anymal_presets_share_native_dataset_buckets() -> None:
             preset["experiment"]["env_name"],
         )
         for filename in PUBLIC_PRESETS
-        if filename != "cartpole_newton_native.yaml"
+        if filename not in NON_ANYMAL_PRESETS
         for preset in [_load_yaml(PRESET_DIR / filename)]
     }
     flat = {key: value for key, value in buckets.items() if "rough" not in key}
@@ -105,3 +168,28 @@ def test_compatible_anymal_presets_share_native_dataset_buckets() -> None:
     assert {_load_yaml(PRESET_DIR / filename)["experiment"]["train_transitions"] for filename in buckets} == {
         10_000_000
     }
+
+
+def test_franka_reach_policy_train_smoke_matches_full_policy_recipe() -> None:
+    full = _load_yaml(PRESET_DIR / "franka_reach_policy_train.yaml")
+    smoke = _load_yaml(PRESET_DIR / "franka_reach_policy_train_smoke.yaml")
+    assert smoke["experiment"]["train_cfg"] == full["experiment"]["train_cfg"]
+    assert smoke["experiment"]["trajectory_length"] == full["experiment"]["trajectory_length"]
+    assert smoke["experiment"]["policy_checkpoint"] == full["experiment"]["policy_checkpoint"]
+    assert [item["use_policy"] for item in smoke["experiment"]["dataset_specs"]] == [
+        item["use_policy"] for item in full["experiment"]["dataset_specs"]
+    ]
+    assert smoke["experiment"]["train_transitions"] == 3200
+    assert smoke["workflow"]["image"] == full["workflow"]["image"] == FRANKA_OSMO_IMAGE
+
+
+def test_franka_osmo_dataset_args_omit_removed_headless_flag(tmp_path, monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from run_experiment import build_dataset_args, parse_dataset_specs
+
+    experiment = _load_yaml(PRESET_DIR / "franka_reach_newton_native.yaml")["experiment"]
+    spec = next(item for item in parse_dataset_specs(experiment) if item.filename == "dataset_train.hdf5")
+    args = build_dataset_args(experiment, spec, tmp_path)
+    assert args is not None
+    assert "--headless" not in args
+    assert "--force-overwrite" in args

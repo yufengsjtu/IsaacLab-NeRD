@@ -13,6 +13,15 @@ DATASET_MODES = ("transition", "trajectory")
 CARTPOLE_SMALL_RANGE = False
 """Whether to use the original narrow Cartpole sampling range."""
 
+_FRANKA_Q_MIN = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973, 0.0, 0.0])
+_FRANKA_Q_MAX = np.array([2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973, 0.04, 0.04])
+_FRANKA_QD_LIM = np.full(9, 10.0)
+_FRANKA_F_LIM = np.array([100.0, 100.0, 100.0, 100.0, 20.0, 20.0, 20.0, 0.0, 0.0])
+_FRANKA_LIFT_CUBE_Q_MIN = np.array([0.2, -0.4, 0.0, -1.0, -1.0, -1.0, -1.0])
+_FRANKA_LIFT_CUBE_Q_MAX = np.array([0.8, 0.4, 0.4, 1.0, 1.0, 1.0, 1.0])
+_FRANKA_LIFT_CUBE_QD_LIM = np.array([2.0, 2.0, 2.0, 4.0, 4.0, 4.0])
+_FRANKA_LIFT_CUBE_F_LIM = np.zeros(6)
+
 JOINT_Q_MIN = {
     "Cartpole": np.array([-1.0, -np.pi]) if CARTPOLE_SMALL_RANGE else np.array([-3.5, -np.pi]),
     "Anymal-C": np.array(
@@ -38,6 +47,8 @@ JOINT_Q_MIN = {
             -np.pi,
         ]
     ),
+    "Franka": _FRANKA_Q_MIN,
+    "Franka-Lift": np.concatenate([_FRANKA_Q_MIN, _FRANKA_LIFT_CUBE_Q_MIN]),
 }
 """Default lower generalized-position sampling bounds."""
 
@@ -66,6 +77,8 @@ JOINT_Q_MAX = {
             -np.pi,
         ]
     ),
+    "Franka": _FRANKA_Q_MAX,
+    "Franka-Lift": np.concatenate([_FRANKA_Q_MAX, _FRANKA_LIFT_CUBE_Q_MAX]),
 }
 """Default upper generalized-position sampling bounds."""
 
@@ -93,6 +106,8 @@ JOINT_QD_LIM = {
             np.pi * 2.0,
         ]
     ),
+    "Franka": _FRANKA_QD_LIM,
+    "Franka-Lift": np.concatenate([_FRANKA_QD_LIM, _FRANKA_LIFT_CUBE_QD_LIM]),
 }
 """Default generalized-velocity sampling bounds."""
 
@@ -121,6 +136,8 @@ JOINT_F_LIM = {
             8.0,
         ]
     ),
+    "Franka": _FRANKA_F_LIM,
+    "Franka-Lift": np.concatenate([_FRANKA_F_LIM, _FRANKA_LIFT_CUBE_F_LIM]),
 }
 """Default generalized joint-force sampling bounds [N or N*m]."""
 

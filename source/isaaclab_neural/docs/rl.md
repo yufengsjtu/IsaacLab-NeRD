@@ -8,6 +8,8 @@ Supported public environments:
 - `Isaac-Velocity-Flat-Anymal-C-NeRD-v0`
 - `Isaac-Velocity-Rough-Anymal-C-NeRD-v0`
 - `Isaac-Cartpole-NeRD-v0`
+- `Isaac-Reach-Franka-NeRD-v0`
+- `Isaac-Lift-Cube-Franka-NeRD-v0`
 
 No dynamics checkpoint is bundled or configured by default. Supply a trained
 NeRD checkpoint before launching RL.

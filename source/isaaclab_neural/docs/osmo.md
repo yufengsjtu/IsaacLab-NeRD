@@ -7,6 +7,7 @@ default storage backend; Swift remains supported.
 ## Public presets
 
 - `cartpole_newton_native`
+- `franka_reach_newton_native`
 - `anymal_newton_native`
 - `anymal_rough_newton_native`
 - `anymal_newton_native_contact_tokens`

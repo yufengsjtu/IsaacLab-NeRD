@@ -7,12 +7,24 @@
 
 import gymnasium as gym
 from isaaclab_tasks.core.cartpole import agents as cartpole_agents
+from isaaclab_tasks.core.reach.config.franka import agents as franka_reach_agents
+from isaaclab_tasks.contrib.lift.config.franka import agents as franka_lift_agents
 from isaaclab_tasks.contrib.velocity.config.anymal_c import agents as anymal_c_agents
 
-from .anymal_nerd_env import NerdAnymalCFlatEnv, NerdAnymalCFlatEnvCfg
 from .anymal_c_dataset_gen_cfg import AnymalCDatasetGenFlatEnvCfg, AnymalCDatasetGenRoughEnvCfg
+from .anymal_nerd_env import NerdAnymalCFlatEnv, NerdAnymalCFlatEnvCfg
 from .anymal_nerd_env import NerdAnymalCRoughEnv, NerdAnymalCRoughEnvCfg
 from .cartpole_nerd_env import NerdCartpoleEnv, NerdCartpoleEnvCfg
+from .franka_lift_nerd_env import (
+    FrankaLiftCubeDatasetGenEnvCfg,
+    NerdFrankaLiftEnv,
+    NerdFrankaLiftEnvCfg,
+)
+from .franka_reach_nerd_env import (
+    FrankaReachDatasetGenEnvCfg,
+    NerdFrankaReachEnv,
+    NerdFrankaReachEnvCfg,
+)
 from .neural_env_wrapper import NerdManagerBasedRLEnv, NeuralEnvAdapter
 from .agents import anymal_c_nerd_rsl_rl_ppo_cfg as anymal_c_nerd_agents
 
@@ -78,16 +90,66 @@ gym.register(
     },
 )
 
+gym.register(
+    id="Isaac-Reach-Franka-NeRD-v0",
+    entry_point=f"{NerdFrankaReachEnv.__module__}:NerdFrankaReachEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{NerdFrankaReachEnvCfg.__module__}:NerdFrankaReachEnvCfg",
+        "rl_games_cfg_entry_point": f"{franka_reach_agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": f"{franka_reach_agents.__name__}.rsl_rl_ppo_cfg:FrankaReachPPORunnerCfg",
+        "skrl_cfg_entry_point": f"{franka_reach_agents.__name__}:skrl_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Reach-Franka-Dataset-Gen-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{FrankaReachDatasetGenEnvCfg.__module__}:FrankaReachDatasetGenEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{franka_reach_agents.__name__}.rsl_rl_ppo_cfg:FrankaReachPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Lift-Cube-Franka-NeRD-v0",
+    entry_point=f"{NerdFrankaLiftEnv.__module__}:NerdFrankaLiftEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{NerdFrankaLiftEnvCfg.__module__}:NerdFrankaLiftEnvCfg",
+        "rl_games_cfg_entry_point": f"{franka_lift_agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": f"{franka_lift_agents.__name__}.rsl_rl_ppo_cfg:LiftCubePPORunnerCfg",
+        "skrl_cfg_entry_point": f"{franka_lift_agents.__name__}:skrl_ppo_cfg.yaml",
+        "sb3_cfg_entry_point": f"{franka_lift_agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Lift-Cube-Franka-Dataset-Gen-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{FrankaLiftCubeDatasetGenEnvCfg.__module__}:FrankaLiftCubeDatasetGenEnvCfg",
+    },
+)
+
 
 __all__ = [
     "AnymalCDatasetGenFlatEnvCfg",
     "AnymalCDatasetGenRoughEnvCfg",
+    "FrankaLiftCubeDatasetGenEnvCfg",
+    "FrankaReachDatasetGenEnvCfg",
     "NerdAnymalCFlatEnv",
     "NerdAnymalCFlatEnvCfg",
     "NerdAnymalCRoughEnv",
     "NerdAnymalCRoughEnvCfg",
     "NerdCartpoleEnv",
     "NerdCartpoleEnvCfg",
+    "NerdFrankaLiftEnv",
+    "NerdFrankaLiftEnvCfg",
+    "NerdFrankaReachEnv",
+    "NerdFrankaReachEnvCfg",
     "NerdManagerBasedRLEnv",
     "NeuralEnvAdapter",
 ]

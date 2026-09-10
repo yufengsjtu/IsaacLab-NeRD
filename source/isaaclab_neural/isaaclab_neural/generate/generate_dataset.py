@@ -34,6 +34,10 @@ def _default_robot_name(name: str) -> str:
         return "Anymal-C"
     if "Cartpole" in name:
         return "Cartpole"
+    if "Lift" in name and "Franka" in name:
+        return "Franka-Lift"
+    if "Franka" in name:
+        return "Franka"
     return name
 
 
@@ -98,6 +102,24 @@ def configure_env(env_cfg, args) -> None:
         if not isinstance(physics_solver_cfg, MJWarpSolverCfg):
             raise ValueError("Newton-native dataset generation requires the MJWarp solver.")
         physics_solver_cfg.use_mujoco_contacts = False
+    # ``joint_f`` sampling writes ``control.joint_f`` then calls
+    # ``NewtonManager._simulate_physics_only()`` and never replays a CUDA graph.
+    # Capturing one still executes MJWarp ``sensor_acc`` (device allocations)
+    # inside ``wp.ScopedCapture``; the first eager step then fails with CUDA 700.
+    # Action-mode sampling uses ``env.sim.step()`` and can replay the graph.
+    if getattr(args, "sample_mode", None) == "joint_f":
+        env_cfg.sim.physics.use_cuda_graph = False
+    # Franka Reach random splits use incremental position targets. Policy and
+    # zero-action splits restore the Reach RL action ``q_default ± 0.5 rad``.
+    if getattr(args, "sample_mode", None) == "policy" or getattr(args, "zero_actions", False):
+        restore_rl_arm_action = getattr(env_cfg, "restore_reach_rl_arm_action", None)
+        if callable(restore_rl_arm_action):
+            restore_rl_arm_action()
+    print(
+        f"[dataset] Newton use_cuda_graph={env_cfg.sim.physics.use_cuda_graph} "
+        f"sample_mode={getattr(args, 'sample_mode', None)} "
+        f"action_hold_frames={getattr(args, 'action_hold_frames', 0)}"
+    )
 
 
 def build_solver_cfg(args):
@@ -239,6 +261,7 @@ def main(env_cfg, agent_cfg=None) -> None:
                 initial_states_source=args_cli.initial_states_source,
                 initial_states_pool=initial_states_pool,
                 step_granularity=args_cli.step_granularity,
+                action_hold_frames=args_cli.action_hold_frames,
                 render=args_cli.render,
             )
 
