@@ -248,9 +248,7 @@ def dataset_cache_complete(
                         or pose_dataset.shape[:2] != step_shape
                         or pose_dataset.shape[-2:] != (expected_primary_bodies, 7)
                     ):
-                        print(
-                            f"Rejected cached dataset without owner-frame primary_body_q poses: {dataset_path}"
-                        )
+                        print(f"Rejected cached dataset without owner-frame primary_body_q poses: {dataset_path}")
                         return False
             if experiment.get("record_body_net_contact_forces", False):
                 force_key = "body_net_contact_forces_w"
@@ -452,8 +450,10 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
             print(f"Skipping policy validation dataset; checkpoint not found: {policy_checkpoint}")
             return None
         sample_mode = "policy"
+        initial_states_source = "env"
     else:
         sample_mode = str(experiment.get("sample_mode", "action"))
+        initial_states_source = str(experiment.get("initial_states_source", "env"))
 
     transitions = experiment["train_transitions"] if spec.split == "train" else experiment["valid_transitions"]
     task = experiment.get("deployment_task") if spec.task_kind == "deployment" else experiment.get("data_gen_task")
@@ -474,7 +474,7 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
         "--sample-mode",
         sample_mode,
         "--initial-states-source",
-        str(experiment.get("initial_states_source", "env")),
+        initial_states_source,
         *contact_args(experiment),
         "--num-envs",
         str(experiment["data_gen_num_envs"]),
@@ -484,7 +484,6 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
         str(experiment["trajectory_length"]),
         "--seed",
         str(spec.seed),
-        "--headless",
         "--force-overwrite",
     ]
 
@@ -492,6 +491,9 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
         args += ["--states-frame", str(experiment["states_frame"])]
     if experiment.get("write_chunk_transitions"):
         args += ["--write-chunk-transitions", str(experiment["write_chunk_transitions"])]
+    hold_frames = experiment.get("action_hold_frames")
+    if hold_frames and not spec.use_policy:
+        args += ["--action-hold-frames", str(int(hold_frames))]
     if experiment.get("record_body_net_contact_forces", False):
         args.append("--record-body-net-contact-forces")
     if spec.zero_actions:
@@ -522,7 +524,6 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
         str(experiment["train_num_envs"]),
         "--seed",
         "0",
-        "--headless",
         "--skip-check-log-override",
     ]
     if experiment.get("update_dataset_statistics"):
@@ -578,7 +579,6 @@ def run_context_diagnostic(experiment: dict, specs: list[DatasetSpec], dataset_d
         "--step",
         str(experiment.get("diagnostic_step", 0)),
         "--require-terrain-context",
-        "--headless",
         *contact_args(experiment),
     ]
     if experiment.get("states_frame"):
