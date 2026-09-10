@@ -375,8 +375,25 @@ class DataGenerationAdapter:
             return None
         return self.backend.collide_native_contacts()
 
-    def sync(self) -> None:
-        """Synchronize recorded tensors from Newton state/control."""
+    def overlay_applied_effort_into_control_joint_f(self) -> None:
+        """Record implicit-actuator effort after an analytic Newton step.
+
+        This writes neural input only. Do not call before analytic physics or
+        when collecting directly sampled ``joint_f``.
+        """
+        from isaaclab_neural.physics.applied_joint_f import copy_scene_applied_effort_into_sim_joint_f
+
+        copy_scene_applied_effort_into_sim_joint_f(getattr(self.env, "scene", None))
+
+    def sync(self, *, overlay_applied_effort: bool = False) -> None:
+        """Synchronize recorded tensors from Newton state/control.
+
+        Args:
+            overlay_applied_effort: Copy implicit-actuator telemetry into the
+                recorded force input after an action-mode physics step.
+        """
+        if overlay_applied_effort:
+            self.overlay_applied_effort_into_control_joint_f()
         contacts = self._prepare_contacts()
         self.backend.sync_solver(self.solver, contacts)
 
@@ -490,7 +507,7 @@ class DataGenerationAdapter:
     def step(self, action: torch.Tensor):
         """Step the wrapped env and refresh recorded tensors."""
         result = self.env.step(action)
-        self.sync()
+        self.sync(overlay_applied_effort=True)
         return result
 
     def step_action_frame(self, action: torch.Tensor, *, process_action: bool = True):
@@ -505,7 +522,7 @@ class DataGenerationAdapter:
         if hasattr(self.env, "_sim_step_counter"):
             self.env._sim_step_counter += 1
         self.env.scene.update(dt=getattr(self.env, "physics_dt", 0.0))
-        self.sync()
+        self.sync(overlay_applied_effort=True)
         return self.neural_inputs()["states"]
 
     def refresh_policy_mdp(self, dt: float) -> None:

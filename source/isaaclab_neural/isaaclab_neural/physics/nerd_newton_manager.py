@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any, ClassVar
 
 import torch
 import warp as wp
@@ -26,6 +27,8 @@ class NewtonNerdManager(NewtonManager):
     _nerd_contact_adapter = None
     _nerd_active: bool = False
     _neural_model_loading_deferred: bool = False
+    _applied_effort_scenes: ClassVar[list[Any]] = []
+    _skip_applied_effort_overlay: ClassVar[bool] = False
 
     _UPSTREAM_SYNC_ATTRS = (
         "_builder",
@@ -56,6 +59,8 @@ class NewtonNerdManager(NewtonManager):
     def _solver_specific_clear(cls) -> None:
         cls._nerd_contact_adapter = None
         cls._nerd_active = False
+        cls._applied_effort_scenes = []
+        cls._skip_applied_effort_overlay = False
 
     @classmethod
     @contextmanager
@@ -240,6 +245,42 @@ class NewtonNerdManager(NewtonManager):
             return cls._contacts
 
     @classmethod
+    def register_applied_effort_scene(cls, scene: Any) -> None:
+        """Register a scene supplying implicit-actuator effort for neural input.
+
+        Args:
+            scene: Interactive scene containing the controlled articulations.
+        """
+        if scene is not None and scene not in cls._applied_effort_scenes:
+            cls._applied_effort_scenes.append(scene)
+
+    @classmethod
+    def _run_post_actuator_hooks(cls) -> None:
+        for callback in cls._post_actuator_callbacks:
+            callback()
+        cls._overlay_applied_effort_into_joint_f()
+
+    @classmethod
+    @contextmanager
+    def without_applied_effort_overlay(cls) -> Iterator[None]:
+        """Preserve caller-supplied joint forces during dataset evaluation."""
+        previous = cls._skip_applied_effort_overlay
+        cls._skip_applied_effort_overlay = True
+        try:
+            yield
+        finally:
+            cls._skip_applied_effort_overlay = previous
+
+    @classmethod
+    def _overlay_applied_effort_into_joint_f(cls) -> None:
+        if not cls._nerd_active or cls._skip_applied_effort_overlay:
+            return
+        from isaaclab_neural.physics.applied_joint_f import copy_scene_applied_effort_into_sim_joint_f
+
+        for scene in cls._applied_effort_scenes:
+            copy_scene_applied_effort_into_sim_joint_f(scene)
+
+    @classmethod
     def _simulate_full(cls) -> None:
         if not cls._nerd_active:
             super()._simulate_full()
@@ -255,8 +296,7 @@ class NewtonNerdManager(NewtonManager):
             with step_profile.section("actuator"):
                 if cls._adapter is not None:
                     cls._adapter.step(cls._state_0, cls._control, physics_dt)
-                for cb in cls._post_actuator_callbacks:
-                    cb()
+                cls._run_post_actuator_hooks()
 
             cls._run_solver_substeps(contacts)
 
@@ -270,6 +310,8 @@ class NewtonNerdManager(NewtonManager):
             return
 
         contacts = cls._prepare_nerd_contacts()
+        if not cls._skip_applied_effort_overlay:
+            cls._overlay_applied_effort_into_joint_f()
         cls._run_solver_substeps(contacts)
         cls._update_sensors(contacts)
         cls._sync_upstream_newton_state()

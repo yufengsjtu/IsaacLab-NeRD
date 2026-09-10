@@ -35,6 +35,9 @@ class NeuralEnvAdapter:
         self.env = env
         self.manager = manager
         self.isaaclab_env = self._resolve_isaaclab_env(env)
+        register_scene = getattr(self.manager, "register_applied_effort_scene", None)
+        if callable(register_scene):
+            register_scene(getattr(self.isaaclab_env, "scene", None))
         if patch_reset:
             self.install_reset_patch()
 

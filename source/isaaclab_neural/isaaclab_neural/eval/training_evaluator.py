@@ -692,7 +692,12 @@ class TrainingRolloutEvaluator:
         manager = adapter.manager
         joint_f = joint_f.to(device=self.device, dtype=torch.float32)
         manager._control.joint_f.assign(wp.from_torch(joint_f.reshape(-1)))
-        manager._simulate_physics_only()
+        skip_overlay = getattr(manager, "without_applied_effort_overlay", None)
+        if callable(skip_overlay):
+            with skip_overlay():
+                manager._simulate_physics_only()
+        else:
+            manager._simulate_physics_only()
         env = adapter.isaaclab_env
         if hasattr(env, "scene"):
             env.scene.update(dt=getattr(env, "physics_dt", 0.0))
