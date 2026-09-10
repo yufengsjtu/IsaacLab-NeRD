@@ -20,8 +20,9 @@ PRESET_DIR = REPO_ROOT / "osmo_scripts" / "presets"
 TRAIN_CFG_DIR = REPO_ROOT / "source" / "isaaclab_neural" / "isaaclab_neural" / "train" / "cfg" / "G1"
 FORMAL_PRESET = "g1_newton_native_shared_per_body.yaml"
 PERTURB_PRESET = "g1_newton_native_shared_per_body_perturb.yaml"
+POLICY_NOISE_PRESET = "g1_newton_native_shared_per_body_policy_noise.yaml"
 SMOKE_PRESET = "g1_newton_native_smoke.yaml"
-G1_PRESETS = (FORMAL_PRESET, PERTURB_PRESET, SMOKE_PRESET)
+G1_PRESETS = (FORMAL_PRESET, PERTURB_PRESET, POLICY_NOISE_PRESET, SMOKE_PRESET)
 G1_IMAGE = "docker.io/rowany28070/isaac-lab-nerd:g1-develop"
 
 
@@ -179,6 +180,59 @@ def test_g1_perturb_preset_trains_only_pool_perturb(monkeypatch: pytest.MonkeyPa
     }
     assert float(train_cfg["algorithm"]["optimizer"]["lr_start"]) == 1.0e-3
     assert train_cfg["algorithm"]["num_iters_per_epoch"] == 2500
+    assert train_cfg["algorithm"]["batch_size"] == 1024
+    assert train_cfg["network"]["model"]["mlp"]["layer_sizes"] == [128]
+    assert train_cfg["algorithm"]["eval"]["dataset_path"].endswith("dataset_valid.hdf5")
+    assert train_cfg["algorithm"]["eval"]["passive"] is False
+
+
+def test_g1_policy_noise_preset_trains_policy_and_noise(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.syspath_prepend(str(REPO_ROOT / "osmo_scripts"))
+    from lib.g1_dataset_mix import mix_train_dataset_entries, mix_valid_dataset_entries
+    from run_experiment import parse_dataset_specs
+
+    preset = _load_yaml(PRESET_DIR / POLICY_NOISE_PRESET)
+    experiment = preset["experiment"]
+    assert experiment["dataset_mix"]["ratios"] == [1, 0, 0, 1, 0, 0]
+    assert experiment["dataset_mix"]["reset_trajectory_length"] == 500
+    assert "policy-noise-20m-1499-stock-holdhand" in preset["workflow"]["dataset_subdir"]
+    specs = parse_dataset_specs(experiment)
+    by_name = {spec.filename: spec for spec in specs}
+    train_names = [spec.filename for spec in specs if spec.split == "train"]
+    assert train_names == ["dataset_policy_train.hdf5", "dataset_policy_noisy_train.hdf5"]
+    assert by_name["dataset_policy_train.hdf5"].num_transitions == 10_000_000
+    assert by_name["dataset_policy_noisy_train.hdf5"].num_transitions == 10_000_000
+    assert by_name["dataset_policy_noisy_train.hdf5"].policy_action_noise_std == 0.2
+    assert by_name["dataset_policy_noisy_train.hdf5"].clip_policy_action_noise is False
+    assert "dataset_policy_pool.hdf5" not in by_name
+    assert "dataset_pool_perturbed_random_train.hdf5" not in by_name
+    assert "dataset_policy_train_ckpt_1499.hdf5" not in by_name
+    valid_names = [spec.filename for spec in specs if spec.split == "valid"]
+    assert valid_names == [
+        "dataset_valid.hdf5",
+        "dataset_random_action_valid.hdf5",
+        "dataset_zero_action_valid.hdf5",
+        "dataset_policy_noisy_valid.hdf5",
+        "dataset_deployment_policy_valid.hdf5",
+    ]
+    train_cfg = _load_yaml(REPO_ROOT / experiment["train_cfg"])
+    expected = mix_train_dataset_entries(experiment)
+    actual = train_cfg["algorithm"]["dataset"]["train_datasets"]
+    assert set(actual) == {"policy_trajectory", "policy_noisy_trajectory"}
+    assert set(actual) == set(expected)
+    assert actual["policy_trajectory"]["max_capacity"] == 10_000_000
+    assert actual["policy_noisy_trajectory"]["max_capacity"] == 10_000_000
+    assert _normalize_weights(actual) == pytest.approx(_normalize_weights(expected))
+    assert train_cfg["algorithm"]["dataset"]["valid_datasets"] == mix_valid_dataset_entries(experiment)
+    assert set(train_cfg["algorithm"]["dataset"]["valid_datasets"]) >= {
+        "random_action_trajectory",
+        "zero_action_trajectory",
+        "policy_noisy_trajectory",
+        "deployment_policy_trajectory",
+    }
+    assert "pool_perturbed_random" not in train_cfg["algorithm"]["dataset"]["valid_datasets"]
+    assert float(train_cfg["algorithm"]["optimizer"]["lr_start"]) == 1.0e-3
+    assert train_cfg["algorithm"]["num_iters_per_epoch"] == 1250
     assert train_cfg["algorithm"]["batch_size"] == 1024
     assert train_cfg["network"]["model"]["mlp"]["layer_sizes"] == [128]
     assert train_cfg["algorithm"]["eval"]["dataset_path"].endswith("dataset_valid.hdf5")
@@ -391,13 +445,17 @@ def test_g1_presets_parse_gain_ranges_with_osmo_yaml_loader(monkeypatch: pytest.
         workflow = preset["workflow"]
         assert experiment["kp_scale_range"] == [0.8, 1.2]
         assert experiment["kd_scale_range"] == [0.8, 1.2]
-        assert experiment["dataset_mix"]["perturbed_random_fraction"] == 1.0
+        assert experiment["dataset_mix"].get("perturbed_random_fraction", 1.0) == 1.0
         assert experiment["dataset_mix"]["valid"]["always"] == ["policy", "random", "zero", "deployment"]
         assert workflow["image"] == G1_IMAGE
         assert "registry_credential" not in workflow
         if name == PERTURB_PRESET:
             assert experiment["dataset_mix"]["ratios"] == [0, 0, 0, 0, 0, 1]
             assert experiment["dataset_mix"]["perturbed_trajectory_length"] == 100
+            assert experiment["dataset_mix"]["reset_trajectory_length"] == 500
+            assert experiment["dataset_mix"]["valid"]["transitions"] == 250000
+        elif name == POLICY_NOISE_PRESET:
+            assert experiment["dataset_mix"]["ratios"] == [1, 0, 0, 1, 0, 0]
             assert experiment["dataset_mix"]["reset_trajectory_length"] == 500
             assert experiment["dataset_mix"]["valid"]["transitions"] == 250000
         else:

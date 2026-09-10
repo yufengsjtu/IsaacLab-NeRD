@@ -1,0 +1,57 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# 50/50 clean teacher policy + policy-action-noise. No checkpoint mix or
+# pool-perturb. Independent cache from the default 20M mix.
+
+workflow:
+  base_name: g1-newton-native-shared-per-body-policy-noise
+  dataset_subdir: g1-newton-native-contact-tokens-v3-active-policy-noise-20m-1499-stock-holdhand
+  image: docker.io/rowany28070/isaac-lab-nerd:g1-develop
+
+resources:
+  num_gpu: 8
+  num_cpu: 80
+  memory: 512Gi
+  storage: 512Gi
+  platform: ovx-l40s
+
+experiment:
+  env_name: G1-Native-ContactTokens
+  robot_name: G1
+  data_gen_task: Isaac-Velocity-Flat-G1-Dataset-Gen-v0
+  deployment_task: Isaac-Velocity-Flat-G1
+  policy_checkpoint: ./pretrained/control_policy/g1_flat_terrain/model_1499.pt
+  require_policy_checkpoint: true
+  train_task: Isaac-Velocity-Flat-G1-NeRD-v0
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/G1/transformer_native_shared_per_body_policy_noise.yaml
+  num_gpus: 8
+  contact_mode: newton_native
+  contact_representation: contact_tokens
+  contact_filter: solver_active
+  num_contacts_per_env: 64
+  max_contact_tokens: 64
+  contact_packing_policy: body_round_robin_pair_atomic
+  sample_mode: action
+  initial_states_source: env
+  randomize_pd_gains: true
+  kp_scale_range: [0.8, 1.2]
+  kd_scale_range: [0.8, 1.2]
+  train_transitions: 20000000
+  data_gen_num_envs: 1024
+  train_num_envs: 64
+  # 250 Lab-policy control ticks * 4 physics frames.
+  trajectory_length: 1000
+  write_chunk_transitions: 819200
+  update_dataset_statistics: true
+  # policy, random, zero, policy_noise, rl_ckpts, policy_pool_perturbed
+  dataset_mix:
+    ratios: [1, 0, 0, 1, 0, 0]
+    reset_trajectory_length: 500
+    # Valid always includes walking policy plus env-reset random/zero and
+    # stock G1 deployment. Train mix extra also adds policy-noise valid.
+    valid:
+      transitions: 250000
+      always: [policy, random, zero, deployment]
