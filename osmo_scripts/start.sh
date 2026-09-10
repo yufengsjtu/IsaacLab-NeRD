@@ -40,6 +40,7 @@ OSMO_STORAGE_OVERRIDE=""
 OSMO_PLATFORM_OVERRIDE=""
 OSMO_POOL_OVERRIDE=""
 OSMO_PRIORITY_OVERRIDE=""
+OSMO_IMAGE_OVERRIDE=""
 
 NGC_API_KEY="${NGC_API_KEY:-}"
 NVDATASET_TENANTID="${NVDATASET_TENANTID:-}"
@@ -73,6 +74,7 @@ Common options:
   --platform NAME            Override preset OSMO platform
   --pool NAME                OSMO pool passed to validate and submit
   --priority LEVEL           Submit priority: HIGH, NORMAL, or LOW
+  --image NAME               Override preset container image
   --enable-wandb             Enable Weights & Biases logging in the OSMO pod
   --wandb-project NAME       W&B project (default: nerd-newton)
   --wandb-exp-name NAME      W&B run name (default: workflow/dataset subdir)
@@ -178,6 +180,10 @@ while (($#)); do
             ;;
         --priority)
             OSMO_PRIORITY_OVERRIDE="${2:?Missing value for --priority}"
+            shift 2
+            ;;
+        --image)
+            OSMO_IMAGE_OVERRIDE="${2:?Missing value for --image}"
             shift 2
             ;;
         --enable-wandb)
@@ -300,6 +306,9 @@ if [[ -n "$OSMO_STORAGE_OVERRIDE" ]]; then
 fi
 if [[ -n "$OSMO_PLATFORM_OVERRIDE" ]]; then
     resolve_args+=(--platform "$OSMO_PLATFORM_OVERRIDE")
+fi
+if [[ -n "$OSMO_IMAGE_OVERRIDE" ]]; then
+    resolve_args+=(--image "$OSMO_IMAGE_OVERRIDE")
 fi
 eval "$(python3 "$SCRIPT_DIR/lib/preset.py" resolve-submit "${resolve_args[@]}")"
 
@@ -450,6 +459,9 @@ SUBMIT_ARGS=(
     "nvdataset_output_description=$NVDATASET_OUTPUT_DESCRIPTION"
     "nvdataset_index_url=$NVDATASET_INDEX_URL"
 )
+if [[ -n "${OSMO_IMAGE:-}" ]]; then
+    SUBMIT_ARGS+=("image=$OSMO_IMAGE")
+fi
 if [[ "$ENABLE_WANDB" == "1" ]]; then
     SUBMIT_ARGS+=(
         "enable_wandb=true"
@@ -468,7 +480,7 @@ if [[ -n "$OSMO_PRIORITY_OVERRIDE" ]]; then
     OSMO_SUBMIT_ONLY_ARGS+=(--priority "$OSMO_PRIORITY_OVERRIDE")
 fi
 
-echo "=== Resolved OSMO resources: gpu=$OSMO_NUM_GPU cpu=$OSMO_NUM_CPU memory=$OSMO_MEMORY storage=$OSMO_STORAGE platform=$OSMO_PLATFORM pool=${OSMO_POOL_OVERRIDE:-<default>} ==="
+echo "=== Resolved OSMO resources: gpu=$OSMO_NUM_GPU cpu=$OSMO_NUM_CPU memory=$OSMO_MEMORY storage=$OSMO_STORAGE platform=$OSMO_PLATFORM pool=${OSMO_POOL_OVERRIDE:-<default>} image=${OSMO_IMAGE:-<workflow-default>} ==="
 
 echo "=== Validating OSMO workflow ==="
 osmo workflow validate "${SUBMIT_ARGS[@]}" "${OSMO_RESOURCE_ARGS[@]}" "${OSMO_ARGS[@]}" -- "$WORKFLOW_FILE"

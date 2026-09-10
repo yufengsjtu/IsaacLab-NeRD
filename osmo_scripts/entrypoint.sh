@@ -1,5 +1,6 @@
 #!/bin/bash
-# OSMO task entrypoint. Downloads code/data, runs the selected preset, and uploads output.
+# OSMO task entrypoint. Downloads code/data, overlays the uploaded Isaac Lab
+# tree on the container image, runs the selected preset, and uploads output.
 
 set -euo pipefail
 
@@ -39,16 +40,57 @@ write_shell_exports() {
 
 install_python_shims() {
     local isaacsim_python="/isaac-sim/python.sh"
+    local venv_root="${VIRTUAL_ENV:-}"
+    local sim_root lab_root env_site
 
-    # Isaac Sim images often expose Python only through python.sh. Use wrapper
+    mkdir -p /tmp/shims
+
+    # Isaac Lab 3 docker images install lockfile deps into /opt/isaaclab-venv.
+    # Kit's python.sh does not see those packages (for example lazy_loader), so
+    # prefer the venv whenever it exists.
+    if [[ -z "$venv_root" && -x /opt/isaaclab-venv/bin/python ]]; then
+        venv_root="/opt/isaaclab-venv"
+    fi
+    if [[ -n "$venv_root" && -x "$venv_root/bin/python" ]]; then
+        export VIRTUAL_ENV="$venv_root"
+        export PATH="$venv_root/bin:$PATH"
+        hash -r
+        lab_root="${ISAACLAB_PATH:-/workspace/isaaclab}"
+        sim_root="${ISAACSIM_ROOT_PATH:-/isaac-sim}"
+        if [[ -d "$lab_root/_isaac_sim" ]]; then
+            sim_root="$lab_root/_isaac_sim"
+        fi
+        set +u
+        if [[ -f "$sim_root/setup_conda_env.sh" ]]; then
+            # shellcheck disable=SC1091
+            . "$sim_root/setup_conda_env.sh" >/dev/null 2>&1 || true
+        elif [[ -f "$sim_root/setup_python_env.sh" ]]; then
+            export ISAAC_PATH="$sim_root"
+            export CARB_APP_PATH="$ISAAC_PATH/kit"
+            export EXP_PATH="$ISAAC_PATH/apps"
+            # shellcheck disable=SC1091
+            . "$sim_root/setup_python_env.sh" >/dev/null 2>&1 || true
+            env_site="$(
+                "$venv_root/bin/python" -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || true
+            )"
+            if [[ -n "$env_site" ]]; then
+                export PYTHONPATH="${env_site}${PYTHONPATH:+:$PYTHONPATH}"
+            fi
+        fi
+        set -u
+        echo "Using Isaac Lab image venv: $venv_root/bin/python"
+        return
+    fi
+
+    # Older images often expose Python only through python.sh. Use wrapper
     # scripts instead of symlinks because python.sh resolves sidecar paths from
     # its own executable directory.
     if [[ -x "$isaacsim_python" ]]; then
-        mkdir -p /tmp/shims
         printf '#!/bin/bash\nexec "%s" "$@"\n' "$isaacsim_python" > /tmp/shims/python3
         cp /tmp/shims/python3 /tmp/shims/python
         chmod +x /tmp/shims/python3 /tmp/shims/python
         export PATH="/tmp/shims:$PATH"
+        echo "Using Isaac Sim python.sh: $isaacsim_python"
     fi
 }
 
@@ -262,6 +304,12 @@ run_experiment() {
 
     cd "$PROJECT_ROOT"
     bash /tmp/init.sh
+    local local_pythonpath
+    local_pythonpath="$(
+        python3 osmo_scripts/lib/local_isaaclab.py export-pythonpath --project-root "$PROJECT_ROOT"
+    )"
+    export PYTHONPATH="${local_pythonpath}${PYTHONPATH:+:$PYTHONPATH}"
+    python3 osmo_scripts/lib/local_isaaclab.py verify --project-root "$PROJECT_ROOT"
     python3 osmo_scripts/run_experiment.py "${args[@]}"
 }
 

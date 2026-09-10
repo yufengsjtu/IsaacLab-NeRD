@@ -52,6 +52,7 @@ def resolve_submit(args: argparse.Namespace):
     _print_shell_assignment("WORKFLOW_BASE_NAME", workflow_base_name)
     _print_shell_assignment("WORKFLOW_NAME", workflow_name)
     _print_shell_assignment("DATASET_SUBDIR", dataset_subdir)
+    _print_shell_assignment("OSMO_IMAGE", _value(workflow.get("image", ""), getattr(args, "image", None)))
     _print_shell_assignment("OSMO_NUM_GPU", _value(resources.get("num_gpu", 1), args.num_gpu))
     _print_shell_assignment("OSMO_NUM_CPU", _value(resources.get("num_cpu", 8), args.num_cpu))
     _print_shell_assignment("OSMO_MEMORY", _value(resources.get("memory", "32Gi"), args.memory))
@@ -74,6 +75,7 @@ def main():
     resolve_parser.add_argument("--memory")
     resolve_parser.add_argument("--storage")
     resolve_parser.add_argument("--platform")
+    resolve_parser.add_argument("--image")
     resolve_parser.set_defaults(func=resolve_submit)
 
     args = parser.parse_args()

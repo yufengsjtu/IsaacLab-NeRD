@@ -1,19 +1,20 @@
 #!/bin/bash
-# In-pod environment setup for an image that already contains standard Isaac Lab
-# and its simulator/runtime dependencies. Only install IsaacLab-NeRD on top.
+# In-pod environment setup for an image that already contains simulator/runtime
+# dependencies. Reinstall the uploaded Isaac Lab tree so jobs import that copy
+# instead of the Isaac Lab distribution bundled in the container image.
 
 set -ex
 
+PROJECT_ROOT="${PROJECT_ROOT:-$HOME/code/IsaacLab-NeRD}"
 PIP="python3 -m pip install --no-cache-dir"
-PROJECT_ROOT="$HOME/code/IsaacLab-NeRD"
 
 if [ ! -d "$PROJECT_ROOT" ]; then
     echo "[FATAL] IsaacLab-NeRD source tree not found at $PROJECT_ROOT"
     exit 1
 fi
 
-# NeRD project as editable. Dependencies are expected to be provided by the image.
-$PIP -e "$PROJECT_ROOT/source/isaaclab_neural" --no-deps
+python3 "$PROJECT_ROOT/osmo_scripts/lib/local_isaaclab.py" bootstrap --project-root "$PROJECT_ROOT"
+python3 -c "import lazy_loader"
 
 # TensorBoard is used for live training monitoring and reading SummaryWriter logs.
 if ! python3 -c "import tensorboard" 2>/dev/null; then
