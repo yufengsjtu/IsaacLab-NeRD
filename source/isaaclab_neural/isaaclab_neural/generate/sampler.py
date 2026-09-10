@@ -72,6 +72,66 @@ def action_hold_period(
     raise ValueError(f"Unsupported step_granularity: {step_granularity}")
 
 
+def resolve_action_resample_period(
+    step_granularity: str,
+    env_decimation: int,
+    action_hold_frames: int,
+) -> int:
+    """Return how often to sample a new action.
+
+    Args:
+        step_granularity: ``frame`` counts physics frames; ``env`` counts
+            environment steps.
+        env_decimation: Control decimation from the Isaac Lab env config.
+        action_hold_frames: Extra hold in physics frames. ``0`` keeps the
+            default (``decimation`` for frame steps).
+
+    Returns:
+        Period between newly sampled actions. For ``frame`` granularity this is
+        physics frames; for ``env`` it is always 1.
+    """
+    if step_granularity != "frame":
+        return 1
+    decimation = max(1, int(env_decimation))
+    hold = int(action_hold_frames)
+    if hold <= 0:
+        return decimation
+    return max(decimation, hold)
+
+
+def should_refresh_policy_mdp(step: int, *, decimation: int) -> bool:
+    """Return whether policy collection should tick command and observation managers.
+
+    Reset already sampled a command and observation. Refresh after each later
+    control interval (``decimation`` physics frames), matching
+    :meth:`~isaaclab.envs.manager_based_rl_env.ManagerBasedRLEnv.step`. Do not
+    run termination or reset: success would truncate fixed-length clips.
+
+    Args:
+        step: Physics-frame index within the current clip.
+        decimation: Control interval in physics frames.
+
+    Returns:
+        True after each completed control interval, false on the reset frame.
+    """
+    if step <= 0:
+        return False
+    return step % max(1, int(decimation)) == 0
+
+
+def policy_control_interval_dt(env: Any, *, decimation: int) -> float:
+    """Return the policy control interval [s].
+
+    Prefers ``env.step_dt`` when it is positive. Otherwise uses
+    ``cfg.sim.dt * decimation``.
+    """
+    step_dt = float(getattr(env, "step_dt", 0.0) or 0.0)
+    if step_dt > 0.0:
+        return step_dt
+    physics_dt = float(getattr(getattr(getattr(env, "cfg", None), "sim", None), "dt", 0.0) or 0.0)
+    return physics_dt * max(1, int(decimation))
+
+
 def build_native_contact_rollout(
     frames: list[dict[str, torch.Tensor]],
     valid_trajectories: torch.Tensor,
@@ -385,14 +445,29 @@ class ActionTrajectorySampler:
         initial_states_pool: torch.Tensor | None = None,
         step_granularity: str = "frame",
         resample_actions_every_frame: bool = False,
+        action_hold_frames: int = 0,
         render: bool = False,
     ) -> dict[str, Any]:
-        """Collect trajectories with sampled actions."""
-        env_decimation = int(getattr(getattr(self.adapter.env, "cfg", None), "decimation", 1) or 1)
-        decimation = action_hold_period(
-            step_granularity,
-            env_decimation,
-            resample_actions_every_frame=resample_actions_every_frame,
+        """Collect trajectories with sampled actions.
+
+        Args:
+            num_transitions: Number of transitions to collect.
+            zero_actions: If True, apply zero actions instead of sampling.
+            initial_states_source: Trajectory reset source.
+            initial_states_pool: Optional pool when sampling from stored states.
+            step_granularity: ``frame`` steps physics once; ``env`` uses
+                ``env.step``.
+            resample_actions_every_frame: Sample every physics frame, overriding
+                action holding for pool-perturb collection.
+            action_hold_frames: Physics frames to hold each sampled action.
+                ``0`` holds only for the env control decimation.
+            render: If True, call ``env.render`` each frame.
+        """
+        env_decimation = max(1, int(getattr(getattr(self.adapter.env, "cfg", None), "decimation", 1)))
+        resample_period = (
+            1
+            if resample_actions_every_frame
+            else resolve_action_resample_period(step_granularity, env_decimation, action_hold_frames)
         )
         held_action: torch.Tensor | None = None
 
@@ -403,7 +478,7 @@ class ActionTrajectorySampler:
 
         def step_fn(step: int) -> torch.Tensor:
             nonlocal held_action
-            should_process_action = held_action is None or step_granularity == "env" or step % decimation == 0
+            should_process_action = held_action is None or step % resample_period == 0
             if should_process_action:
                 held_action = (
                     self.adapter.zero_action()
@@ -473,6 +548,7 @@ class ActionTrajectorySampler:
     ) -> dict[str, Any]:
         """Collect trajectories driven by a callable policy."""
         decimation = max(1, int(getattr(getattr(self.adapter.env, "cfg", None), "decimation", 1)))
+        control_dt = policy_control_interval_dt(self.adapter.env, decimation=decimation)
         policy_has_reset = hasattr(policy, "reset")
         policy_action: torch.Tensor | None = None
 
@@ -487,6 +563,8 @@ class ActionTrajectorySampler:
             nonlocal policy_action
             should_process_action = policy_action is None or step % decimation == 0
             if should_process_action:
+                if should_refresh_policy_mdp(step, decimation=decimation):
+                    self.adapter.refresh_policy_mdp(control_dt)
                 if env_wrapped is not None and hasattr(env_wrapped, "get_observations"):
                     obs = env_wrapped.get_observations()
                 elif hasattr(self.adapter.env, "get_observations"):

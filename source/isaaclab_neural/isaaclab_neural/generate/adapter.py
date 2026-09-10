@@ -508,6 +508,20 @@ class DataGenerationAdapter:
         self.sync()
         return self.neural_inputs()["states"]
 
+    def refresh_policy_mdp(self, dt: float) -> None:
+        """Refresh policy commands and observations without stepping or resetting.
+
+        Args:
+            dt: Elapsed control interval [s].
+        """
+        env = self.env
+        command_manager = getattr(env, "command_manager", None)
+        observation_manager = getattr(env, "observation_manager", None)
+        if command_manager is not None:
+            command_manager.compute(dt=dt)
+        if observation_manager is not None:
+            env.obs_buf = observation_manager.compute(update_history=True)
+
     def step_joint_f_frame(self, joint_f: torch.Tensor):
         """Step one physics frame with direct joint forces, bypassing actuators."""
         joint_f = joint_f.to(device=self.device, dtype=torch.float32)

@@ -265,6 +265,7 @@ def main(env_cfg, agent_cfg=None) -> None:
                 initial_states_pool=initial_states_pool,
                 step_granularity=args_cli.step_granularity,
                 resample_actions_every_frame=bool(args_cli.resample_actions_every_frame),
+                action_hold_frames=args_cli.action_hold_frames,
                 render=args_cli.render,
             )
 

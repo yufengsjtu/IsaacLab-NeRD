@@ -28,6 +28,9 @@ class _FakeTransformerSolver:
     def reset_states_history(self):
         self.states_history = deque(maxlen=self.num_states_history)
 
+    def _history_snapshot(self):
+        return TransformerNeuralSolver._history_snapshot(self)
+
     @staticmethod
     def embed_states(states):
         return states.clone()
@@ -149,3 +152,40 @@ def test_online_history_snapshot_does_not_alias_contact_buffers():
 
     assert torch.count_nonzero(snapshot["contact_tokens"]) == 0
     assert torch.count_nonzero(snapshot["contact_token_overflow"]) == 0
+
+
+def test_partial_history_fill_copies_current_snapshot_into_reset_rows():
+    solver = _FakeTransformerSolver()
+    solver.reset_states_history()
+    solver.states_embedding = torch.zeros(2, 4)
+    solver.states_history.append(TransformerNeuralSolver._history_snapshot(solver))
+    solver.states_history.append(TransformerNeuralSolver._history_snapshot(solver))
+    solver.states = torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+    solver.states_embedding = solver.states.clone()
+    solver.joint_f = torch.tensor([[9.0, 10.0], [11.0, 12.0]])
+
+    TransformerNeuralSolver._fill_history_rows_from_current_state(solver, torch.tensor([1]))
+
+    for entry in solver.states_history:
+        assert torch.equal(entry["states"][0], torch.zeros(4))
+        assert torch.equal(entry["joint_f"][0], torch.zeros(2))
+        assert torch.equal(entry["states"][1], solver.states[1])
+        assert torch.equal(entry["joint_f"][1], solver.joint_f[1])
+
+
+def test_partial_history_fill_cannot_mutate_inference_mode_clones():
+    solver = _FakeTransformerSolver()
+    solver.reset_states_history()
+    solver.states_embedding = torch.zeros(2, 4)
+    with torch.inference_mode():
+        solver.states_history.append(TransformerNeuralSolver._history_snapshot(solver))
+    solver.states = torch.ones(2, 4)
+    solver.states_embedding = torch.ones(2, 4)
+    solver.joint_f = torch.ones(2, 2)
+
+    try:
+        TransformerNeuralSolver._fill_history_rows_from_current_state(solver, torch.tensor([0]))
+    except RuntimeError as error:
+        assert "inference" in str(error).lower()
+        return
+    raise AssertionError("Expected inplace update to inference-mode history tensors to fail.")

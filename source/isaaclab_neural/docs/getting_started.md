@@ -25,6 +25,16 @@ A NeRD experiment has four stages:
 Start with [Cartpole](cartpole.md) to verify the installation. Continue with
 [Anymal-C](anymal.md) for contact-aware dynamics.
 
+## Dataset collection intervals
+
+Physics-frame action collection holds each random action for the environment's
+control decimation by default. `--action-hold-frames N` extends that hold to at
+least `N` physics frames. Environment-step collection ignores this option.
+Policy collection refreshes commands and observations once per control interval
+without running episode terminations or resets inside a fixed-length clip.
+Regenerate policy datasets collected before this refresh was implemented rather
+than reusing cached trajectories with stale observations.
+
 ## Contact configuration
 
 Use `contact_mode: newton_native` for every new configuration.

@@ -310,6 +310,7 @@ class NewtonNerdManager(NewtonManager):
         if not cls._nerd_active or cls._solver is None:
             return
 
+        cls.invalidate_fk()
         cls.forward()
         cls.sync_neural_solver(update_history=False)
 
