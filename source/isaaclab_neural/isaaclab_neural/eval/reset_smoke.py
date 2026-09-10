@@ -215,6 +215,7 @@ def run_partial_history_reset_smoke(env, args: argparse.Namespace) -> None:
         return
 
     history_before = clone_tensors(list(solver.states_history))
+    snapshot = clone_tensors(solver._history_snapshot())
     reset_env_ids = torch.arange(0, env.num_envs, 2, device=env.device, dtype=torch.long)
     keep_env_ids = torch.arange(1, env.num_envs, 2, device=env.device, dtype=torch.long)
 
@@ -232,7 +233,7 @@ def run_partial_history_reset_smoke(env, args: argparse.Namespace) -> None:
                     atol=args.atol,
                     rtol=args.rtol,
                 )
-            expected_reset = torch.zeros_like(after_value[reset_env_ids])
+            expected_reset = snapshot[key][reset_env_ids]
             assert_tensors_close(
                 after_value[reset_env_ids],
                 expected_reset,
