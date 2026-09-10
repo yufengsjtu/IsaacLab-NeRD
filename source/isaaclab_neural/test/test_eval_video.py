@@ -76,8 +76,9 @@ def test_nerd_video_opens_window_when_viz_newton_is_explicit(tmp_path) -> None:
     assert args.visualizer == ["newton_gl"]
 
 
-def test_alias_vis_is_accepted_as_viz() -> None:
-    parser = argparse.ArgumentParser()
+@pytest.mark.parametrize("allow_abbrev", [True, False])
+def test_alias_vis_is_accepted_as_viz(allow_abbrev) -> None:
+    parser = argparse.ArgumentParser(allow_abbrev=allow_abbrev)
     from isaaclab_neural.eval.eval import _alias_vis_as_viz
 
     from isaaclab.app import add_launcher_args
@@ -95,3 +96,33 @@ def test_nerd_video_rejects_explicit_viz_none(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="--viz none"):
         configure_eval_video(env_cfg, args)
+
+
+def test_policy_evaluation_leaves_mutable_environment_history(monkeypatch) -> None:
+    import torch
+    from isaaclab_neural.eval import eval as evaluation
+
+    history = []
+    policy_modes = []
+
+    def policy(obs):
+        policy_modes.append(torch.is_inference_mode_enabled())
+        return obs.clone()
+
+    def step(action):
+        history.append(action.clone())
+        return torch.zeros(1, 1), torch.zeros(1), torch.zeros(1, dtype=torch.bool), {}
+
+    env = SimpleNamespace(get_observations=lambda: torch.zeros(1, 1), step=step, close=lambda: None)
+    monkeypatch.setattr(evaluation, "load_saved_agent_cfg_for_policy", lambda *args, **kwargs: object())
+    monkeypatch.setattr(evaluation, "build_policy_env", lambda *args: (env, policy, None))
+    monkeypatch.setattr(evaluation, "reset_policy", lambda *args: None)
+    monkeypatch.setattr(evaluation, "save_reward_plot", lambda *args: None)
+    args = argparse.Namespace(policy_checkpoint="unused", device="cpu", seed=0, task="test", num_envs=1, num_steps=2)
+
+    evaluation.run_policy(env, None, args)
+
+    assert policy_modes == [True, True]
+    for entry in history:
+        entry.index_copy_(0, torch.tensor([0]), torch.ones(1, 1))
+        torch.testing.assert_close(entry, torch.ones(1, 1))

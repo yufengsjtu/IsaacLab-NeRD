@@ -7,3 +7,4 @@ Fixed
   visualization. Recording stayed headless unless a visualizer was explicitly
   requested. A zero video interval recorded a single clip.
 * Fixed importing evaluation helpers to avoid executing the evaluation CLI.
+* Fixed the ``--vis`` alias to work when argument abbreviation was disabled.

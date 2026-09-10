@@ -113,6 +113,7 @@ def _alias_vis_as_viz(parser: argparse.ArgumentParser) -> None:
     for action in parser._actions:
         if "--viz" in action.option_strings and "--vis" not in action.option_strings:
             action.option_strings.append("--vis")
+            parser._option_string_actions["--vis"] = action
             return
 
 
