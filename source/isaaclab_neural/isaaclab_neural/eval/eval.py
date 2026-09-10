@@ -61,9 +61,32 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
             "neural solvers, which always run physics eagerly."
         ),
     )
-    parser.add_argument("--video", action="store_true", default=False, help="Record eval rollout video.")
-    parser.add_argument("--video-length", "--video_length", dest="video_length", type=int, default=400)
-    parser.add_argument("--video-interval", "--video_interval", dest="video_interval", type=int, default=2000)
+    parser.add_argument(
+        "--video",
+        action="store_true",
+        default=False,
+        help=(
+            "Record an eval mp4. NeRD tasks capture Newton GL (not Kit/RTX). "
+            "Recording-only runs stay headless; pass --viz newton to open a live window. "
+            "Pass --viz kit only if Kit recording is required."
+        ),
+    )
+    parser.add_argument(
+        "--video-length",
+        "--video_length",
+        dest="video_length",
+        type=int,
+        default=400,
+        help="Env steps captured per clip. Clips shorter than this are flushed on env.close().",
+    )
+    parser.add_argument(
+        "--video-interval",
+        "--video_interval",
+        dest="video_interval",
+        type=int,
+        default=0,
+        help="Start a new clip every N env steps. 0 records a single clip from the first step.",
+    )
     parser.add_argument("--video-dir", "--video_dir", dest="video_dir", type=str, default="./videos/eval")
     parser.add_argument(
         "--plot-rewards",
@@ -81,7 +104,16 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     from isaaclab.app import add_launcher_args
 
     add_launcher_args(parser)
+    _alias_vis_as_viz(parser)
     return parser.parse_known_args()
+
+
+def _alias_vis_as_viz(parser: argparse.ArgumentParser) -> None:
+    """Accept ``--vis`` as ``--viz``. Hydra would otherwise swallow the unknown flag."""
+    for action in parser._actions:
+        if "--viz" in action.option_strings and "--vis" not in action.option_strings:
+            action.option_strings.append("--vis")
+            return
 
 
 def apply_solver_overrides(solver_cfg: NerdSolverCfg, args: argparse.Namespace) -> None:
@@ -136,6 +168,128 @@ def configure_env(env_cfg, args: argparse.Namespace) -> None:
     physics_cfg = getattr(getattr(env_cfg, "sim", None), "physics", None)
     if args.checkpoint is None and isinstance(physics_cfg, NerdNewtonCfg):
         apply_solver_overrides(physics_cfg.solver_cfg, args)
+
+
+_NEWTON_CAPTURE_VISUALIZERS = frozenset({"newton_gl", "newton", "newton_rtx"})
+_NO_CAPTURE_VISUALIZERS = frozenset({"rerun", "viser"})
+
+
+def configure_eval_video(env_cfg, args: argparse.Namespace) -> None:
+    """Enable Isaac Lab 3 step-driven video recording when ``--video`` is set.
+
+    Gymnasium ``RecordVideo`` plus ``render_mode=rgb_array`` no longer captures
+    frames. Recording is configured on ``env_cfg.video_recorders`` before launch.
+
+    NeRD/Newton eval records from the Newton GL visualizer. The Isaac Lab RL
+    ``--video`` helpers inject Kit so the launcher includes RTX; that Kit
+    startup crashed on a hybrid NVIDIA+Intel Vulkan host. Pass ``--viz kit``
+    only if Kit recording is required.
+    """
+    if not args.video:
+        return
+    if args.video_length <= 0:
+        raise ValueError("--video-length must be positive.")
+    if args.video_interval < 0:
+        raise ValueError("--video-interval must be >= 0.")
+
+    video_dir = str(Path(args.video_dir).expanduser())
+    Path(video_dir).mkdir(parents=True, exist_ok=True)
+
+    viz_explicitly_none = (
+        getattr(args, "visualizer_explicit", False) and getattr(args, "visualizer", "not_none") is None
+    )
+    if viz_explicitly_none:
+        raise ValueError(
+            "--video is not compatible with --viz none: there is no active visualizer to record from. "
+            "Remove --viz none, or pass --viz newton_gl (NeRD default) or --viz kit."
+        )
+
+    requested = _requested_visualizers(args)
+    user_requested_window = bool(getattr(args, "visualizer_explicit", False)) and bool(requested)
+    physics_cfg = getattr(getattr(env_cfg, "sim", None), "physics", None)
+    use_newton_capture = (
+        isinstance(physics_cfg, NerdNewtonCfg)
+        and "kit" not in requested
+        and not any(name in _NO_CAPTURE_VISUALIZERS for name in requested)
+    )
+    if use_newton_capture:
+        source_type = next((name for name in requested if name in _NEWTON_CAPTURE_VISUALIZERS), "newton_gl")
+        _configure_newton_capture_eval_video(env_cfg, args, video_dir, source_type, headless=not user_requested_window)
+        return
+
+    from isaaclab_rl.entrypoints.common import (
+        apply_video_recording,
+        enable_cameras_for_video,
+        pre_launch_video_config,
+    )
+
+    enable_cameras_for_video(args)
+    pre_launch_video_config(env_cfg, args_cli=args)
+    apply_video_recording(env_cfg, video_dir, args, subdir="eval")
+    for recorder_cfg in getattr(env_cfg, "video_recorders", []) or []:
+        recorder_cfg.output_dir = video_dir
+    print(f"[video] recording eval rollout to: {video_dir}")
+
+
+def _requested_visualizers(args: argparse.Namespace) -> list[str]:
+    raw = getattr(args, "visualizer", None)
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [part.strip() for part in raw.split(",") if part.strip()]
+    return [str(part).strip() for part in raw if str(part).strip()]
+
+
+def _canonical_newton_visualizer(name: str) -> str:
+    if name == "newton":
+        return "newton_gl"
+    return name
+
+
+def _configure_newton_capture_eval_video(
+    env_cfg, args: argparse.Namespace, video_dir: str, source_type: str, *, headless: bool
+) -> None:
+    """Record from Newton GL/RTX so eval does not launch Kit.
+
+    ``headless=True`` writes the mp4 without a window. Pass ``--viz newton`` to
+    set ``headless=False`` and open the live viewer while recording.
+    """
+    from isaaclab_visualizers.newton import NewtonGLVisualizerCfg, NewtonRTXVisualizerCfg
+
+    from isaaclab.envs.utils.video_recorder_cfg import VideoRecorderCfg
+
+    canonical = _canonical_newton_visualizer(source_type)
+    args.enable_cameras = False
+    args.visualizer = [canonical]
+    args.visualizer_explicit = True
+
+    sim_cfg = env_cfg.sim
+    default_viz = getattr(sim_cfg, "default_visualizer_cfg", None)
+    eye = getattr(default_viz, "eye", (3.5, 3.5, 3.5))
+    lookat = getattr(default_viz, "lookat", (0.0, 0.0, 0.0))
+    if not isinstance(getattr(sim_cfg, "visualizer_cfgs", None), list):
+        sim_cfg.visualizer_cfgs = []
+    existing = next(
+        (cfg for cfg in sim_cfg.visualizer_cfgs if getattr(cfg, "visualizer_type", None) == canonical),
+        None,
+    )
+    if existing is None:
+        viz_cls = NewtonRTXVisualizerCfg if canonical == "newton_rtx" else NewtonGLVisualizerCfg
+        sim_cfg.visualizer_cfgs.append(viz_cls(headless=headless, eye=eye, lookat=lookat))
+    else:
+        existing.headless = headless
+
+    env_cfg.video_recorders = [
+        VideoRecorderCfg(
+            source=f"visualizer:{canonical}",
+            output_dir=video_dir,
+            video_length=args.video_length,
+            video_interval=args.video_interval,
+            output_filename_prefix="eval",
+        )
+    ]
+    window = "off" if headless else "on"
+    print(f"[video] recording Newton {canonical} eval rollout to: {video_dir} (window={window})")
 
 
 def build_launch_cfg(env_cfg):
@@ -249,25 +403,12 @@ def reset_policy(policy, runner, dones: torch.Tensor) -> None:
 
 
 def wrap_record_video(env, args: argparse.Namespace):
-    """Wrap the environment with Gymnasium's video recorder when requested."""
-    if not args.video:
-        return env
-    if args.video_length <= 0:
-        raise ValueError("--video-length must be positive.")
-    if args.video_interval <= 0:
-        raise ValueError("--video-interval must be positive.")
+    """No-op kept for import compatibility.
 
-    import gymnasium as gym
-
-    video_folder = str(Path(args.video_dir).expanduser())
-    print(f"[video] recording eval rollout to: {video_folder}")
-    return gym.wrappers.RecordVideo(
-        env,
-        video_folder=video_folder,
-        step_trigger=lambda step: step % args.video_interval == 0,
-        video_length=args.video_length,
-        disable_logger=True,
-    )
+    Recording is configured on ``env_cfg.video_recorders`` before ``gym.make``.
+    """
+    del args
+    return env
 
 
 def save_reward_plot(reward_means: list[float], args: argparse.Namespace) -> None:
@@ -332,10 +473,14 @@ def run_policy(env, agent_cfg, args: argparse.Namespace) -> None:
     reward_means = []
     print(f"[eval] task={args.task}, num_envs={args.num_envs}, steps={args.num_steps}, action_source=rsl_rl")
     for step_id in range(args.num_steps):
+        # Only the policy forward belongs under inference_mode. env.step()
+        # clones Transformer history and later index_copy_s those rows on
+        # Reach/Lift success resets; mutating inference tensors raises
+        # "Inplace update to inference tensor".
         with torch.inference_mode():
             actions = policy(obs)
-            obs, rew, dones, extras = env.step(actions)
-            reset_policy(policy, runner, dones)
+        obs, rew, dones, extras = env.step(actions)
+        reset_policy(policy, runner, dones)
         reward_mean = float(torch.as_tensor(rew).float().mean())
         reward_means.append(reward_mean)
         print(
@@ -346,36 +491,38 @@ def run_policy(env, agent_cfg, args: argparse.Namespace) -> None:
     env.close()
 
 
-args_cli, hydra_args = parse_args()
-sys.argv = [sys.argv[0]] + hydra_args
+def _cli_main() -> None:
+    """Parse CLI arguments and launch evaluation. Importing this module is a no-op."""
+    args_cli, hydra_args = parse_args()
+    sys.argv = [sys.argv[0]] + hydra_args
 
+    @hydra_task_config(args_cli.task, args_cli.policy_agent if args_cli.policy_checkpoint is not None else "")
+    def main(env_cfg, agent_cfg) -> None:
+        configure_env(env_cfg, args_cli)
+        solver_cfg, legacy_use_cuda_graph = build_solver_cfg(args_cli)
+        apply_cuda_graph_override(env_cfg, args_cli, legacy_use_cuda_graph=legacy_use_cuda_graph)
+        configure_eval_video(env_cfg, args_cli)
 
-@hydra_task_config(args_cli.task, args_cli.policy_agent if args_cli.policy_checkpoint is not None else "")
-def main(env_cfg, agent_cfg) -> None:
-    configure_env(env_cfg, args_cli)
-    solver_cfg, legacy_use_cuda_graph = build_solver_cfg(args_cli)
-    apply_cuda_graph_override(env_cfg, args_cli, legacy_use_cuda_graph=legacy_use_cuda_graph)
+        from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
 
-    from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
+        from isaaclab.app import launch_simulation
 
-    from isaaclab.app import launch_simulation
+        with launch_simulation(build_launch_cfg(env_cfg), args_cli):
+            import gymnasium as gym
 
-    with launch_simulation(build_launch_cfg(env_cfg), args_cli):
-        import gymnasium as gym
+            gym_kwargs = {"cfg": env_cfg, "device": args_cli.device}
+            if solver_cfg is not None:
+                gym_kwargs["solver_cfg"] = solver_cfg
+            with newton_material_binding_api_autofix():
+                env = gym.make(args_cli.task, **gym_kwargs)
 
-        gym_kwargs = {"cfg": env_cfg, "device": args_cli.device}
-        if args_cli.video:
-            gym_kwargs["render_mode"] = "rgb_array"
-        if solver_cfg is not None:
-            gym_kwargs["solver_cfg"] = solver_cfg
-        with newton_material_binding_api_autofix():
-            env = wrap_record_video(gym.make(args_cli.task, **gym_kwargs), args_cli)
+            if args_cli.policy_checkpoint is None:
+                run_zero_action(env, args_cli)
+            else:
+                run_policy(env, agent_cfg, args_cli)
 
-        if args_cli.policy_checkpoint is None:
-            run_zero_action(env, args_cli)
-        else:
-            run_policy(env, agent_cfg, args_cli)
+    main()  # type: ignore[call-arg]
 
 
 if __name__ == "__main__":
-    main()  # type: ignore[call-arg]
+    _cli_main()

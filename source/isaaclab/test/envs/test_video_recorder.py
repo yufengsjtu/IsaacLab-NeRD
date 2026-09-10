@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 from isaaclab.envs.common import ViewerCfg
-from isaaclab.envs.utils.video_recorder import VideoRecorder, _parse_source
+from isaaclab.envs.utils.video_recorder import VideoRecorder, _import_image_sequence_clip, _parse_source
 from isaaclab.envs.utils.video_recorder_cfg import VideoRecorderCfg
 
 _FRAME = np.ones((8, 12, 3), dtype=np.uint8) * 128
@@ -104,6 +104,32 @@ def test_init_raises_import_error_when_moviepy_missing():
     with patch("isaaclab.envs.utils.video_recorder.ImageSequenceClip", None):
         with pytest.raises(ImportError, match="moviepy"):
             VideoRecorder(_cfg(), _make_env())
+
+
+def test_import_image_sequence_clip_accepts_moviepy_v2():
+    """moviepy 2 removed ``moviepy.editor``; the recorder must still resolve ImageSequenceClip."""
+    clip_cls = _import_image_sequence_clip()
+    if clip_cls is None:
+        pytest.skip("moviepy is not installed")
+    assert callable(clip_cls)
+
+
+def test_import_image_sequence_clip_falls_back_when_editor_missing(monkeypatch):
+    import builtins
+    from types import SimpleNamespace
+
+    dummy_clip = object()
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "moviepy.editor":
+            raise ImportError("no moviepy.editor")
+        if name == "moviepy" and fromlist and "ImageSequenceClip" in fromlist:
+            return SimpleNamespace(ImageSequenceClip=dummy_clip)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert _import_image_sequence_clip() is dummy_clip
 
 
 def test_init_continues_clip_index_after_existing_files(tmp_path):
