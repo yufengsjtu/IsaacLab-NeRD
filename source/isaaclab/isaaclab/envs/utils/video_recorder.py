@@ -19,13 +19,26 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-try:
-    from moviepy.editor import ImageSequenceClip
-except ImportError:
-    ImageSequenceClip = None  # type: ignore[assignment,misc]
-
 if TYPE_CHECKING:
     from .video_recorder_cfg import VideoRecorderCfg
+
+
+def _import_image_sequence_clip():
+    """Return ``ImageSequenceClip`` for moviepy 1.x (``moviepy.editor``) or 2.x."""
+    try:
+        from moviepy.editor import ImageSequenceClip as clip_cls
+
+        return clip_cls
+    except ImportError:
+        pass
+    try:
+        from moviepy import ImageSequenceClip as clip_cls
+    except ImportError:
+        return None
+    return clip_cls
+
+
+ImageSequenceClip = _import_image_sequence_clip()
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +85,7 @@ class VideoRecorder:
             )
 
         if ImageSequenceClip is None:
-            raise ImportError("moviepy is required for video recording. Install it with: pip install 'moviepy<2'")
+            raise ImportError("moviepy is required for video recording. Install it with: pip install moviepy")
 
         self.cfg = cfg
         self._env = env
