@@ -224,6 +224,30 @@ def test_action_hold_period_resamples_every_frame_for_pool_perturb():
     assert action_hold_period("frame", 4, resample_actions_every_frame=True) == 1
     assert action_hold_period("env", 4, resample_actions_every_frame=True) == 1
 
+    adapter = _DummyAdapter()
+    adapter.env.cfg = SimpleNamespace(decimation=4)
+    sampled = []
+    processed = []
+
+    def sample_action(low, high):
+        action = torch.full((2, 1), float(len(sampled) + 1))
+        sampled.append(action)
+        return action
+
+    adapter.sample_action = sample_action
+    adapter.step_action_frame = lambda action, *, process_action: processed.append(process_action)
+    sampler = G1TrajectorySampler(adapter, trajectory_length=6, data_device="cpu", hold_hand_actions=False)
+
+    def collect(num_transitions, **kwargs):
+        kwargs["pre_rollout_fn"]()
+        return torch.stack([kwargs["step_fn"](step) for step in range(num_transitions)])
+
+    sampler._sample_loop = collect
+    actions = sampler.sample_trajectories_action_mode(6, resample_actions_every_frame=True, action_hold_frames=20)
+
+    torch.testing.assert_close(actions[:, 0, 0], torch.arange(1, 7, dtype=torch.float32))
+    assert processed == [True] * 6
+
 
 def test_g1_hand_joint_indices_select_numbered_hand_joints():
     from isaaclab_neural.robots.g1 import g1_hand_joint_indices

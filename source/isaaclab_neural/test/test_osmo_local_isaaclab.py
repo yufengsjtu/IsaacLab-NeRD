@@ -170,3 +170,21 @@ print(spec.origin)
     origin = Path(result.stdout.strip()).resolve()
     assert origin.is_relative_to((project_root / "source" / "isaaclab").resolve())
     assert "image_site" not in origin.as_posix()
+
+
+def test_package_code_keeps_robot_assets_but_excludes_local_artifacts(tmp_path, monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
+    from lib import package_code
+
+    assets = [
+        Path("pretrained/control_policy/g1_flat_terrain/model.pt"),
+        Path("pretrained/control_policy/franka_reach/model.pt"),
+    ]
+    source = Path("source/isaaclab_neural/new_module.py")
+    artifacts = [Path("osmo_outputs/run/output.log"), Path(".worktree/other/source/test.py"), Path("imgui.ini")]
+    for path in [*assets, source, *artifacts]:
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text("test", encoding="utf-8")
+    monkeypatch.setattr(package_code, "_git_listed_files", lambda root: [source, *artifacts])
+
+    assert set(package_code.collect_packaged_files(tmp_path)) == {source, *assets}

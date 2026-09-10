@@ -28,8 +28,11 @@ EXCLUDED_TOP_LEVEL_DIRS = {
     "data",
     "logs",
     "outputs",
+    "osmo_outputs",
+    ".worktree",
 }
 EXCLUDED_GLOBS = (
+    "imgui.ini",
     ".env",
     ".env.*",
     "*credential*.json",
