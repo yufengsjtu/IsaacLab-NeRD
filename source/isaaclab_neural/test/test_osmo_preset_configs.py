@@ -35,7 +35,11 @@ def _load_yaml(path: Path) -> dict:
 
 
 def test_public_preset_surface_is_intentional() -> None:
-    assert {path.name for path in PRESET_DIR.glob("*.yaml")} == set(PUBLIC_PRESETS)
+    ablation_presets = {
+        "anymal_rough_newton_native_shared_per_body_contact_force_rope_active_filter.yaml",
+        "anymal_rough_newton_native_shared_per_body_contact_force_rope_active_filter_owner_body.yaml",
+    }
+    assert {path.name for path in PRESET_DIR.glob("*.yaml")} == set(PUBLIC_PRESETS) | ablation_presets
 
 
 def test_public_presets_have_valid_unique_training_mappings() -> None:
