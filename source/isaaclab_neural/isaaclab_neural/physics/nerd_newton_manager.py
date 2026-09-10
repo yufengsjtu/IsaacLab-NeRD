@@ -26,6 +26,8 @@ class NewtonNerdManager(NewtonManager):
     _nerd_contact_adapter = None
     _nerd_active: bool = False
     _neural_model_loading_deferred: bool = False
+    _applied_effort_scenes: list = []
+    _skip_applied_effort_overlay: bool = False
 
     _UPSTREAM_SYNC_ATTRS = (
         "_builder",
@@ -56,6 +58,8 @@ class NewtonNerdManager(NewtonManager):
     def _solver_specific_clear(cls) -> None:
         cls._nerd_contact_adapter = None
         cls._nerd_active = False
+        cls._applied_effort_scenes = []
+        cls._skip_applied_effort_overlay = False
 
     @classmethod
     @contextmanager
@@ -240,6 +244,57 @@ class NewtonNerdManager(NewtonManager):
             return cls._contacts
 
     @classmethod
+    def register_applied_effort_scene(cls, scene) -> None:
+        """Record a scene whose articulations supply NeRD ``joint_f`` telemetry.
+
+        Implicit actuators leave Newton ``control.joint_f`` empty. After
+        actuator telemetry, NeRD copies ``applied_effort`` from these scenes
+        into each articulation's ``joint_f`` slice as neural-model input.
+        """
+        if scene is None:
+            return
+        if scene not in cls._applied_effort_scenes:
+            cls._applied_effort_scenes.append(scene)
+
+    @classmethod
+    def _run_post_actuator_hooks(cls) -> None:
+        """Run telemetry callbacks, then overlay shadow PD into ``control.joint_f``."""
+        for cb in cls._post_actuator_callbacks:
+            cb()
+        cls._overlay_applied_effort_into_joint_f()
+
+    @classmethod
+    @contextmanager
+    def without_applied_effort_overlay(cls) -> Iterator[None]:
+        """Skip shadow-PD overlay for callers that already wrote ``joint_f``.
+
+        Training 10-step dataset eval assigns recorded HDF5 ``joint_f`` then
+        calls :meth:`_simulate_physics_only`. Overlay would replace that
+        teacher signal with stale ``applied_effort``. Closed-loop ``env.step``
+        still overlays after actuators.
+        """
+        previous = cls._skip_applied_effort_overlay
+        cls._skip_applied_effort_overlay = True
+        try:
+            yield
+        finally:
+            cls._skip_applied_effort_overlay = previous
+
+    @classmethod
+    def _overlay_applied_effort_into_joint_f(cls) -> None:
+        """Copy ``applied_effort`` into Newton ``control.joint_f`` for NeRD input.
+
+        Must run only while the neural solver is active. Dataset-Gen uses
+        analytic MJWarp and overlays *after* the ground-truth step instead.
+        """
+        if not cls._nerd_active:
+            return
+        from isaaclab_neural.physics.applied_joint_f import copy_scene_applied_effort_into_sim_joint_f
+
+        for scene in cls._applied_effort_scenes:
+            copy_scene_applied_effort_into_sim_joint_f(scene)
+
+    @classmethod
     def _simulate_full(cls) -> None:
         if not cls._nerd_active:
             super()._simulate_full()
@@ -255,8 +310,7 @@ class NewtonNerdManager(NewtonManager):
             with step_profile.section("actuator"):
                 if cls._adapter is not None:
                     cls._adapter.step(cls._state_0, cls._control, physics_dt)
-                for cb in cls._post_actuator_callbacks:
-                    cb()
+                cls._run_post_actuator_hooks()
 
             cls._run_solver_substeps(contacts)
 
@@ -270,6 +324,12 @@ class NewtonNerdManager(NewtonManager):
             return
 
         contacts = cls._prepare_nerd_contacts()
+        # Parent ``step()`` already ran actuators and telemetry when this path
+        # is used (non-graphable explicit actuators). Overlay after those hooks.
+        # Training dataset eval writes recorded ``joint_f`` first and must not
+        # overlay; see :meth:`without_applied_effort_overlay`.
+        if not cls._skip_applied_effort_overlay:
+            cls._overlay_applied_effort_into_joint_f()
         cls._run_solver_substeps(contacts)
         cls._update_sensors(contacts)
         cls._sync_upstream_newton_state()
@@ -310,6 +370,11 @@ class NewtonNerdManager(NewtonManager):
         if not cls._nerd_active or cls._solver is None:
             return
 
+        # Task resets may write joint_q without Articulation write_*_to_sim.
+        # Isaac Lab 3 forward() skips FK unless worlds are marked dirty.
+        invalidate_fk = getattr(cls, "invalidate_fk", None)
+        if callable(invalidate_fk):
+            invalidate_fk()
         cls.forward()
         cls.sync_neural_solver(update_history=False)
 

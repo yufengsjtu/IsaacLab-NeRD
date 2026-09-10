@@ -140,6 +140,12 @@ class NewtonDataGenerationBackend:
     def assign_solver_states(self, solver, states: torch.Tensor) -> None:
         """Write generalized states through the solver's frame-aware helper."""
         solver._assign_states_from_torch(self.state, states)
+        # Direct joint_q writes do not dirty Newton FK masks. Without this,
+        # :meth:`NewtonManager.forward` skips kinematics and the visualizer
+        # keeps showing the last simulated (usually reset) pose.
+        invalidate_fk = getattr(self._manager, "invalidate_fk", None)
+        if callable(invalidate_fk):
+            invalidate_fk()
         self._manager.forward()
 
     @contextmanager
@@ -364,8 +370,28 @@ class DataGenerationAdapter:
             return None
         return self.backend.collide_native_contacts()
 
-    def sync(self) -> None:
-        """Synchronize recorded tensors from Newton state/control."""
+    def overlay_applied_effort_into_control_joint_f(self) -> None:
+        """Copy implicit-actuator ``applied_effort`` into Newton ``control.joint_f``.
+
+        Call this **after** a ground-truth physics step. Implicit PD has already
+        been applied through solver stiffness; this write is only so the
+        recording solver can pack a non-zero ``joint_f`` channel. Do not call it
+        before analytic Newton, and do not use it for ``joint_f`` sample mode.
+        """
+        from isaaclab_neural.physics.applied_joint_f import copy_scene_applied_effort_into_sim_joint_f
+
+        copy_scene_applied_effort_into_sim_joint_f(getattr(self.env, "scene", None))
+
+    def sync(self, *, overlay_applied_effort: bool = False) -> None:
+        """Synchronize recorded tensors from Newton state/control.
+
+        Args:
+            overlay_applied_effort: If True, copy ``applied_effort`` into
+                ``control.joint_f`` before reading it. Use after action-mode
+                physics steps, not for direct ``joint_f`` sampling.
+        """
+        if overlay_applied_effort:
+            self.overlay_applied_effort_into_control_joint_f()
         contacts = self._prepare_contacts()
         self.backend.sync_solver(self.solver, contacts)
 
@@ -479,7 +505,7 @@ class DataGenerationAdapter:
     def step(self, action: torch.Tensor):
         """Step the wrapped env and refresh recorded tensors."""
         result = self.env.step(action)
-        self.sync()
+        self.sync(overlay_applied_effort=True)
         return result
 
     def step_action_frame(self, action: torch.Tensor, *, process_action: bool = True):
@@ -494,8 +520,28 @@ class DataGenerationAdapter:
         if hasattr(self.env, "_sim_step_counter"):
             self.env._sim_step_counter += 1
         self.env.scene.update(dt=getattr(self.env, "physics_dt", 0.0))
-        self.sync()
+        self.sync(overlay_applied_effort=True)
         return self.neural_inputs()["states"]
+
+    def refresh_policy_mdp(self, dt: float) -> None:
+        """Advance command and observation managers without stepping or resetting.
+
+        Policy dataset generation records one physics frame at a time with
+        :meth:`step_action_frame`, which does not run MDP managers. Call this
+        once per control interval so the policy sees the current joint state
+        and a possibly resampled command. Do not compute terminations: a
+        success reset would break fixed-length clips.
+
+        Args:
+            dt: Elapsed control interval [s], typically ``env.step_dt``.
+        """
+        env = self.env
+        command_manager = getattr(env, "command_manager", None)
+        observation_manager = getattr(env, "observation_manager", None)
+        if command_manager is not None:
+            command_manager.compute(dt=dt)
+        if observation_manager is not None:
+            env.obs_buf = observation_manager.compute(update_history=True)
 
     def step_joint_f_frame(self, joint_f: torch.Tensor):
         """Step one physics frame with direct joint forces, bypassing actuators."""

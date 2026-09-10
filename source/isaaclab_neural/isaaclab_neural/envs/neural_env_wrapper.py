@@ -21,8 +21,9 @@ class NeuralEnvAdapter:
     """Adapter that exposes NeRD runtime utilities for an existing Isaac Lab env.
 
     The adapter does not create an environment or choose a task. It only patches
-    reset handling and provides a small state-sync surface around the active
-    NeRD Newton manager.
+    reset handling, registers the scene for implicit-actuator ``joint_f``
+    overlay, and provides a small state-sync surface around the active NeRD
+    Newton manager.
     """
 
     def __init__(
@@ -35,6 +36,10 @@ class NeuralEnvAdapter:
         self.env = env
         self.manager = manager
         self.isaaclab_env = self._resolve_isaaclab_env(env)
+        scene = getattr(self.isaaclab_env, "scene", None)
+        register_scene = getattr(self.manager, "register_applied_effort_scene", None)
+        if callable(register_scene):
+            register_scene(scene)
         if patch_reset:
             self.install_reset_patch()
 
@@ -142,6 +147,11 @@ class NeuralEnvAdapter:
 
         states = initial_states.to(device=self.solver.torch_device)
         self.solver._assign_states_from_torch(self.state, states)
+        # Direct joint_q writes bypass Articulation write_*_to_sim, so the
+        # Isaac Lab 3 forward() path is a no-op unless worlds are marked dirty.
+        invalidate_fk = getattr(self.manager, "invalidate_fk", None)
+        if callable(invalidate_fk):
+            invalidate_fk()
         self.manager.forward()
         self.sync(update_history=False)
         if reset_history:
