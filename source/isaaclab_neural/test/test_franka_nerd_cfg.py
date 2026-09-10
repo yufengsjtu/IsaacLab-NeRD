@@ -112,6 +112,19 @@ def test_franka_sampling_limits_match_expected_dof() -> None:
     np.testing.assert_array_equal(JOINT_F_LIM["Franka"][-2:], np.zeros(2))
 
 
+def test_franka_reach_hold_is_twenty_physics_frames() -> None:
+    from isaaclab_neural.envs.franka_reach_nerd_env import FRANKA_REACH_DATASET_ACTION_HOLD_FRAMES
+    from isaaclab_neural.generate.sampler import resolve_action_resample_period
+
+    assert FRANKA_REACH_DATASET_ACTION_HOLD_FRAMES == 20
+    assert (
+        resolve_action_resample_period(
+            "frame", env_decimation=2, action_hold_frames=FRANKA_REACH_DATASET_ACTION_HOLD_FRAMES
+        )
+        == 20
+    )
+
+
 def test_franka_gym_ids_are_registered() -> None:
     for env_id in (
         "Isaac-Reach-Franka-NeRD-v0",

@@ -10,7 +10,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from isaaclab_neural.envs.franka_reach_nerd_env import FRANKA_REACH_DATASET_ACTION_HOLD_FRAMES
 from isaaclab_neural.generate.adapter import DataGenerationAdapter
 from isaaclab_neural.generate.sampler import (
     policy_control_interval_dt,
@@ -32,18 +31,6 @@ def test_frame_hold_is_at_least_decimation() -> None:
 def test_env_granularity_ignores_hold() -> None:
     assert resolve_action_resample_period("env", env_decimation=2, action_hold_frames=0) == 1
     assert resolve_action_resample_period("env", env_decimation=2, action_hold_frames=20) == 1
-
-
-def test_franka_reach_hold_is_twenty_physics_frames() -> None:
-    assert FRANKA_REACH_DATASET_ACTION_HOLD_FRAMES == 20
-    assert (
-        resolve_action_resample_period(
-            "frame",
-            env_decimation=2,
-            action_hold_frames=FRANKA_REACH_DATASET_ACTION_HOLD_FRAMES,
-        )
-        == 20
-    )
 
 
 def test_policy_mdp_refreshes_after_each_control_interval() -> None:
@@ -95,3 +82,39 @@ def test_refresh_policy_mdp_skips_missing_managers() -> None:
     adapter = DataGenerationAdapter.__new__(DataGenerationAdapter)
     adapter.env = env
     adapter.refresh_policy_mdp(0.1)
+
+
+def test_policy_collection_refreshes_observations_before_each_control_tick() -> None:
+    import torch
+    from isaaclab_neural.generate.sampler import ActionTrajectorySampler
+
+    decimation = 2
+    frame = 0
+    refresh_dts = []
+    env = SimpleNamespace(cfg=SimpleNamespace(decimation=decimation), step_dt=0.2, obs_buf=torch.zeros(1, 1))
+
+    def refresh(dt):
+        refresh_dts.append(dt)
+        env.obs_buf = torch.full((1, 1), float(frame))
+
+    def step_action_frame(action, *, process_action):
+        nonlocal frame
+        frame += 1
+
+    sampler = ActionTrajectorySampler.__new__(ActionTrajectorySampler)
+    sampler.adapter = SimpleNamespace(env=env, refresh_policy_mdp=refresh, step_action_frame=step_action_frame)
+    sampler.action_low = torch.tensor([-100.0])
+    sampler.action_high = torch.tensor([100.0])
+
+    def collect(num_transitions, **kwargs):
+        kwargs["pre_rollout_fn"]()
+        return torch.stack([kwargs["step_fn"](index).clone() for index in range(num_transitions)])
+
+    sampler._sample_loop = collect
+    actions = sampler.sample_trajectories_policy_mode(
+        6, policy=lambda obs: obs, env_wrapped=SimpleNamespace(get_observations=lambda: env.obs_buf)
+    )
+
+    expected = (torch.arange(6) // decimation * decimation).float().reshape(6, 1, 1)
+    torch.testing.assert_close(actions, expected)
+    assert refresh_dts == pytest.approx([env.step_dt, env.step_dt])

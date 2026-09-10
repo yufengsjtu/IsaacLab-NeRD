@@ -28,8 +28,11 @@ EXCLUDED_TOP_LEVEL_DIRS = {
     "data",
     "logs",
     "outputs",
+    "osmo_outputs",
+    ".worktree",
 }
 EXCLUDED_GLOBS = (
+    "imgui.ini",
     ".env",
     ".env.*",
     "*credential*.json",
@@ -37,10 +40,14 @@ EXCLUDED_GLOBS = (
     "*credential*.sh",
     "*credentials*.sh",
 )
+# Gitignored runtime assets required by G1 OSMO generate/train jobs.
 # Runtime assets required by Franka OSMO generate/train jobs. Keep this glob even
 # when the files are untracked so a later gitignore cannot drop them from the
 # tarball.
-FORCE_INCLUDED_GLOBS = ("pretrained/control_policy/franka_reach/**/*",)
+FORCE_INCLUDED_GLOBS = (
+    "pretrained/control_policy/g1_flat_terrain/**/*",
+    "pretrained/control_policy/franka_reach/**/*",
+)
 
 
 def _should_skip(path: Path) -> bool:
@@ -65,7 +72,7 @@ def _git_listed_files(project_root: Path) -> list[Path]:
 
 
 def force_included_files(project_root: Path) -> list[Path]:
-    """Return Franka policy assets that must ship in the OSMO code tarball."""
+    """Return required policy assets even when Git ignores them."""
     files: list[Path] = []
     for pattern in FORCE_INCLUDED_GLOBS:
         for path in sorted(project_root.glob(pattern)):
@@ -88,7 +95,7 @@ def collect_packaged_files(project_root: Path) -> list[Path]:
 
 
 def package_code(project_root: Path, archive_path: Path):
-    """Create a tarball from tracked files plus required Franka policy assets."""
+    """Create a tarball from repository files plus required policy assets."""
     files = collect_packaged_files(project_root)
     force_included = {path.as_posix() for path in force_included_files(project_root)}
     force_included_count = sum(1 for path in files if path.as_posix() in force_included)
@@ -98,7 +105,7 @@ def package_code(project_root: Path, archive_path: Path):
         for path in files:
             archive.add(project_root / path, arcname=Path("IsaacLab-NeRD") / path, recursive=False)
 
-    print(f"Created {archive_path} with {len(files)} file(s) ({force_included_count} force-included Franka asset(s)).")
+    print(f"Created {archive_path} with {len(files)} file(s) ({force_included_count} force-included policy asset(s)).")
 
 
 def main():

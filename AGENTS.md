@@ -36,6 +36,8 @@
 - Use hard-coded values only when they are the intended contract or a small, independently verified example; otherwise derive the expected result from a separate, simple reference calculation.
 - Keep tests focused and remove or consolidate redundant coverage instead of growing overlapping test suites.
 - Do not add debug output to production Warp kernels. Use temporary standalone reproductions and remove debug output before committing.
+- `isaaclab_neural` is not installed by the root uv project. Prefix NeRD tests with `PYTHONPATH="$PWD/source/isaaclab_neural:$PWD/source/isaaclab${PYTHONPATH:+:$PYTHONPATH}"` so tests load the current worktree, not another checkout.
+- When reusing an existing uv environment across worktrees, set `UV_PROJECT_ENVIRONMENT` to its absolute path and use `uv run --no-sync`; install the `test` extra first. Use `--frozen` when syncing extras without changing the lockfile.
 
 ## Changelog and release metadata
 
