@@ -114,7 +114,7 @@ class NerdAnymalCFlatEnvCfg(AnymalCFlatEnvCfg):
             collision_cfg = NewtonCollisionPipelineCfg(max_triangle_pairs=2_500_000)
         default_shape_cfg = deepcopy(getattr(base_physics, "default_shape_cfg", None))
         if default_shape_cfg is None:
-            default_shape_cfg = NewtonShapeCfg(margin=0.01)
+            default_shape_cfg = NewtonShapeCfg(margin=0.0)
         self.events.push_robot = None  # type: ignore[assignment]
 
         # self.terminations.low_root_height = DoneTerm(  # type: ignore[attr-defined]
@@ -164,7 +164,7 @@ class NerdAnymalCRoughEnvCfg(AnymalCRoughEnvCfg):
             collision_cfg = NewtonCollisionPipelineCfg(max_triangle_pairs=2_500_000)
         default_shape_cfg = deepcopy(getattr(base_physics, "default_shape_cfg", None))
         if default_shape_cfg is None:
-            default_shape_cfg = NewtonShapeCfg(margin=0.01)
+            default_shape_cfg = NewtonShapeCfg(margin=0.0)
 
         # self.terminations.base_contact = None  # type: ignore[assignment]
         self.events.push_robot = None  # type: ignore[assignment]

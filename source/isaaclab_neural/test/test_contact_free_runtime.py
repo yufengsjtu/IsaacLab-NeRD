@@ -187,6 +187,7 @@ def test_anymal_configs_keep_native_contact_capacity() -> None:
         assert isinstance(physics_cfg, NerdNewtonCfg)
         assert physics_cfg.solver_cfg.contact_mode == "newton_native"
         assert physics_cfg.solver_cfg.num_contacts_per_env > 0
+        assert physics_cfg.default_shape_cfg.margin == 0.0
     assert rough_cfg.terminations.base_contact is None
     assert rough_cfg.rewards.track_lin_vel_xy_exp.weight == 1.0
     assert rough_cfg.rewards.track_ang_vel_z_exp.weight == 0.5
