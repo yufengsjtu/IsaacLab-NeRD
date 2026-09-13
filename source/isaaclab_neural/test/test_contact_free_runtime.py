@@ -7,12 +7,15 @@
 
 from __future__ import annotations
 
+from argparse import Namespace
 from types import SimpleNamespace
+from typing import cast
 
 import isaaclab_neural.solvers
 import numpy as np
 import pytest
 import torch
+import warp as wp
 from isaaclab_neural.data.hdf5 import _validate_rollout_arrays
 from isaaclab_neural.envs.anymal_nerd_env import (
     NerdAnymalCFlatEnvCfg,
@@ -22,12 +25,13 @@ from isaaclab_neural.envs.anymal_nerd_env import (
 from isaaclab_neural.envs.cartpole_nerd_env import NerdCartpoleEnvCfg
 from isaaclab_neural.generate.adapter import DataGenerationAdapter, NewtonDataGenerationBackend
 from isaaclab_neural.generate.sampler import ActionTrajectorySampler
-from isaaclab_neural.physics import NerdSolverCfg
+from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 from isaaclab_neural.physics.nerd_newton_manager import NewtonNerdManager
 from isaaclab_neural.rl.rsl_rl.cli_args import apply_neural_model_to_env_cfg
 from isaaclab_neural.solvers.neural_solver import NeuralSolver
 from isaaclab_neural.train.trainers import VanillaTrainer
 from isaaclab_newton.physics.newton_manager import NewtonManager
+from newton import Control, Model, State
 
 
 def test_contact_free_manager_skips_contact_pipeline(monkeypatch) -> None:
@@ -54,7 +58,7 @@ def test_contact_free_manager_skips_contact_pipeline(monkeypatch) -> None:
     monkeypatch.setattr(NewtonNerdManager, "_sync_upstream_newton_state", classmethod(lambda cls: None))
 
     NewtonNerdManager._build_solver(
-        model=object(),
+        model=Model(device="cpu"),
         solver_cfg=NerdSolverCfg(contact_mode="newton_native", num_contacts_per_env=0),
     )
 
@@ -92,7 +96,7 @@ def test_training_can_defer_neural_model_loading(monkeypatch) -> None:
 
     with NewtonNerdManager._defer_neural_model_loading():
         NewtonNerdManager._build_solver(
-            model=object(),
+            model=Model(device="cpu"),
             solver_cfg=NerdSolverCfg(
                 contact_mode="newton_native",
                 num_contacts_per_env=0,
@@ -107,6 +111,7 @@ def test_training_can_defer_neural_model_loading(monkeypatch) -> None:
 def test_cartpole_uses_contact_free_solver_config() -> None:
     cfg = NerdCartpoleEnvCfg()
 
+    assert isinstance(cfg.sim.physics, NerdNewtonCfg)
     assert cfg.sim.physics.solver_cfg.contact_mode == "newton_native"
     assert cfg.sim.physics.solver_cfg.num_contacts_per_env == 0
     apply_contact_mode_mdp(cfg)
@@ -114,7 +119,7 @@ def test_cartpole_uses_contact_free_solver_config() -> None:
 
 def test_nerd_rl_requires_explicit_dynamics_checkpoint() -> None:
     cfg = NerdCartpoleEnvCfg()
-    args = SimpleNamespace(
+    args = Namespace(
         neural_model_path=None,
         contact_mode=None,
         num_contacts_per_env=None,
@@ -146,8 +151,10 @@ def test_anymal_configs_keep_native_contact_capacity() -> None:
     flat_cfg = NerdAnymalCFlatEnvCfg()
     rough_cfg = NerdAnymalCRoughEnvCfg()
     for cfg in (flat_cfg, rough_cfg):
+        assert isinstance(cfg.sim.physics, NerdNewtonCfg)
         assert cfg.sim.physics.solver_cfg.contact_mode == "newton_native"
         assert cfg.sim.physics.solver_cfg.num_contacts_per_env > 0
+        assert cfg.sim.physics.default_shape_cfg.margin == 0.0
     assert rough_cfg.terminations.base_contact is None
     assert rough_cfg.rewards.track_lin_vel_xy_exp.weight == 1.0
     assert rough_cfg.rewards.track_ang_vel_z_exp.weight == 0.5
@@ -175,7 +182,7 @@ class _ContactFreeAdapter:
 
 def test_contact_free_sampler_omits_contact_tensors() -> None:
     sampler = ActionTrajectorySampler.__new__(ActionTrajectorySampler)
-    sampler.adapter = _ContactFreeAdapter()
+    sampler.adapter = cast(DataGenerationAdapter, _ContactFreeAdapter())
     sampler.trajectory_length = 3
     sampler.data_device = torch.device("cpu")
 
@@ -207,8 +214,9 @@ def test_contact_token_generation_rejects_zero_contact_capacity(monkeypatch) -> 
 
 def test_backend_allows_missing_contacts_only_for_contact_free_solver() -> None:
     backend = NewtonDataGenerationBackend.__new__(NewtonDataGenerationBackend)
-    backend.state = object()
-    backend.control = SimpleNamespace(joint_f=object())
+    backend.state = State()
+    backend.control = Control()
+    backend.control.joint_f = wp.zeros(1, dtype=wp.float32, device="cpu")
     calls = []
     solver = SimpleNamespace(
         num_contacts_per_env=0,
@@ -285,16 +293,14 @@ def test_contact_free_training_batch_needs_no_contact_masks() -> None:
 
 def test_upstream_sync_attrs_exist_on_nerd_manager() -> None:
     """Fail when the NewtonManager mirror list names a removed class attribute."""
-    missing = [
-        name for name in NewtonNerdManager._UPSTREAM_SYNC_ATTRS if not hasattr(NewtonNerdManager, name)
-    ]
+    missing = [name for name in NewtonNerdManager._UPSTREAM_SYNC_ATTRS if not hasattr(NewtonNerdManager, name)]
     assert missing == [], f"Stale NewtonManager sync attrs: {missing}"
     NewtonNerdManager._sync_upstream_newton_state()
 
 
 def test_nerd_manager_skips_newton_solver_internal_reset() -> None:
     """Isaac Lab 3 forward() must not call NeuralSolver.reset(state, world_mask=...)."""
-    NewtonNerdManager._reset_solver_internals(object())
+    NewtonNerdManager._reset_solver_internals(wp.array([True], dtype=wp.bool, device="cpu"))
 
 
 def test_neural_solver_reset_accepts_newton_world_mask_kwargs() -> None:
