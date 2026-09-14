@@ -15,20 +15,39 @@ from isaaclab_newton.physics import NewtonCfg
 import isaaclab.envs.mdp as mdp
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
 from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
+from isaaclab.managers import RewardTermCfg, SceneEntityCfg
 from isaaclab.utils.configclass import configclass
 
-from isaaclab_tasks.core.reach.reach_env_cfg import ReachEnvCfg
+from isaaclab_tasks.core.reach.reach_env_cfg import ReachEnvCfg, ReachPhysicsCfg, RewardsCfg, TerminationsCfg
 from isaaclab_tasks.utils import PresetCfg, preset
 
 ##
 # Pre-defined configs
 ##
-from isaaclab_assets import FRANKA_PANDA_MENAGERIE_CFG  # isort: skip
+from isaaclab_assets.robots.franka import FRANKA_PANDA_CFG  # isort: skip
 
 
 ##
 # Environment configuration
 ##
+
+
+FRANKA_REACH_LEGACY_USD_PATH = (
+    "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac/IsaacLab/"
+    "Robots/FrankaEmika/Legacy/panda_instanceable.usd"
+)
+"""Asset revision used by the historical Legacy Reach policy."""
+
+
+@configclass
+class FrankaReachPhysicsCfg(ReachPhysicsCfg):
+    """Historical Legacy MJWarp solver settings."""
+
+    newton_mjwarp: NewtonCfg = ReachPhysicsCfg().newton_mjwarp
+    newton_mjwarp.num_substeps = 1
+    newton_mjwarp.solver_cfg.njmax = 50
+    newton_mjwarp.solver_cfg.update_data_interval = 1
+    default: NewtonCfg = newton_mjwarp
 
 
 @configclass
@@ -79,8 +98,36 @@ class FrankaArmActionCfg(PresetCfg):
 
 
 @configclass
+class FrankaReachRewardsCfg(RewardsCfg):
+    """Continuous Franka pose tracking with a fine position scale of 0.1 [m]."""
+
+    success = None
+    action_magnitude = None
+    end_effector_position_tracking_fine_grained = RewardTermCfg(
+        func=mdp.position_command_error_tanh,
+        weight=0.1,
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=["panda_hand"]), "std": 0.1, "command_name": "ee_pose"},
+    )
+
+
+@configclass
+class FrankaReachTerminationsCfg(TerminationsCfg):
+    """End Franka tracking episodes only at the time limit."""
+
+    success = None
+
+
+@configclass
 class FrankaReachEnvCfg(ReachEnvCfg):
-    """Franka Reach configuration with selectable arm and physics presets."""
+    """Continuous Franka Reach defaulting to the historical Legacy asset and timing.
+
+    Success thresholds remain available for metrics but do not end an episode.
+    Episodes end at the inherited time limit; reaching a goal earns dense
+    position rewards instead of a terminal success reward.
+    """
+
+    rewards: FrankaReachRewardsCfg = FrankaReachRewardsCfg()
+    terminations: FrankaReachTerminationsCfg = FrankaReachTerminationsCfg()
 
     def validate_config(self) -> None:
         """Validate the selected controller and physics backend."""
@@ -95,16 +142,16 @@ class FrankaReachEnvCfg(ReachEnvCfg):
         super().__post_init__()
 
         # switch robot to franka
-        self.scene.robot = FRANKA_PANDA_MENAGERIE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot = FRANKA_PANDA_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot.spawn.usd_path = FRANKA_REACH_LEGACY_USD_PATH
         self.scene.robot.spawn.rigid_props.disable_gravity = preset(default=False, diffik_abs=True)
+        self.sim.dt = 1.0 / 60.0
+        self.decimation = 2
+        self.sim.render_interval = 2
+        self.sim.physics = FrankaReachPhysicsCfg()
         # override rewards
         self.rewards.end_effector_position_tracking.params["asset_cfg"].body_names = ["panda_hand"]
         self.rewards.end_effector_orientation_tracking.params["asset_cfg"].body_names = ["panda_hand"]
-        self.rewards.joint_vel.params["asset_cfg"].joint_names = ["panda_joint.*"]
-        self.rewards.action_magnitude.weight = preset(
-            default=self.rewards.action_magnitude.weight,
-            diffik_abs=0.0,
-        )
 
         # override actions
         self.actions.arm_action = FrankaArmActionCfg()

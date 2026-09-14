@@ -9,6 +9,9 @@ from isaaclab.envs.mdp.actions.actions_cfg import OperationalSpaceControllerActi
 from isaaclab.utils.configclass import configclass
 
 from isaaclab_tasks.core.reach.config.franka import franka_reach_env_cfg
+from isaaclab_tasks.core.reach.reach_env_cfg import ReachPhysicsCfg
+
+from isaaclab_assets.robots.franka import FRANKA_PANDA_MENAGERIE_CFG
 
 
 @configclass
@@ -16,8 +19,13 @@ class FrankaReachEnvCfg(franka_reach_env_cfg.FrankaReachEnvCfg):
     def __post_init__(self) -> None:
         # post init of parent
         super().__post_init__()
+        self.scene.robot = FRANKA_PANDA_MENAGERIE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.sim.dt = 1.0 / 120.0
+        self.decimation = self.sim.render_interval = 4
+        self.sim.physics = ReachPhysicsCfg()
 
         # Use an explicit actuator to enforce the USD-authored effort limits for effort control.
+        self.scene.robot.actuators = {name: actuator.copy() for name, actuator in self.scene.robot.actuators.items()}
         arm_actuator = self.scene.robot.actuators["panda_arm"]
         self.scene.robot.actuators["panda_arm"] = IdealPDActuatorCfg(
             joint_names_expr=arm_actuator.joint_names_expr,
