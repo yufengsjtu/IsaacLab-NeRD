@@ -274,6 +274,38 @@ incremental walk:
   --pool <osmo-pool>
 ```
 
+### Mixed-coverage recipe
+
+Closed-loop evaluation showed the two single-source models fail in complementary
+ways: the random-walk model reproduced MJWarp within about 2 mm in 25 of 32
+environments but diverged in the rest during fast goal approaches, and the
+policy model matched MJWarp everywhere on its own policy but generalized poorly
+to passive motion. ``franka_reach_mixed`` combines four sources into one
+weighted training set (``Franka/transformer_reach_mixed.yaml``):
+
+| Source file | Recipe | Transitions | Weight |
+|---|---|---:|---:|
+| `dataset_random_train.hdf5` | incremental walk, hold sampled from {2, 5, 10, 20, 40} frames | 4M | 0.35 |
+| `dataset_rl_contract_train.hdf5` | uniform actions through the RL term `q_default + 0.5 a`, hold {2, 5, 10, 20} | 2M | 0.20 |
+| `dataset_policy_noisy_train.hdf5` | bundled policy with Gaussian action noise σ=0.3, clipped to [-1, 1] | 2M | 0.25 |
+| `dataset_policy_train.hdf5` | clean bundled policy | 2M | 0.20 |
+
+Validation splits are the multi-hold random walk, zero action, clean policy and
+noisy policy; the 10-step eval uses the clean policy split. All clips are 240
+frames (4 s). The learning rate is ``2e-4 -> 2e-5``. Dataset specs may set
+``num_transitions``, ``policy_checkpoint``, ``policy_action_noise_std``,
+``action_hold_frames`` and ``rl_action_contract`` per file; the generator exposes
+the same controls as ``--policy-action-noise-std``, ``--action-hold-frames A B C``
+and ``--rl-action-contract``. Weights allocate the virtual dataset index space;
+shorter sources cycle. Judge this recipe by closed-loop rollouts (diverged
+environment count and settled pose error), not by per-split loss alone.
+
+```bash
+./osmo_scripts/start.sh \
+  --preset franka_reach_mixed \
+  --pool <osmo-pool>
+```
+
 ### Legacy PPO training
 
 Ordinary Reach retains only the historical Legacy asset/drive recipe. The

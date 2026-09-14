@@ -34,6 +34,12 @@ class DatasetSpec:
     task_kind: str
     zero_actions: bool
     use_policy: bool
+    num_transitions: int | None = None
+    policy_checkpoint: str | None = None
+    policy_action_noise_std: float = 0.0
+    clip_policy_action_noise: bool = True
+    action_hold_frames: list[int] | None = None
+    rl_action_contract: bool = False
 
 
 class Tee(io.TextIOBase):
@@ -67,6 +73,17 @@ def load_preset(name: str, preset_file: str | None = None) -> dict:
 def parse_dataset_specs(experiment: dict) -> list[DatasetSpec]:
     specs = []
     for item in experiment.get("dataset_specs", []):
+        use_policy = bool(item.get("use_policy", False))
+        noise_std = float(item.get("policy_action_noise_std", 0.0) or 0.0)
+        if noise_std < 0.0:
+            raise ValueError(f"Dataset {item.get('filename')!r} policy_action_noise_std must be non-negative.")
+        if noise_std > 0.0 and not use_policy:
+            raise ValueError(f"Dataset {item.get('filename')!r} sets policy_action_noise_std but use_policy is false.")
+        hold = item.get("action_hold_frames")
+        if hold is not None:
+            hold = [int(value) for value in (hold if isinstance(hold, (list, tuple)) else [hold])]
+            if not hold or any(value < 0 for value in hold):
+                raise ValueError(f"Dataset {item.get('filename')!r} action_hold_frames must be non-negative.")
         specs.append(
             DatasetSpec(
                 filename=str(item["filename"]),
@@ -74,7 +91,13 @@ def parse_dataset_specs(experiment: dict) -> list[DatasetSpec]:
                 split=str(item.get("split", "valid")),
                 task_kind=str(item.get("task_kind", "default")),
                 zero_actions=bool(item.get("zero_actions", False)),
-                use_policy=bool(item.get("use_policy", False)),
+                use_policy=use_policy,
+                num_transitions=int(item["num_transitions"]) if item.get("num_transitions") is not None else None,
+                policy_checkpoint=str(item["policy_checkpoint"]) if item.get("policy_checkpoint") else None,
+                policy_action_noise_std=noise_std,
+                clip_policy_action_noise=bool(item.get("clip_policy_action_noise", True)),
+                action_hold_frames=hold,
+                rl_action_contract=bool(item.get("rl_action_contract", False)),
             )
         )
     if not specs:
@@ -82,10 +105,27 @@ def parse_dataset_specs(experiment: dict) -> list[DatasetSpec]:
     return specs
 
 
+def resolve_spec_transitions(experiment: dict, spec: DatasetSpec) -> int:
+    """Return the transition count requested for one dataset spec."""
+    if spec.num_transitions is not None:
+        transitions = spec.num_transitions
+    else:
+        transitions = experiment["train_transitions"] if spec.split == "train" else experiment["valid_transitions"]
+    transitions = int(transitions)
+    if transitions <= 0:
+        raise ValueError(f"Dataset {spec.filename!r} must request a positive number of transitions.")
+    return transitions
+
+
+def resolve_spec_policy_checkpoint(experiment: dict, spec: DatasetSpec) -> str:
+    """Return the policy checkpoint path for one spec, falling back to the experiment default."""
+    return spec.policy_checkpoint or str(experiment.get("policy_checkpoint", "") or "")
+
+
 def required_dataset_files(experiment: dict, specs: list[DatasetSpec]) -> list[str]:
-    policy_checkpoint = experiment.get("policy_checkpoint", "")
     required_files = []
     for spec in specs:
+        policy_checkpoint = resolve_spec_policy_checkpoint(experiment, spec)
         if spec.use_policy and policy_checkpoint and not Path(policy_checkpoint).is_file():
             continue
         required_files.append(spec.filename)
@@ -174,9 +214,7 @@ def dataset_cache_complete(
             data_group = cast(h5py.Group, handle["data"])
             spec = specs_by_filename[filename]
             states = cast(h5py.Dataset, data_group["states"]) if "states" in data_group else None
-            expected_transitions = int(
-                experiment["train_transitions"] if spec.split == "train" else experiment["valid_transitions"]
-            )
+            expected_transitions = resolve_spec_transitions(experiment, spec)
             expected_trajectory_length = int(experiment["trajectory_length"])
             total_transitions = data_group.attrs.get("total_transitions", -1)
             if (
@@ -449,10 +487,10 @@ def contact_args(experiment: dict) -> list[str]:
 
 
 def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -> list[str] | None:
-    policy_checkpoint = str(experiment.get("policy_checkpoint", ""))
+    policy_checkpoint = resolve_spec_policy_checkpoint(experiment, spec)
     if spec.use_policy:
         if not policy_checkpoint or not Path(policy_checkpoint).is_file():
-            print(f"Skipping policy validation dataset; checkpoint not found: {policy_checkpoint}")
+            print(f"Skipping policy dataset {spec.filename}; checkpoint not found: {policy_checkpoint}")
             return None
         sample_mode = "policy"
         initial_states_source = "env"
@@ -460,7 +498,7 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
         sample_mode = str(experiment.get("sample_mode", "action"))
         initial_states_source = str(experiment.get("initial_states_source", "env"))
 
-    transitions = experiment["train_transitions"] if spec.split == "train" else experiment["valid_transitions"]
+    transitions = resolve_spec_transitions(experiment, spec)
     task = experiment.get("deployment_task") if spec.task_kind == "deployment" else experiment.get("data_gen_task")
 
     args = [
@@ -496,15 +534,24 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
         args += ["--states-frame", str(experiment["states_frame"])]
     if experiment.get("write_chunk_transitions"):
         args += ["--write-chunk-transitions", str(experiment["write_chunk_transitions"])]
-    hold_frames = experiment.get("action_hold_frames")
+    hold_frames = spec.action_hold_frames
+    if hold_frames is None:
+        hold_frames = experiment.get("action_hold_frames")
     if hold_frames and not spec.use_policy:
-        args += ["--action-hold-frames", str(int(hold_frames))]
+        hold_values = hold_frames if isinstance(hold_frames, (list, tuple)) else [hold_frames]
+        args += ["--action-hold-frames", *[str(int(value)) for value in hold_values]]
+    if spec.rl_action_contract and not spec.use_policy and not spec.zero_actions:
+        args.append("--rl-action-contract")
     if experiment.get("record_body_net_contact_forces", False):
         args.append("--record-body-net-contact-forces")
     if spec.zero_actions:
         args.append("--zero-actions")
     if spec.use_policy:
         args += ["--policy-checkpoint", policy_checkpoint]
+        if spec.policy_action_noise_std > 0.0:
+            args += ["--policy-action-noise-std", str(spec.policy_action_noise_std)]
+            if not spec.clip_policy_action_noise:
+                args.append("--no-clip-policy-action-noise")
     if experiment.get("randomize_pd_gains") and spec.task_kind == "default" and not spec.zero_actions:
         args += ["--randomize-pd-gains", "--kp-min", "30.0", "--kp-max", "200.0", "--kd-min", "0.0", "--kd-max", "4.0"]
     return args

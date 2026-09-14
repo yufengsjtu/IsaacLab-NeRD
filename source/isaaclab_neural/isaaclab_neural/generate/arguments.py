@@ -37,14 +37,38 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--policy-checkpoint", type=str, default=None, help="Optional RSL-RL policy checkpoint for policy mode."
     )
+    parser.add_argument(
+        "--policy-action-noise-std",
+        type=float,
+        default=0.0,
+        help=(
+            "Isotropic Gaussian std added to policy actions in policy mode. Noise is resampled on each "
+            "control tick and held between ticks. Disabled when 0."
+        ),
+    )
+    parser.add_argument(
+        "--no-clip-policy-action-noise",
+        action="store_true",
+        help="Leave noisy policy actions unclipped. Default clips to the action sampling bounds.",
+    )
     parser.add_argument("--policy-agent", type=str, default="rsl_rl_cfg_entry_point")
     parser.add_argument("--step-granularity", choices=["frame", "env"], default="frame")
     parser.add_argument(
         "--action-hold-frames",
         type=int,
-        default=0,
+        nargs="+",
+        default=[0],
         help=(
-            "Physics frames to hold each sampled action in action mode. 0 holds only for the env control decimation."
+            "Physics frames to hold each sampled action in action mode. 0 holds only for the env control "
+            "decimation. Several values sample one hold length per action segment, uniformly."
+        ),
+    )
+    parser.add_argument(
+        "--rl-action-contract",
+        action="store_true",
+        help=(
+            "Sample random actions through the task's RL action term instead of the dataset-generation "
+            "random-walk term, when the task config exposes restore_reach_rl_arm_action()."
         ),
     )
     parser.add_argument("--num-transitions", type=int, default=100_000, help="Number of transitions to collect.")

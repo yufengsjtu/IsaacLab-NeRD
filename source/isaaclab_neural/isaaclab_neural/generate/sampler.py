@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -18,6 +19,34 @@ from isaaclab_neural.contacts.contact_set_schema import (
     NATIVE_CONTACT_VALUE_FIELDS,
 )
 from isaaclab_neural.generate.adapter import DataGenerationAdapter
+
+
+def perturb_policy_action(
+    action: torch.Tensor,
+    noise_std: float,
+    action_low: torch.Tensor,
+    action_high: torch.Tensor,
+    *,
+    clip_to_bounds: bool = True,
+) -> torch.Tensor:
+    """Add isotropic Gaussian noise to policy actions, optionally clipping to bounds.
+
+    Args:
+        action: Policy actions, shape ``[num_envs, action_dim]``.
+        noise_std: Isotropic Gaussian standard deviation. No noise when ``<= 0``.
+        action_low: Per-dimension lower action bounds, shape ``[action_dim]``.
+        action_high: Per-dimension upper action bounds, shape ``[action_dim]``.
+        clip_to_bounds: Clamp noisy actions to ``[action_low, action_high]`` when True.
+
+    Returns:
+        Noisy actions with the same shape as ``action``.
+    """
+    if noise_std <= 0.0:
+        return action
+    noisy = action + float(noise_std) * torch.randn_like(action)
+    if clip_to_bounds:
+        return torch.clamp(noisy, min=action_low, max=action_high)
+    return noisy
 
 
 def resolve_action_resample_period(
@@ -391,7 +420,7 @@ class ActionTrajectorySampler:
         initial_states_source: str = "sample",
         initial_states_pool: torch.Tensor | None = None,
         step_granularity: str = "frame",
-        action_hold_frames: int = 0,
+        action_hold_frames: int | Sequence[int] = 0,
         render: bool = False,
     ) -> dict[str, Any]:
         """Collect trajectories with sampled actions.
@@ -404,21 +433,32 @@ class ActionTrajectorySampler:
             step_granularity: ``frame`` steps physics once; ``env`` uses
                 ``env.step``.
             action_hold_frames: Physics frames to hold each sampled action.
-                ``0`` holds only for the env control decimation.
+                ``0`` holds only for the env control decimation. A sequence
+                draws one hold length per action segment uniformly from its
+                entries, giving multi-timescale excitation.
             render: If True, call ``env.render`` each frame.
         """
         env_decimation = max(1, int(getattr(getattr(self.adapter.env, "cfg", None), "decimation", 1)))
-        resample_period = resolve_action_resample_period(step_granularity, env_decimation, action_hold_frames)
+        hold_choices = [action_hold_frames] if isinstance(action_hold_frames, int) else list(action_hold_frames)
+        if not hold_choices:
+            raise ValueError("action_hold_frames must contain at least one hold length.")
+        resample_periods = [
+            resolve_action_resample_period(step_granularity, env_decimation, int(hold)) for hold in hold_choices
+        ]
         held_action: torch.Tensor | None = None
+        next_resample_step = 0
 
         def reset_held_action() -> None:
-            nonlocal held_action
+            nonlocal held_action, next_resample_step
             held_action = None
+            next_resample_step = 0
 
         def step_fn(step: int) -> torch.Tensor:
-            nonlocal held_action
-            should_process_action = held_action is None or step % resample_period == 0
+            nonlocal held_action, next_resample_step
+            should_process_action = held_action is None or step >= next_resample_step
             if should_process_action:
+                period = resample_periods[int(torch.randint(len(resample_periods), (1,)))]
+                next_resample_step = step + period
                 held_action = (
                     self.adapter.zero_action()
                     if zero_actions
@@ -480,8 +520,21 @@ class ActionTrajectorySampler:
         env_wrapped=None,
         initial_states_source: str = "env",
         render: bool = False,
+        action_noise_std: float = 0.0,
+        clip_action_noise: bool = True,
     ) -> dict[str, Any]:
-        """Collect trajectories driven by a callable policy."""
+        """Collect trajectories driven by a callable policy.
+
+        Args:
+            num_transitions: Number of transitions to collect.
+            policy: Callable mapping observations to actions.
+            env_wrapped: Optional RL wrapper exposing ``get_observations``.
+            initial_states_source: Trajectory reset source.
+            render: If True, call ``env.render`` each frame.
+            action_noise_std: Isotropic Gaussian std added to each policy
+                action at control ticks. ``0`` records the clean policy.
+            clip_action_noise: Clamp noisy actions to the sampling bounds.
+        """
         decimation = max(1, int(getattr(getattr(self.adapter.env, "cfg", None), "decimation", 1)))
         control_dt = policy_control_interval_dt(self.adapter.env, decimation=decimation)
         policy_has_reset = hasattr(policy, "reset")
@@ -506,7 +559,13 @@ class ActionTrajectorySampler:
                     obs = self.adapter.env.get_observations()
                 else:
                     obs = self.adapter.env.obs_buf
-                policy_action = policy(obs)
+                policy_action = perturb_policy_action(
+                    policy(obs),
+                    action_noise_std,
+                    self.action_low,
+                    self.action_high,
+                    clip_to_bounds=clip_action_noise,
+                )
             if policy_action is None:
                 raise RuntimeError("Policy did not produce an action before stepping.")
             self.adapter.step_action_frame(policy_action, process_action=should_process_action)

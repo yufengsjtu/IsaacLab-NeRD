@@ -12,10 +12,12 @@ from .datasets import (
     LazyBatchTransitionDataset,
     LazyTrajectoryDataset,
     TrajectoryDataset,
-    collate_fn_BatchTransitionDataset,
+    WeightedMixedTrajectoryDataset,
     collate_fn_batch_transition_dataset,
+    collate_fn_BatchTransitionDataset,
     create_batch_transition_dataset,
     create_trajectory_dataset,
+    create_weighted_trajectory_dataset,
 )
 from .hdf5 import append_rollouts_to_hdf5, write_rollouts_to_hdf5
 from .terrain_context import (
@@ -31,10 +33,12 @@ __all__ = [
     "LazyBatchTransitionDataset",
     "LazyTrajectoryDataset",
     "TrajectoryDataset",
+    "WeightedMixedTrajectoryDataset",
     "collate_fn_BatchTransitionDataset",
     "collate_fn_batch_transition_dataset",
     "create_batch_transition_dataset",
     "create_trajectory_dataset",
+    "create_weighted_trajectory_dataset",
     "append_rollouts_to_hdf5",
     "write_rollouts_to_hdf5",
     "build_terrain_context",

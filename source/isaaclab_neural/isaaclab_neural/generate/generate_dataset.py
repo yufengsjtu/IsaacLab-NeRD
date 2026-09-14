@@ -111,10 +111,17 @@ def configure_env(env_cfg, args) -> None:
         env_cfg.sim.physics.use_cuda_graph = False
     # Franka Reach random splits use incremental position targets. Policy and
     # zero-action splits restore the Reach RL action ``q_default ± 0.5 rad``.
-    if getattr(args, "sample_mode", None) == "policy" or getattr(args, "zero_actions", False):
+    use_rl_action = (
+        getattr(args, "sample_mode", None) == "policy"
+        or getattr(args, "zero_actions", False)
+        or getattr(args, "rl_action_contract", False)
+    )
+    if use_rl_action:
         restore_rl_arm_action = getattr(env_cfg, "restore_reach_rl_arm_action", None)
         if callable(restore_rl_arm_action):
             restore_rl_arm_action()
+        elif getattr(args, "rl_action_contract", False):
+            raise ValueError("--rl-action-contract requires a task config with restore_reach_rl_arm_action().")
     print(
         f"[dataset] Newton use_cuda_graph={env_cfg.sim.physics.use_cuda_graph} "
         f"sample_mode={getattr(args, 'sample_mode', None)} "
@@ -223,6 +230,10 @@ def main(env_cfg, agent_cfg=None) -> None:
         policy = None
         env_wrapped = None
         runner = None
+        if args_cli.policy_action_noise_std < 0.0:
+            raise ValueError("--policy-action-noise-std must be non-negative.")
+        if args_cli.policy_action_noise_std > 0.0 and args_cli.sample_mode != "policy":
+            raise ValueError("--policy-action-noise-std requires --sample-mode policy.")
         if args_cli.sample_mode == "policy":
             if args_cli.policy_checkpoint is None:
                 raise ValueError("--policy-checkpoint is required when --sample-mode policy.")
@@ -254,6 +265,8 @@ def main(env_cfg, agent_cfg=None) -> None:
                     env_wrapped=env_wrapped,
                     initial_states_source=args_cli.initial_states_source,
                     render=args_cli.render,
+                    action_noise_std=args_cli.policy_action_noise_std,
+                    clip_action_noise=not args_cli.no_clip_policy_action_noise,
                 )
             return sampler.sample_trajectories_action_mode(
                 num_transitions,
