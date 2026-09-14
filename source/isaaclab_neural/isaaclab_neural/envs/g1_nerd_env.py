@@ -18,8 +18,10 @@ from isaaclab.utils.configclass import configclass
 
 from isaaclab_tasks.core.velocity.config.g1.flat_env_cfg import G1FlatEnvCfg
 from isaaclab_tasks.core.velocity.config.g1.rough_env_cfg import G1RoughEnvCfg
+from isaaclab_tasks.utils.hydra import resolve_presets
 
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
+from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 
 from ..contacts.geometry_mdp import GeometryFeetAirTime, geometry_illegal_contact
 from .neural_env_wrapper import NerdManagerBasedRLEnv
@@ -64,7 +66,7 @@ class NerdG1FlatEnvCfg(G1FlatEnvCfg):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        base_physics = self.sim.physics
+        base_physics = resolve_presets(deepcopy(self.sim.physics))
         collision_cfg = deepcopy(getattr(base_physics, "collision_cfg", None))
         if collision_cfg is None:
             collision_cfg = NewtonCollisionPipelineCfg(max_triangle_pairs=2_500_000)
@@ -103,7 +105,7 @@ class NerdG1FlatEnv(NerdManagerBasedRLEnv):
     """G1 flat env that installs ``NerdNewtonCfg`` before simulation initialization."""
 
     def _configure_solver_dependent_mdp(self, cfg) -> None:
-        apply_g1_contact_mode_mdp(cfg)
+        normalize_contact_mode(cfg.sim.physics.solver_cfg.contact_mode)
 
 
 @configclass
@@ -112,7 +114,7 @@ class NerdG1RoughEnvCfg(G1RoughEnvCfg):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        base_physics = self.sim.physics
+        base_physics = resolve_presets(deepcopy(self.sim.physics))
         collision_cfg = deepcopy(getattr(base_physics, "collision_cfg", None))
         if collision_cfg is None:
             collision_cfg = NewtonCollisionPipelineCfg(max_triangle_pairs=2_500_000)
@@ -152,4 +154,4 @@ class NerdG1RoughEnv(NerdManagerBasedRLEnv):
     """G1 rough-terrain env that installs ``NerdNewtonCfg`` before simulation initialization."""
 
     def _configure_solver_dependent_mdp(self, cfg) -> None:
-        apply_g1_contact_mode_mdp(cfg)
+        normalize_contact_mode(cfg.sim.physics.solver_cfg.contact_mode)

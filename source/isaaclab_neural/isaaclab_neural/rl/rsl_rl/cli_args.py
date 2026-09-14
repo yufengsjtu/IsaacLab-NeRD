@@ -136,7 +136,11 @@ def build_solver_cfg_from_neural_model(
 
 def apply_neural_model_to_env_cfg(env_cfg, args: argparse.Namespace) -> NerdSolverCfg | None:
     """Attach NeRD solver overrides to the env cfg and return gym.make solver_cfg."""
-    from isaaclab_neural.envs.anymal_nerd_env import apply_contact_mode_mdp
+    from isaaclab_neural.envs.anymal_nerd_env import (
+        NerdAnymalCFlatEnvCfg,
+        NerdAnymalCRoughEnvCfg,
+        apply_contact_mode_mdp,
+    )
 
     solver_cfg, legacy_use_cuda_graph = build_solver_cfg_from_neural_model(args)
     physics_cfg = getattr(getattr(env_cfg, "sim", None), "physics", None)
@@ -154,7 +158,8 @@ def apply_neural_model_to_env_cfg(env_cfg, args: argparse.Namespace) -> NerdSolv
 
     physics_cfg.use_cuda_graph = False
     # Re-sync contact rewards after CLI ``--contact-mode`` overrides.
-    apply_contact_mode_mdp(env_cfg)
+    if isinstance(env_cfg, (NerdAnymalCFlatEnvCfg, NerdAnymalCRoughEnvCfg)):
+        apply_contact_mode_mdp(env_cfg)
     if physics_cfg.solver_cfg.neural_model_path is None:
         raise ValueError(
             "NeRD RL requires --neural-model-path because dynamics checkpoints are not bundled with this release."
