@@ -178,13 +178,15 @@ def dataset_cache_complete(
                 experiment["train_transitions"] if spec.split == "train" else experiment["valid_transitions"]
             )
             expected_trajectory_length = int(experiment["trajectory_length"])
+            total_transitions = data_group.attrs.get("total_transitions", -1)
             if (
                 data_group.attrs.get("mode") != "trajectory"
                 or data_group.attrs.get("env") != experiment["env_name"]
                 or states is None
                 or states.ndim != 3
                 or states.shape[1] != expected_trajectory_length
-                or int(data_group.attrs.get("total_transitions", -1)) < expected_transitions
+                or not isinstance(total_transitions, (int, np.integer))
+                or total_transitions < expected_transitions
             ):
                 print(f"Rejected cached dataset with incompatible trajectory metadata: {dataset_path}")
                 return False
@@ -200,12 +202,15 @@ def dataset_cache_complete(
                     f"{sorted(inconsistent_fields)}: {dataset_path}"
                 )
                 return False
-            native_group = (
-                cast(h5py.Group, handle["contacts"]["native_pairs"])
-                if "contacts" in handle and "native_pairs" in handle["contacts"]
-                else None
-            )
+            contacts_group = handle.get("contacts")
+            if contacts_group is not None and not isinstance(contacts_group, h5py.Group):
+                print(f"Rejected cached dataset with a non-group contacts node: {dataset_path}")
+                return False
+            native_group = contacts_group.get("native_pairs") if contacts_group is not None else None
             if native_group is not None:
+                if not isinstance(native_group, h5py.Group):
+                    print(f"Rejected cached dataset with a non-group native_pairs node: {dataset_path}")
+                    return False
                 native_metadata_matches = (
                     int(data_group.attrs.get("dataset_schema_version", -1)) == NATIVE_CONTACT_DATASET_SCHEMA_VERSION
                     and data_group.attrs.get("contact_storage_schema") == "native_pairs_csr_v1"
@@ -213,7 +218,7 @@ def dataset_cache_complete(
                 )
                 if not native_metadata_matches or not _native_contact_cache_complete(
                     native_group,
-                    int(data_group.attrs["total_transitions"]),
+                    int(total_transitions),
                     dataset_path,
                 ):
                     print(f"Rejected cached native-contact dataset with incompatible metadata: {dataset_path}")
@@ -647,7 +652,7 @@ def run(args: argparse.Namespace):
     experiment = preset["experiment"]
     specs = parse_dataset_specs(experiment)
     output_root = Path(args.output_root)
-    dataset_dir = Path(args.dataset_dir)
+    dataset_dir = Path(args.dataset_dir or experiment.get("dataset_dir", "./data/datasets"))
     local_env_dir = dataset_dir / str(experiment["env_name"])
     required_files = required_dataset_files(experiment, specs)
 
@@ -708,7 +713,7 @@ def main():
     parser.add_argument("--nvdataset-data-dataset", default="")
     parser.add_argument("--nvdataset-data-description", default="IsaacLab-NeRD generated HDF5 datasets.")
     parser.add_argument("--output-root", default="/tmp/runs/output")
-    parser.add_argument("--dataset-dir", default="./data/datasets")
+    parser.add_argument("--dataset-dir", default=None, help="Override the preset's local dataset root.")
     parser.add_argument("--tensorboard-port", type=int, default=6006)
     parser.add_argument("--enable-wandb", action="store_true", help="Enable Weights & Biases logging.")
     parser.add_argument("--wandb-project-name", default="nerd-newton")

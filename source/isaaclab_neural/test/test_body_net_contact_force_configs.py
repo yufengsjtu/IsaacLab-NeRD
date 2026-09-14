@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 
 import h5py
+import numpy as np
+import pytest
 import yaml
 
 PACKAGE_ROOT = Path(__file__).parents[1]
@@ -108,6 +110,47 @@ def test_osmo_entrypoint_traces_only_after_credentials_are_exported() -> None:
     assert trace_offset > entrypoint.index('export WANDB_API_KEY="${WANDB_API_KEY:-}"')
 
 
+def _write_contact_free_cache(path: Path, total_transitions: object = 4) -> dict:
+    experiment = {
+        "env_name": "cache-test",
+        "train_transitions": 4,
+        "valid_transitions": 2,
+        "trajectory_length": 2,
+        "dataset_specs": [{"filename": path.name, "seed": 0, "split": "train"}],
+    }
+    with h5py.File(path, "w") as handle:
+        data = handle.create_group("data")
+        data.attrs.update(mode="trajectory", env=experiment["env_name"], total_transitions=total_transitions)
+        data.attrs.update(
+            dataset_schema_version=3, contact_storage_schema="native_pairs_csr_v1", contact_frame="world_v1"
+        )
+        data.create_dataset("states", shape=(2, 2, 3), dtype="f4")
+    return experiment
+
+
+@pytest.mark.parametrize("node_path", ["contacts", "contacts/native_pairs"])
+@pytest.mark.parametrize("node_kind", ["dataset", "datatype"])
+def test_cache_rejects_non_group_contact_nodes(tmp_path: Path, node_path: str, node_kind: str) -> None:
+    path = tmp_path / "dataset.hdf5"
+    experiment = _write_contact_free_cache(path)
+    assert dataset_cache_complete(tmp_path, [path.name], experiment)
+    with h5py.File(path, "a") as handle:
+        parent = handle if node_path == "contacts" else handle.create_group("contacts")
+        name = node_path.rsplit("/", 1)[-1]
+        if node_kind == "datatype":
+            parent[name] = np.dtype("int32")
+        else:
+            parent.create_dataset(name, shape=(1,), dtype="i4")
+    assert not dataset_cache_complete(tmp_path, [path.name], experiment)
+
+
+@pytest.mark.parametrize("count", [np.array([4, 4]), h5py.Empty("i8")])
+def test_cache_rejects_non_scalar_transition_counts(tmp_path: Path, count: object) -> None:
+    path = tmp_path / "dataset.hdf5"
+    experiment = _write_contact_free_cache(path, count)
+    assert not dataset_cache_complete(tmp_path, [path.name], experiment)
+
+
 def test_force_preset_rejects_old_cache_without_force_labels(tmp_path: Path) -> None:
     dataset_path = tmp_path / "dataset_train.hdf5"
     experiment = {
@@ -138,6 +181,7 @@ def test_force_preset_rejects_old_cache_without_force_labels(tmp_path: Path) -> 
 
     with h5py.File(dataset_path, "a") as handle:
         data = handle["data"]
+        assert isinstance(data, h5py.Group)
         data.create_dataset("body_net_contact_forces_w", shape=(2, 2, 17, 3), dtype="f4")
         data.attrs["body_net_contact_force_schema"] = "per_primary_body_v1"
         data.attrs["body_net_contact_force_frame"] = "world"
@@ -205,7 +249,9 @@ def test_owner_frame_preset_requires_primary_body_q_cache(tmp_path: Path) -> Non
     assert not dataset_cache_complete(tmp_path, [dataset_path.name], experiment)
 
     with h5py.File(dataset_path, "a") as handle:
-        handle["data"].create_dataset("primary_body_q", shape=(2, 2, 17, 7), dtype="f4")
+        data = handle["data"]
+        assert isinstance(data, h5py.Group)
+        data.create_dataset("primary_body_q", shape=(2, 2, 17, 7), dtype="f4")
 
     # Native-pair metadata is still required for contact datasets.
     assert not dataset_cache_complete(tmp_path, [dataset_path.name], experiment)
