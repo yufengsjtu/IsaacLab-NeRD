@@ -7,10 +7,13 @@
 
 from __future__ import annotations
 
+from isaaclab.envs import mdp
 from isaaclab.envs.mdp.actions.actions_cfg import JointPositionActionCfg
+from isaaclab.managers import EventTermCfg
 from isaaclab.utils.configclass import configclass
 
 from isaaclab_tasks.core.reach.config.franka.franka_reach_env_cfg import FrankaReachEnvCfg
+from isaaclab_tasks.core.reach.reach_env_cfg import EventCfg as ReachEventCfg
 from isaaclab_tasks.core.reach.reach_env_cfg import ReachPhysicsCfg
 
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
@@ -22,9 +25,9 @@ from .neural_env_wrapper import NerdManagerBasedRLEnv
 DEFAULT_FRANKA_REACH_NERD_MODEL_PATH: str | None = None
 
 _FRANKA_REACH_ARM_JOINTS = ["panda_joint.*"]
-# Clamp the incremental walk to 80% of each USD joint range so underdamped PD
-# overshoot still has margin before the hard limit.
-FRANKA_REACH_DATASET_SOFT_JOINT_POS_LIMIT_FACTOR = 0.8
+# Clamp the incremental walk to 60% of each USD joint range. Legacy PD on joint 2
+# overshoots held targets by up to ~0.45 rad, which exceeded the 20% margin left by 0.8.
+FRANKA_REACH_DATASET_SOFT_JOINT_POS_LIMIT_FACTOR = 0.6
 
 
 def _arm_saturation_increment_scale() -> dict[str, float]:
@@ -46,8 +49,12 @@ def _arm_saturation_increment_scale() -> dict[str, float]:
 
 # Per-joint ``|Δq|`` [rad] so ``kp * Δq`` equals ``joint_effort_limit`` at rest.
 FRANKA_REACH_DATASET_INCREMENT_SCALE = _arm_saturation_increment_scale()
-# Physics frames to hold each absolute ``q_target``. Reach uses ``dt=1/120`` and
-# ``decimation=4``; 20 frames is 1/6 s.
+"""Legacy Panda increments [rad], retained for callers of the original data recipe.
+
+Data generation derives runtime drive values via ``scale=None`` for either asset instead.
+"""
+# Physics frames to hold each absolute ``q_target``. Legacy Reach uses ``dt=1/60`` and
+# ``decimation=2``; 20 frames is 1/3 s.
 FRANKA_REACH_DATASET_ACTION_HOLD_FRAMES = 20
 # Dataset-Gen EE pose resample [s]. Lets the Reach policy finish the fast
 # approach (~1 s) and record a short settle before the next goal.
@@ -71,7 +78,7 @@ def franka_reach_dataset_arm_action() -> IncrementalJointPositionActionCfg:
     return IncrementalJointPositionActionCfg(
         asset_name="robot",
         joint_names=_FRANKA_REACH_ARM_JOINTS,
-        scale=FRANKA_REACH_DATASET_INCREMENT_SCALE,
+        scale=None,
     )
 
 
@@ -85,11 +92,14 @@ class FrankaReachDatasetGenEnvCfg(FrankaReachEnvCfg):
     scene has one articulated robot per world.
 
     Random splits command ``q_target = clip(q + scale a, soft limits)`` with a
-    per-joint ``scale`` of ``effort_limit / kp`` (shoulder ``1.0875`` rad,
-    forearm ``0.15`` rad) and hold that absolute target for 20 physics frames.
+    per-joint ``scale`` of ``effort_limit / kp`` from the resolved robot
+    drives and hold that absolute target for 20 physics frames. The default
+    Legacy asset and 60 Hz physics step match the historical Reach policy.
     At rest, ``|a| = 1`` therefore reaches each actuator's effort limit.
-    Policy and zero-action splits restore :meth:`restore_reach_rl_arm_action`.
-    Policy clips resample the EE pose every
+    Random splits reset arm positions uniformly within the soft joint limits,
+    with zero joint velocities and fingers at their clamped default positions.
+    Policy and zero-action splits restore the Reach action and reset through
+    :meth:`restore_reach_rl_arm_action`. Policy clips resample the EE pose every
     :data:`FRANKA_REACH_DATASET_COMMAND_RESAMPLE_S` seconds.
     """
 
@@ -98,14 +108,27 @@ class FrankaReachDatasetGenEnvCfg(FrankaReachEnvCfg):
         apply_franka_reach_contact_free_scene(self)
         self.scene.robot.soft_joint_pos_limit_factor = FRANKA_REACH_DATASET_SOFT_JOINT_POS_LIMIT_FACTOR
         self.actions.arm_action = franka_reach_dataset_arm_action()
+        finger_pos = self.scene.robot.init_state.joint_pos["panda_finger_joint.*"]
+        self.events.reset_robot_joints = EventTermCfg(
+            func=mdp.reset_joints_within_limits_range,
+            mode="reset",
+            params={
+                "position_range": {
+                    "panda_joint.*": (None, None),
+                    "panda_finger_joint.*": (finger_pos, finger_pos),
+                },
+                "velocity_range": {".*": (0.0, 0.0)},
+            },
+        )
         resample_s = FRANKA_REACH_DATASET_COMMAND_RESAMPLE_S
         self.commands.ee_pose.resampling_time_range = (resample_s, resample_s)
         # Headless dataset generation does not need command markers.
         self.commands.ee_pose.debug_vis = False
 
     def restore_reach_rl_arm_action(self) -> None:
-        """Restore the Reach RL joint-position action used by the trained policy."""
+        """Restore the Reach RL action and reset used by policy and zero-action splits."""
         self.actions.arm_action = franka_reach_rl_arm_action()
+        self.events.reset_robot_joints = ReachEventCfg().reset_robot_joints
 
 
 @configclass

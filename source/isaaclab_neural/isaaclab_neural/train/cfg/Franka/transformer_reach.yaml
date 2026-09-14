@@ -34,17 +34,17 @@ algorithm:
   optimizer:
     type: Adam
     weight_decay: 0.0
-    lr_start: 1e-3
-    lr_end: 1e-4
+    lr_start: 2e-4
+    lr_end: 2e-5
     lr_schedule: linear
     betas: [0.9, 0.999]
 
   dataset:
-    train_dataset_path: ./data/datasets/Franka-Reach/dataset_train.hdf5
+    train_dataset_path: ./data/datasets/legacy-60hz/Franka-Reach/dataset_train.hdf5
     valid_datasets:
-      exp_trajectory: ./data/datasets/Franka-Reach/dataset_valid.hdf5
-      passive_trajectory: ./data/datasets/Franka-Reach/dataset_passive_valid.hdf5
-      policy_trajectory: ./data/datasets/Franka-Reach/dataset_policy_valid.hdf5
+      exp_trajectory: ./data/datasets/legacy-60hz/Franka-Reach/dataset_valid.hdf5
+      passive_trajectory: ./data/datasets/legacy-60hz/Franka-Reach/dataset_passive_valid.hdf5
+      policy_trajectory: ./data/datasets/legacy-60hz/Franka-Reach/dataset_policy_valid.hdf5
     max_capacity: 10000000
     load_mode: eager
     num_data_workers: 8
@@ -54,7 +54,7 @@ algorithm:
     action_mode: joint_f
     rollout_horizon: 10
     num_rollouts: 2048
-    dataset_path: ./data/datasets/Franka-Reach/dataset_policy_valid.hdf5
+    dataset_path: ./data/datasets/legacy-60hz/Franka-Reach/dataset_policy_valid.hdf5
     passive: False
 
 inputs:

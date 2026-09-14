@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import MISSING
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -87,11 +87,19 @@ class IncrementalJointPositionAction(ActionTerm):
         self._raw_actions = torch.zeros(self.num_envs, self.action_dim, device=self.device)
         self._processed_actions = torch.zeros_like(self._raw_actions)
 
-    def _parse_scale(self, scale: float | dict[str, float]) -> float | torch.Tensor:
+    def _parse_scale(self, scale: float | dict[str, float] | None) -> float | torch.Tensor:
+        if scale is None:
+            stiffness = self._asset.data.joint_stiffness.torch[:, self._joint_ids]
+            effort_limit = self._asset.data.joint_effort_limits.torch[:, self._joint_ids]
+            if not bool(torch.all(torch.isfinite(stiffness) & (stiffness > 0))):
+                raise ValueError("Rest-saturation scaling requires finite positive joint stiffness.")
+            if not bool(torch.all(torch.isfinite(effort_limit) & (effort_limit >= 0))):
+                raise ValueError("Rest-saturation scaling requires finite non-negative joint effort limits.")
+            return effort_limit / stiffness
         if isinstance(scale, (float, int)):
             return float(scale)
         if not isinstance(scale, dict):
-            raise ValueError(f"Unsupported scale type: {type(scale)}. Supported types are float and dict.")
+            raise ValueError(f"Unsupported scale type: {type(scale)}. Supported values are float, dict, or None.")
         parsed = torch.full((self.num_envs, self.action_dim), float("nan"), device=self.device)
         index_list, _, value_list = string_utils.resolve_matching_names_values(
             scale, self._joint_names, preserve_order=self.cfg.preserve_order
@@ -158,14 +166,18 @@ class IncrementalJointPositionActionCfg(ActionTermCfg):
 
     class_type: type[IncrementalJointPositionAction] = IncrementalJointPositionAction
 
-    joint_names: list[str] = MISSING
+    joint_names: list[str] = cast(list[str], MISSING)
     """Joint names or regex expressions that the action maps to."""
 
-    scale: float | dict[str, float] = 0.5
+    scale: float | dict[str, float] | None = 0.5
     """Maximum joint step applied to the current position [rad].
 
     A dict of regex expressions sets a per-joint step, so ``|a| = 1`` can
-    approach each actuator's effort limit independently.
+    approach each actuator's effort limit independently. ``None`` derives
+    per-environment, per-joint steps from the resolved articulation's effort
+    limits divided by stiffness at action-term initialization, including
+    USD-authored drives. This requires finite positive stiffness and finite
+    non-negative effort limits for every controlled joint.
     """
 
     preserve_order: bool = False

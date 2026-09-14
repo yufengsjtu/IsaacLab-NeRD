@@ -80,7 +80,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
         "--playback-hz",
         type=float,
         default=30.0,
-        help="Visualizer playback rate. Dataset physics is 120 Hz (dt=1/120 s).",
+        help="Visualizer playback rate [Hz]. Franka Reach datasets record 60 Hz physics frames (dt=1/60 s).",
     )
     parser.add_argument("--loop", action="store_true", help="Keep sampling and replaying until interrupted.")
     parser.add_argument(

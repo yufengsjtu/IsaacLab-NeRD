@@ -67,13 +67,17 @@ FRANKA_PANDA_CFG = ArticulationCfg(
 
 FRANKA_LIFT_TABLE_CFG = AssetBaseCfg(
     prim_path="{ENV_REGEX_NS}/Table",
-    init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0.0, 0.0], rot=[1.0, 0.0, 0.0, 0.0]),
+    init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0.0, -0.028], rot=[0.0, 0.0, 0.0, 1.0]),
     spawn=sim_utils.CuboidCfg(
         size=(0.9, 1.3, 0.05),
         collision_props=CollisionPropertiesCfg(),
     ),
 )
-"""Static cuboid table used by Franka lift NeRD. It is not an articulation."""
+"""Static cuboid table used by Franka lift NeRD. It is not an articulation.
+
+The top surface is at z = -0.003 [m], matching the standard SeattleLabTable
+collider so a resting cube stays below the Lift reward's height threshold.
+"""
 
 
 def panda_robot_cfg(*, enable_self_collisions: bool) -> ArticulationCfg:
@@ -95,10 +99,9 @@ def panda_robot_cfg(*, enable_self_collisions: bool) -> ArticulationCfg:
 def apply_franka_reach_contact_free_scene(env_cfg) -> None:
     """Drop the Newton table articulation and disable Panda self-collisions."""
     env_cfg.scene.table = None
-    env_cfg.scene.robot = panda_robot_cfg(enable_self_collisions=False)
+    env_cfg.scene.robot.spawn.articulation_props.enabled_self_collisions = False
 
 
 def apply_franka_lift_nerd_scene(env_cfg) -> None:
     """Keep the cube dynamic and replace the USD table with a static collider."""
-    env_cfg.scene.robot = panda_robot_cfg(enable_self_collisions=True)
-    env_cfg.scene.table = FRANKA_LIFT_TABLE_CFG
+    env_cfg.scene.table = FRANKA_LIFT_TABLE_CFG.copy()

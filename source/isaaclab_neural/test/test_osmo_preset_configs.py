@@ -116,6 +116,57 @@ def test_public_presets_have_valid_unique_training_mappings() -> None:
                 assert policy_valid == ["dataset_valid.hdf5", "dataset_policy_valid.hdf5"]
             else:
                 assert train_spec["use_policy"] is False
+                assert float(train_config["algorithm"]["optimizer"]["lr_start"]) == 2e-4
+                assert float(train_config["algorithm"]["optimizer"]["lr_end"]) == 2e-5
+                assert experiment["trajectory_length"] == 200
+                assert workflow["dataset_subdir"] == "franka-reach-legacy-60hz-wide-reset-200"
+                smoke = _load_yaml(PRESET_DIR / "franka_reach_newton_native_smoke.yaml")
+                assert smoke["experiment"]["trajectory_length"] == experiment["trajectory_length"]
+                assert smoke["workflow"]["dataset_subdir"] == "franka-reach-legacy-60hz-wide-reset-200-smoke"
+
+
+def test_franka_legacy_dataset_paths_match_generation_and_training() -> None:
+    for path in PRESET_DIR.glob("franka_reach*.yaml"):
+        preset = _load_yaml(path)
+        experiment = preset["experiment"]
+        assert "legacy-60hz" in preset["workflow"]["dataset_subdir"]
+        root = Path(experiment["dataset_dir"]) / experiment["env_name"]
+        train = _load_yaml(REPOSITORY_ROOT / experiment["train_cfg"])
+        dataset = train["algorithm"]["dataset"]
+        paths = [dataset["train_dataset_path"], *dataset["valid_datasets"].values()]
+        paths.append(train["algorithm"]["eval"]["dataset_path"])
+        assert all(Path(value).parent == root for value in paths)
+
+
+def test_osmo_dataset_directory_prefers_cli_then_preset(tmp_path, monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import run_experiment
+
+    generated = []
+    monkeypatch.setattr(run_experiment, "generate_all_datasets", lambda experiment, specs, root: generated.append(root))
+    monkeypatch.setattr(run_experiment, "stage_generated_datasets", lambda **kwargs: None)
+    monkeypatch.setattr(run_experiment, "start_tensorboard", lambda *args: None)
+    monkeypatch.setattr(run_experiment, "run_training", lambda *args: None)
+    args = Namespace(
+        preset="franka_reach_newton_native_smoke",
+        preset_file=None,
+        output_root=str(tmp_path),
+        dataset_dir=None,
+        workflow_base_name="test",
+        dataset_subdir="test-cache",
+        dataset_cache_mode="off",
+        dataset_input_path="",
+        storage_backend="nvdataset",
+        swift_data_container="",
+        nvdataset_data_dataset="",
+        nvdataset_data_description="test",
+        tensorboard_port=6006,
+    )
+    run_experiment.run(args)
+    assert generated[-1] == Path("data/datasets/legacy-60hz")
+    args.dataset_dir = str(tmp_path / "explicit")
+    run_experiment.run(args)
+    assert generated[-1] == tmp_path / "explicit"
 
 
 def test_franka_presets_use_public_g1_develop_image() -> None:

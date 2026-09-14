@@ -7,10 +7,15 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
 import torch
 from isaaclab_neural.envs.franka_reach_nerd_env import FRANKA_REACH_DATASET_INCREMENT_SCALE
 from isaaclab_neural.envs.franka_scene import FRANKA_PANDA_CFG
 from isaaclab_neural.envs.incremental_joint_position import (
+    IncrementalJointPositionAction,
+    IncrementalJointPositionActionCfg,
     compute_incremental_position_targets,
     implicit_pd_rest_saturation_increment,
 )
@@ -53,6 +58,33 @@ def test_incremental_targets_clamp_to_soft_limits() -> None:
 def test_rest_saturation_increment_is_effort_over_stiffness() -> None:
     assert implicit_pd_rest_saturation_increment(87.0, 80.0) == 87.0 / 80.0
     assert implicit_pd_rest_saturation_increment(12.0, 80.0) == 12.0 / 80.0
+
+
+@pytest.mark.parametrize("stiffness", [40.0, 80.0, 0.0, -1.0, float("nan"), float("inf")])
+def test_increment_scale_uses_resolved_drives(stiffness: float) -> None:
+    position = torch.tensor([[0.0, 0.2, -0.1], [0.0, -0.2, 0.1]])
+    gains = torch.tensor([[0.0, stiffness, 120.0], [0.0, stiffness * 2.0, 60.0]])
+    efforts = torch.tensor([[0.0, 12.0, 24.0], [0.0, 24.0, 6.0]])
+    asset = SimpleNamespace(
+        num_joints=3,
+        find_joints=lambda names, preserve_order: ([2, 1], ["joint2", "joint1"]),
+        data=SimpleNamespace(
+            joint_pos=SimpleNamespace(torch=position),
+            joint_stiffness=SimpleNamespace(torch=gains),
+            joint_effort_limits=SimpleNamespace(torch=efforts),
+            soft_joint_pos_limits=SimpleNamespace(torch=torch.tensor([[[-4.0, 4.0]] * 3] * 2)),
+        ),
+    )
+    env = SimpleNamespace(scene={"robot": asset}, num_envs=2, device="cpu")
+    cfg = IncrementalJointPositionActionCfg(asset_name="robot", joint_names=["joint2", "joint1"], scale=None)
+    if not 0.0 < stiffness < float("inf"):
+        with pytest.raises(ValueError, match="stiffness"):
+            IncrementalJointPositionAction(cfg, env)
+        return
+    action = IncrementalJointPositionAction(cfg, env)
+    action.process_actions(torch.ones(2, 2))
+    expected = position[:, [2, 1]] + efforts[:, [2, 1]] / gains[:, [2, 1]]
+    torch.testing.assert_close(action.processed_actions, expected)
 
 
 def test_franka_increment_scale_matches_actuator_saturation() -> None:

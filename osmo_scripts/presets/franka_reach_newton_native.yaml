@@ -5,7 +5,7 @@
 
 workflow:
   base_name: franka-reach-newton-native
-  dataset_subdir: franka-reach-newton-native
+  dataset_subdir: franka-reach-legacy-60hz-wide-reset-200
   image: docker.io/rowany28070/isaac-lab-nerd:g1-develop
 
 resources:
@@ -16,6 +16,7 @@ resources:
   platform: ovx-l40s
 
 experiment:
+  dataset_dir: ./data/datasets/legacy-60hz
   env_name: Franka-Reach
   robot_name: Franka
   data_gen_task: Isaac-Reach-Franka-Dataset-Gen-v0
@@ -35,7 +36,7 @@ experiment:
   valid_transitions: 1000000
   data_gen_num_envs: 1024
   train_num_envs: 64
-  trajectory_length: 100
+  trajectory_length: 200
   write_chunk_transitions: 819200
   update_dataset_statistics: true
   policy_checkpoint: ./pretrained/control_policy/franka_reach/model_999.pt
