@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import importlib.metadata as metadata
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -32,6 +31,8 @@ import torch
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 from isaaclab_neural.utils.checkpoint import get_cfg_from_checkpoint, load_checkpoint
+from isaaclab_neural.utils.checkpoint import load_saved_agent_cfg_for_policy as _load_saved_agent_cfg_for_policy
+from isaaclab_neural.utils.checkpoint import normalize_runner_cfg as _normalize_runner_cfg
 
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
@@ -112,7 +113,7 @@ def _alias_vis_as_viz(parser: argparse.ArgumentParser) -> None:
     """Accept ``--vis`` as ``--viz``. Hydra would otherwise swallow the unknown flag."""
     for action in parser._actions:
         if "--viz" in action.option_strings and "--vis" not in action.option_strings:
-            action.option_strings.append("--vis")
+            action.option_strings = [*action.option_strings, "--vis"]
             parser._option_string_actions["--vis"] = action
             return
 
@@ -332,46 +333,11 @@ def summarize_step(result) -> str:
 
 def load_saved_agent_cfg_for_policy(checkpoint_path: str, fallback_agent_cfg, *, device: str, seed: int):
     """Load the RSL-RL runner config saved next to a policy checkpoint when available."""
-    agent_cfg_path = Path(checkpoint_path).expanduser().resolve().parent / "params" / "agent.yaml"
-    if not agent_cfg_path.exists():
-        return fallback_agent_cfg
-
-    import yaml
-
-    with agent_cfg_path.open("r") as f:
-        agent_cfg = yaml.safe_load(f)
-    if not isinstance(agent_cfg, Mapping):
-        raise ValueError(f"Expected a mapping in saved RSL-RL agent config: {agent_cfg_path}")
-
-    agent_cfg = copy.deepcopy(dict(agent_cfg))
-    agent_cfg["device"] = device
-    agent_cfg["seed"] = seed
-    print(f"[policy] using saved RSL-RL agent config: {agent_cfg_path}")
-    return agent_cfg
+    return _load_saved_agent_cfg_for_policy(checkpoint_path, fallback_agent_cfg, device=device, seed=seed)
 
 
 def normalize_runner_cfg(agent_cfg, *, device: str):
-    if isinstance(agent_cfg, Mapping):
-        runner_cfg = copy.deepcopy(dict(agent_cfg))
-        runner_cfg["device"] = device
-        return (
-            runner_cfg,
-            runner_cfg.get("class_name", "OnPolicyRunner"),
-            runner_cfg.get("clip_actions"),
-            runner_cfg.get("device", device),
-        )
-
-    from isaaclab_rl.rsl_rl import handle_deprecated_rsl_rl_cfg
-
-    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, metadata.version("rsl-rl-lib"))
-    agent_cfg.device = device
-    runner_cfg = agent_cfg.to_dict() if hasattr(agent_cfg, "to_dict") else dict(vars(agent_cfg))
-    return (
-        runner_cfg,
-        getattr(agent_cfg, "class_name", "OnPolicyRunner"),
-        getattr(agent_cfg, "clip_actions", None),
-        getattr(agent_cfg, "device", device),
-    )
+    return _normalize_runner_cfg(agent_cfg, device=device)
 
 
 def build_policy_env(env, agent_cfg, checkpoint_path: str, device: str):

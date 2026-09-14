@@ -5,9 +5,14 @@
 
 from __future__ import annotations
 
+import copy
 import importlib
+import importlib.metadata as metadata
 import os
 import sys
+from collections.abc import Mapping
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -15,7 +20,85 @@ import yaml
 from isaaclab_neural.models.models import ModelMixedInput
 from isaaclab_neural.utils.running_mean_std import RunningMeanStd
 
+from isaaclab.utils.dict import class_to_dict
+
+if TYPE_CHECKING:
+    from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg
+
 CHECKPOINT_VERSION = 2
+
+
+def load_saved_agent_cfg_for_policy(
+    checkpoint_path: str,
+    fallback_agent_cfg: Mapping[str, Any] | RslRlBaseRunnerCfg | None,
+    *,
+    device: str,
+    seed: int | None,
+) -> Mapping[str, Any] | RslRlBaseRunnerCfg | None:
+    """Load the policy checkpoint's adjacent ``params/agent.yaml`` when available.
+
+    Args:
+        checkpoint_path: Path to the policy checkpoint.
+        fallback_agent_cfg: Task configuration used if no saved configuration exists.
+        device: Device used for playback instead of the saved training device.
+        seed: Explicit seed override, or ``None`` to preserve the saved seed.
+
+    Returns:
+        The saved runner configuration or the unchanged fallback configuration.
+
+    Raises:
+        ValueError: If the saved configuration is not a mapping.
+    """
+    agent_cfg_path = Path(checkpoint_path).expanduser().resolve().parent / "params" / "agent.yaml"
+    if not agent_cfg_path.exists():
+        return fallback_agent_cfg
+
+    with agent_cfg_path.open("r", encoding="utf-8") as f:
+        agent_cfg = yaml.safe_load(f)
+    if not isinstance(agent_cfg, Mapping):
+        raise ValueError(f"Expected a mapping in saved RSL-RL agent config: {agent_cfg_path}")
+
+    agent_cfg = copy.deepcopy(dict(agent_cfg))
+    agent_cfg["device"] = device
+    if seed is not None:
+        agent_cfg["seed"] = seed
+    print(f"[policy] using saved RSL-RL agent config: {agent_cfg_path}")
+    return agent_cfg
+
+
+def normalize_runner_cfg(
+    agent_cfg: Mapping[str, Any] | RslRlBaseRunnerCfg, *, device: str
+) -> tuple[dict[str, Any], str, float | None, str]:
+    """Normalize saved or registered RSL-RL configuration for policy playback.
+
+    Args:
+        agent_cfg: Saved runner mapping or registered runner configuration.
+        device: Runtime device overriding the training device.
+
+    Returns:
+        Runner configuration, runner class name, action clipping limit, and device.
+    """
+    if isinstance(agent_cfg, Mapping):
+        runner_cfg = copy.deepcopy(dict(agent_cfg))
+        runner_cfg["device"] = device
+        return (
+            runner_cfg,
+            runner_cfg.get("class_name", "OnPolicyRunner"),
+            runner_cfg.get("clip_actions"),
+            runner_cfg.get("device", device),
+        )
+
+    from isaaclab_rl.rsl_rl import handle_deprecated_rsl_rl_cfg
+
+    normalized_cfg: RslRlBaseRunnerCfg = handle_deprecated_rsl_rl_cfg(agent_cfg, metadata.version("rsl-rl-lib"))
+    normalized_cfg.device = device
+    runner_cfg = class_to_dict(normalized_cfg)
+    return (
+        runner_cfg,
+        getattr(normalized_cfg, "class_name", "OnPolicyRunner"),
+        getattr(normalized_cfg, "clip_actions", None),
+        getattr(normalized_cfg, "device", device),
+    )
 
 
 def install_legacy_module_aliases() -> None:

@@ -42,8 +42,19 @@ test -f "$NERD_CHECKPOINT"
   --num-steps 1000
 ```
 
-Keep the policy's adjacent `params/agent.yaml` when moving a checkpoint. The
-evaluator uses it to reproduce inference settings such as action clipping.
+Keep the policy's adjacent `params/agent.yaml` when moving a checkpoint. Both the
+evaluator and `isaaclab_neural.rl.rsl_rl.play` restore it before constructing the
+runner, including the network structure and action clipping. The playback device
+replaces the saved training device. The `play` entrypoint preserves the saved seed
+unless `--seed` is supplied, and explicit `--clip-actions` overrides saved clipping.
+Without the YAML file, both entrypoints fall back to the registered task's agent
+configuration; an invalid saved YAML file raises an error rather than falling back.
+
+The shared `isaaclab_neural.utils.checkpoint.load_saved_agent_cfg_for_policy` and
+`normalize_runner_cfg` helpers implement this loading and normalization. The
+existing evaluator helpers remain available. These helpers restore agent settings
+only; the environment configuration and dynamics checkpoint must still match the
+intended playback experiment.
 
 Policy checkpoints under `pretrained/control_policy/anymal_c_flat_terrain/`
 and `pretrained/control_policy/anymal_c_rough_terrain/` are managed with Git

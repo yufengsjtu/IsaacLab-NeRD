@@ -17,7 +17,6 @@ Example:
 from __future__ import annotations
 
 import argparse
-import importlib.metadata as metadata
 import os
 import sys
 import time
@@ -26,12 +25,13 @@ import torch
 
 from isaaclab.utils.assets import retrieve_file_path
 
-from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
+from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import isaaclab_neural.envs  # noqa: F401 - registers NeRD gym tasks
 from isaaclab_neural.rl.rsl_rl import cli_args
+from isaaclab_neural.utils.checkpoint import load_saved_agent_cfg_for_policy, normalize_runner_cfg
 from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
 
 
@@ -82,14 +82,12 @@ def main(env_cfg, agent_cfg) -> None:
         raise SystemExit("Play requires --checkpoint PATH to an RSL-RL policy file.")
 
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
-    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, metadata.version("rsl-rl-lib"))
 
     if args_cli.num_envs is not None:
         env_cfg.scene.num_envs = args_cli.num_envs
     # --device comes from AppLauncher (default cuda:0).
     env_cfg.sim.device = args_cli.device
     agent_cfg.device = args_cli.device
-    env_cfg.seed = agent_cfg.seed
 
     solver_cfg = cli_args.apply_neural_model_to_env_cfg(env_cfg, args_cli)
 
@@ -99,19 +97,34 @@ def main(env_cfg, agent_cfg) -> None:
         log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
+    saved_agent_cfg = load_saved_agent_cfg_for_policy(
+        resume_path,
+        agent_cfg,
+        device=args_cli.device,
+        seed=agent_cfg.seed if args_cli.seed is not None else None,
+    )
+    if saved_agent_cfg is None:
+        raise ValueError("No RSL-RL agent configuration available for playback.")
+    runner_cfg, class_name, clip_actions, runner_device = normalize_runner_cfg(saved_agent_cfg, device=args_cli.device)
+    if class_name != "OnPolicyRunner":
+        raise ValueError(f"Unsupported RSL-RL runner class for play: {class_name}")
+    if args_cli.clip_actions is not None:
+        clip_actions = runner_cfg["clip_actions"] = args_cli.clip_actions
+    env_cfg.seed = runner_cfg.setdefault("seed", agent_cfg.seed)
+
     with launch_simulation(cli_args.build_launch_cfg(env_cfg), args_cli):
         import gymnasium as gym
 
-        gym_kwargs = {"cfg": env_cfg, "device": agent_cfg.device}
+        gym_kwargs = {"cfg": env_cfg, "device": runner_device}
         if solver_cfg is not None:
             gym_kwargs["solver_cfg"] = solver_cfg
         with newton_material_binding_api_autofix():
             env = gym.make(args_cli.task, **gym_kwargs)
 
-        env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        env = RslRlVecEnvWrapper(env, clip_actions=clip_actions)
+        runner = OnPolicyRunner(env, runner_cfg, log_dir=None, device=runner_device)
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-        runner.load(resume_path)
+        runner.load(resume_path, map_location=runner_device)
         policy = runner.get_inference_policy(device=env.unwrapped.device)
 
         obs = env.get_observations()
