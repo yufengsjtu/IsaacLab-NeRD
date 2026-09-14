@@ -231,7 +231,8 @@ def test_g1_policy_noise_preset_trains_policy_and_noise(monkeypatch: pytest.Monk
         "deployment_policy_trajectory",
     }
     assert "pool_perturbed_random" not in train_cfg["algorithm"]["dataset"]["valid_datasets"]
-    assert float(train_cfg["algorithm"]["optimizer"]["lr_start"]) == 1.0e-3
+    assert float(train_cfg["algorithm"]["optimizer"]["lr_start"]) == 2.0e-4
+    assert float(train_cfg["algorithm"]["optimizer"]["lr_end"]) == 2.0e-5
     assert train_cfg["algorithm"]["num_iters_per_epoch"] == 1250
     assert train_cfg["algorithm"]["batch_size"] == 1024
     assert train_cfg["network"]["model"]["mlp"]["layer_sizes"] == [128]
