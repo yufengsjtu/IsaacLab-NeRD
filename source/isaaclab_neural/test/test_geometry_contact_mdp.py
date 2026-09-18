@@ -124,3 +124,84 @@ def test_geometry_feet_air_time_rewards_touchdown_after_air(monkeypatch):
         term(env, body_cfg, "base_velocity", threshold=0.15),
         torch.full((2,), 0.05),
     )
+
+
+def test_geometry_feet_slide_tracks_history_and_resets(monkeypatch):
+    from isaaclab_neural.contacts.geometry_mdp import GeometryFeetSlide
+
+    callbacks = []
+    contact = torch.tensor([[True, False], [False, True]])
+    velocity = torch.tensor([[[3.0, 4.0, 99.0], [0.0, 2.0, 99.0]]]).repeat(2, 1, 1)
+    env = SimpleNamespace(
+        num_envs=2,
+        device="cpu",
+        sim=SimpleNamespace(physics_manager=SimpleNamespace(register_post_step_callback=callbacks.append)),
+        scene={"robot": SimpleNamespace(data=SimpleNamespace(body_lin_vel_w=SimpleNamespace(torch=velocity)))},
+    )
+    body_cfg = SimpleNamespace(name="robot", body_ids=[0, 1])
+    cfg = SimpleNamespace(params={"body_cfg": body_cfg, "history_length": 3})
+    monkeypatch.setattr("isaaclab_neural.contacts.geometry_mdp.body_contacts", lambda *args, **kwargs: contact)
+    term = GeometryFeetSlide(cfg, env)
+    callbacks[0]()
+    torch.testing.assert_close(term(env, body_cfg), torch.tensor([5.0, 2.0]))
+    contact.zero_()
+    callbacks[0]()
+    term.reset([0])
+    torch.testing.assert_close(term(env, body_cfg), torch.tensor([0.0, 2.0]))
+    callbacks[0]()
+    torch.testing.assert_close(term(env, body_cfg), torch.tensor([0.0, 2.0]))
+    callbacks[0]()
+    torch.testing.assert_close(term(env, body_cfg), torch.zeros(2))
+    contact.fill_(True)
+    callbacks[0]()
+    torch.testing.assert_close(term(env, body_cfg), torch.full((2,), 7.0))
+    term.reset()
+    torch.testing.assert_close(term(env, body_cfg), torch.zeros(2))
+
+
+def test_biped_geometry_reward_tracks_physics_steps_and_partial_resets(monkeypatch):
+    from isaaclab_neural.contacts.geometry_mdp import GeometryFeetAirTimePositiveBiped
+
+    from isaaclab_tasks.core.velocity.mdp.rewards import feet_air_time_positive_biped
+
+    callbacks = []
+    command = torch.tensor([[0.5, 0.0], [0.5, 0.0]])
+    contact = torch.zeros((2, 2), dtype=torch.bool)
+    air = torch.zeros((2, 2))
+    stance = torch.zeros((2, 2))
+    sensor = SimpleNamespace(
+        data=SimpleNamespace(
+            current_air_time=SimpleNamespace(torch=air), current_contact_time=SimpleNamespace(torch=stance)
+        )
+    )
+    env = SimpleNamespace(
+        num_envs=2,
+        device="cpu",
+        physics_dt=0.005,
+        step_dt=0.02,
+        sim=SimpleNamespace(physics_manager=SimpleNamespace(register_post_step_callback=callbacks.append)),
+        command_manager=SimpleNamespace(get_command=lambda _: command),
+        scene=SimpleNamespace(sensors={"contact_forces": sensor}),
+    )
+    body_cfg = SimpleNamespace(body_ids=[0, 1])
+    sensor_cfg = SimpleNamespace(name="contact_forces", body_ids=[0, 1])
+    monkeypatch.setattr("isaaclab_neural.contacts.geometry_mdp.body_contacts", lambda *args, **kwargs: contact)
+    term = GeometryFeetAirTimePositiveBiped(SimpleNamespace(params={"body_cfg": body_cfg}), env)
+    sequence = [(True, False), (True, True), (True, False), (True, False)] * 3
+    for index, state in enumerate(sequence):
+        contact[0] = torch.tensor(state)
+        contact[1] = torch.tensor([False, True])
+        air.copy_(torch.where(contact, 0.0, air + env.physics_dt))
+        stance.copy_(torch.where(contact, stance + env.physics_dt, 0.0))
+        callbacks[0]()
+        if index % 4 == 3:
+            expected = feet_air_time_positive_biped(env, "base_velocity", 0.025, sensor_cfg)
+            torch.testing.assert_close(term(env, body_cfg, "base_velocity", 0.025), expected)
+            torch.testing.assert_close(term(env, body_cfg, "base_velocity", 0.025), expected)
+    term.reset([0])
+    torch.testing.assert_close(term(env, body_cfg, "base_velocity", 0.025), torch.tensor([0.0, 0.025]))
+    command.zero_()
+    torch.testing.assert_close(term(env, body_cfg, "base_velocity", 0.025), torch.zeros(2))
+    term.reset()
+    command[:, 0] = 0.5
+    torch.testing.assert_close(term(env, body_cfg, "base_velocity", 0.025), torch.zeros(2))

@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from typing import TYPE_CHECKING
 
+import torch
 from isaaclab_newton.physics import NewtonCollisionPipelineCfg, NewtonShapeCfg
 
 from isaaclab.managers import RewardTermCfg as RewTerm
@@ -23,11 +25,53 @@ from isaaclab_tasks.utils.hydra import resolve_presets
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 
-from ..contacts.geometry_mdp import GeometryFeetAirTime, geometry_illegal_contact
+from ..contacts.geometry_mdp import GeometryFeetAirTimePositiveBiped, GeometryFeetSlide, geometry_illegal_contact
 from .neural_env_wrapper import NerdManagerBasedRLEnv
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedRLEnv
 
 DEFAULT_G1_FLAT_NERD_MODEL_PATH = "./pre-trained_models/G1/nn/final_model.pt"
 DEFAULT_G1_ROUGH_NERD_MODEL_PATH = "./pre-trained_models/G1-Rough-Native/nn/final_model.pt"
+
+
+def g1_invalid_state(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    maximum_height: float = 1.5,
+    maximum_linear_velocity: float = 20.0,
+    maximum_angular_velocity: float = 50.0,
+    maximum_joint_velocity: float = 100.0,
+) -> torch.Tensor:
+    """Terminate extreme finite G1 states on flat terrain; reject non-finite states.
+
+    Args:
+        env: Environment containing the robot and environment origins.
+        asset_cfg: Robot to inspect.
+        maximum_height: Root height above the environment origin [m].
+        maximum_linear_velocity: Maximum absolute root velocity component [m/s].
+        maximum_angular_velocity: Maximum absolute root angular velocity component [rad/s].
+        maximum_joint_velocity: Maximum absolute joint velocity [rad/s].
+
+    Returns:
+        Failure flags for each environment, not timeouts.
+
+    Raises:
+        FloatingPointError: State contains NaN or infinity. Resetting after reward
+            computation would otherwise allow non-finite rewards into PPO.
+    """
+    data = env.scene[asset_cfg.name].data
+    root = data.root_state_w.torch
+    joints = data.joint_pos.torch
+    joint_velocity = data.joint_vel.torch
+    if not (torch.isfinite(root).all() & torch.isfinite(joints).all() & torch.isfinite(joint_velocity).all()):
+        raise FloatingPointError("Non-finite G1 state; stopping before reward computation.")
+    return (
+        (root[:, 2] - env.scene.env_origins[:, 2] > maximum_height)
+        | (root[:, 7:10].abs().amax(dim=1) > maximum_linear_velocity)
+        | (root[:, 10:13].abs().amax(dim=1) > maximum_angular_velocity)
+        | (joint_velocity.abs().amax(dim=1) > maximum_joint_velocity)
+    )
 
 
 def apply_g1_contact_mode_mdp(env_cfg) -> None:
@@ -38,17 +82,35 @@ def apply_g1_contact_mode_mdp(env_cfg) -> None:
     terms are remapped or disabled under ``newton_native``.
     """
     mode = env_cfg.sim.physics.solver_cfg.contact_mode
+    slide_cfg = env_cfg.rewards.feet_slide
     env_cfg.scene.contact_forces = None
     # Force-sensor feet slide is unavailable without contact_forces.
     env_cfg.rewards.feet_slide = None
     if mode == "newton_native":
+        air_time_cfg = env_cfg.rewards.feet_air_time
+        if air_time_cfg is None:
+            stock_cfg = G1FlatEnvCfg() if isinstance(env_cfg, G1FlatEnvCfg) else G1RoughEnvCfg()
+            air_time_cfg = stock_cfg.rewards.feet_air_time
+        slide_weight = 0.0
+        if isinstance(env_cfg, G1FlatEnvCfg):
+            if slide_cfg is None:
+                slide_cfg = G1FlatEnvCfg().rewards.feet_slide
+            slide_weight = slide_cfg.weight
         env_cfg.rewards.feet_air_time = RewTerm(
-            func=GeometryFeetAirTime,
-            weight=0.25,
+            func=GeometryFeetAirTimePositiveBiped,
+            weight=air_time_cfg.weight,
             params={
                 "body_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
                 "command_name": "base_velocity",
-                "threshold": 0.4,
+                "threshold": air_time_cfg.params["threshold"],
+            },
+        )
+        env_cfg.rewards.feet_slide = RewTerm(
+            func=GeometryFeetSlide,
+            weight=slide_weight,
+            params={
+                "body_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+                "history_length": 3,
             },
         )
         env_cfg.terminations.base_contact = DoneTerm(
@@ -99,6 +161,7 @@ class NerdG1FlatEnvCfg(G1FlatEnvCfg):
             use_cuda_graph=False,
         )
         apply_g1_contact_mode_mdp(self)
+        self.terminations.invalid_state = DoneTerm(func=g1_invalid_state)
 
 
 class NerdG1FlatEnv(NerdManagerBasedRLEnv):

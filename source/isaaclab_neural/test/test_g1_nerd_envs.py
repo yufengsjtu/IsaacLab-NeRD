@@ -44,7 +44,7 @@ def test_g1_flat_nerd_cfg_uses_newton_native_by_default():
     assert cfg.sim.physics.solver_cfg.contact_mode == "newton_native"
     assert cfg.sim.physics.solver_cfg.num_contacts_per_env == 64
     assert cfg.scene.contact_forces is None
-    assert cfg.rewards.feet_slide is None
+    assert cfg.rewards.feet_slide.weight == -0.1
     assert cfg.rewards.feet_air_time is not None
     assert cfg.terminations.base_contact is not None
     assert cfg.terminations.base_contact.params["body_cfg"].body_names == "torso_link"
@@ -58,7 +58,7 @@ def test_g1_rough_nerd_cfg_uses_newton_native_geometry_mdp():
     assert cfg.sim.physics.solver_cfg.contact_mode == "newton_native"
     assert cfg.sim.physics.solver_cfg.num_contacts_per_env == 64
     assert cfg.scene.contact_forces is None
-    assert cfg.rewards.feet_slide is None
+    assert cfg.rewards.feet_slide.weight == 0.0
     assert cfg.rewards.feet_air_time is not None
     assert cfg.terminations.base_contact is not None
     assert cfg.rewards.feet_air_time.params["body_cfg"].body_names == ".*_ankle_roll_link"
@@ -115,9 +115,11 @@ def test_g1_rl_solver_overrides_preserve_task_mdp(
         cfg.rewards.feet_air_time.weight = 0.0
         cfg.rewards.feet_air_time.params["threshold"] = 0.9
         cfg.rewards.feet_air_time.params["body_cfg"].body_names = "left_ankle_roll_link"
+        cfg.rewards.feet_slide.weight = 0.0
         cfg.terminations.base_contact.params["body_cfg"].body_names = "pelvis"
     elif mdp_override == "disabled":
         setattr(cfg.rewards, "feet_air_time", None)
+        setattr(cfg.rewards, "feet_slide", None)
         setattr(cfg.terminations, "base_contact", None)
     expected_rewards = class_to_dict(cfg.rewards)
     expected_terminations = class_to_dict(cfg.terminations)
@@ -194,6 +196,11 @@ def test_g1_contact_mode_helper_reconfigures_geometry_mdp():
     apply_g1_contact_mode_mdp(cfg)
     assert cfg.rewards.feet_air_time is None
     assert cfg.terminations.base_contact is None
+    setattr(cfg.sim.physics.solver_cfg, "contact_mode", "newton_native")
+    apply_g1_contact_mode_mdp(cfg)
+    assert cfg.rewards.feet_air_time.weight == 0.75
+    assert cfg.rewards.feet_slide.weight == -0.1
+    assert cfg.terminations.base_contact is not None
 
 
 def test_g1_token_runtime_base_contact_detects_torso(monkeypatch):
@@ -366,6 +373,61 @@ def test_g1_nerd_keeps_stock_flat_velocity_commands():
     nerd_rough = NerdG1RoughEnvCfg()
     assert nerd_rough.commands.base_velocity.ranges.lin_vel_y == stock_rough.commands.base_velocity.ranges.lin_vel_y
     assert nerd_rough.commands.base_velocity.heading_command is True
+
+
+@pytest.mark.parametrize("terrain", ("flat", "rough"))
+def test_g1_biped_reward_keeps_stock_weight_and_threshold(terrain):
+    from isaaclab_neural.contacts.geometry_mdp import GeometryFeetAirTimePositiveBiped, GeometryFeetSlide
+    from isaaclab_neural.envs.g1_nerd_env import NerdG1FlatEnvCfg, NerdG1RoughEnvCfg
+
+    from isaaclab_tasks.core.velocity.config.g1.flat_env_cfg import G1FlatEnvCfg
+    from isaaclab_tasks.core.velocity.config.g1.rough_env_cfg import G1RoughEnvCfg
+
+    stock = G1FlatEnvCfg() if terrain == "flat" else G1RoughEnvCfg()
+    cfg = NerdG1FlatEnvCfg() if terrain == "flat" else NerdG1RoughEnvCfg()
+    assert cfg.rewards.feet_air_time.func is GeometryFeetAirTimePositiveBiped
+    assert cfg.rewards.feet_air_time.weight == stock.rewards.feet_air_time.weight
+    assert cfg.rewards.feet_air_time.params["threshold"] == stock.rewards.feet_air_time.params["threshold"]
+    assert cfg.rewards.feet_slide.func is GeometryFeetSlide
+    expected_slide_weight = stock.rewards.feet_slide.weight if terrain == "flat" else 0.0
+    assert cfg.rewards.feet_slide.weight == expected_slide_weight
+    assert cfg.rewards.feet_slide.params["history_length"] == stock.scene.contact_forces.history_length
+    if terrain == "flat":
+        assert {name: term.weight for name, term in vars(cfg.rewards).items() if term is not None} == {
+            name: term.weight for name, term in vars(stock.rewards).items() if term is not None
+        }
+
+
+def test_g1_flat_invalid_state_terminates_finite_outliers_and_rejects_nan():
+    from isaaclab_neural.envs.g1_nerd_env import NerdG1FlatEnvCfg
+
+    cfg = NerdG1FlatEnvCfg()
+    term = cfg.terminations.invalid_state
+    assert not term.time_out
+    root = torch.zeros((5, 13))
+    root[:, 2] = 0.7
+    root[:, 6] = 1.0
+    joints = torch.zeros((5, 37))
+    velocities = torch.zeros_like(joints)
+    data = SimpleNamespace(
+        root_state_w=SimpleNamespace(torch=root),
+        joint_pos=SimpleNamespace(torch=joints),
+        joint_vel=SimpleNamespace(torch=velocities),
+    )
+    scene = {"robot": SimpleNamespace(data=data)}
+
+    class Scene(dict):
+        env_origins = torch.zeros((5, 3))
+
+    env = SimpleNamespace(scene=Scene(scene))
+    root[1, 2] = 2.0
+    root[2, 7] = 21.0
+    root[3, 10] = 51.0
+    velocities[4, 0] = 101.0
+    torch.testing.assert_close(term.func(env, **term.params), torch.tensor([False, True, True, True, True]))
+    root[0, 2] = float("nan")
+    with pytest.raises(FloatingPointError, match="Non-finite G1 state"):
+        term.func(env, **term.params)
 
 
 def test_g1_rough_nerd_task_uses_rough_agent_cfg():

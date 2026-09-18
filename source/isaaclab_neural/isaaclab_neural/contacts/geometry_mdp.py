@@ -127,6 +127,113 @@ class GeometryFeetAirTime(ManagerTermBase):
         return reward
 
 
+class GeometryFeetAirTimePositiveBiped(ManagerTermBase):
+    """Reward single-foot support with physics-step geometry contact timers.
+
+    Timers sample the solver's input contacts after each physics step, so the
+    contact state precedes the returned pose by one physics step. Reading the
+    reward does not advance time. The physics manager clears the callback on close.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._body_ids = cfg.params["body_cfg"].body_ids
+        self._maximum_separation = cfg.params.get("maximum_separation", 0.0)
+        self._dt = env.physics_dt
+        self._air_time = torch.zeros((env.num_envs, len(self._body_ids)), device=env.device)
+        self._contact_time = torch.zeros_like(self._air_time)
+        env.sim.physics_manager.register_post_step_callback(self._update)
+
+    def _update(self) -> None:
+        contact = body_contacts(self._body_ids, maximum_separation=self._maximum_separation)
+        self._air_time.copy_(torch.where(contact, 0.0, self._air_time + self._dt))
+        self._contact_time.copy_(torch.where(contact, self._contact_time + self._dt, 0.0))
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        self._air_time[env_ids] = 0.0
+        self._contact_time[env_ids] = 0.0
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        body_cfg: SceneEntityCfg,
+        command_name: str,
+        threshold: float,
+        maximum_separation: float = 0.0,
+    ) -> torch.Tensor:
+        """Compute the stock biped reward using geometric contact durations.
+
+        Args:
+            env: Environment supplying velocity commands.
+            body_cfg: Feet selected when constructing the term.
+            command_name: Velocity command to gate standing environments.
+            threshold: Maximum rewarded single-support duration [s].
+            maximum_separation: Contact separation configured at construction [m].
+
+        Returns:
+            Capped single-support duration [s] for each environment.
+        """
+        del body_cfg, maximum_separation
+        contact = self._contact_time > 0.0
+        mode_time = torch.where(contact, self._contact_time, self._air_time)
+        single_stance = contact.sum(dim=1) == 1
+        reward = torch.where(single_stance, mode_time.min(dim=1).values, 0.0).clamp(max=threshold)
+        return reward * (env.command_manager.get_command(command_name)[:, :2].norm(dim=1) > 0.1)
+
+
+class GeometryFeetSlide(ManagerTermBase):
+    """Measure foot COM horizontal speed during recent geometry contact.
+
+    Contact history samples the solver's input contacts at physics-step frequency.
+    This is a force-free sliding proxy, not a measurement of contact-point slip.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._body_ids = cfg.params["body_cfg"].body_ids
+        self._maximum_separation = cfg.params.get("maximum_separation", 0.0)
+        history_length = cfg.params.get("history_length", 3)
+        if history_length < 1:
+            raise ValueError("GeometryFeetSlide requires history_length >= 1.")
+        self._history = torch.zeros(
+            (env.num_envs, history_length, len(self._body_ids)), dtype=torch.bool, device=env.device
+        )
+        env.sim.physics_manager.register_post_step_callback(self._update)
+
+    def _update(self) -> None:
+        self._history[:, 1:] = self._history[:, :-1].clone()
+        self._history[:, 0] = body_contacts(self._body_ids, maximum_separation=self._maximum_separation)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        self._history[env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        body_cfg: SceneEntityCfg,
+        history_length: int = 3,
+        maximum_separation: float = 0.0,
+    ) -> torch.Tensor:
+        """Sum planar foot speed over bodies with recent contact.
+
+        Args:
+            env: Environment containing the selected robot.
+            body_cfg: Feet selected when constructing the term.
+            history_length: Number of physics-step samples configured at construction.
+            maximum_separation: Contact separation configured at construction [m].
+
+        Returns:
+            Sum of contacting foot COM horizontal speeds [m/s] per environment.
+        """
+        del history_length, maximum_separation
+        velocity = env.scene[body_cfg.name].data.body_lin_vel_w.torch[:, body_cfg.body_ids, :2]
+        return (velocity.norm(dim=-1) * self._history.any(dim=1)).sum(dim=1)
+
+
 def geometry_undesired_contacts(
     env: ManagerBasedRLEnv,
     body_cfg: SceneEntityCfg,
