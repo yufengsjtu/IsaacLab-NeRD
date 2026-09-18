@@ -300,6 +300,8 @@ class NewtonNerdManager(NewtonManager):
 
             cls._run_solver_substeps(contacts)
 
+        for callback in cls._post_step_callbacks:
+            callback()
         cls._update_sensors(contacts)
         cls._sync_upstream_newton_state()
 
@@ -313,6 +315,8 @@ class NewtonNerdManager(NewtonManager):
         if not cls._skip_applied_effort_overlay:
             cls._overlay_applied_effort_into_joint_f()
         cls._run_solver_substeps(contacts)
+        for callback in cls._post_step_callbacks:
+            callback()
         cls._update_sensors(contacts)
         cls._sync_upstream_newton_state()
 

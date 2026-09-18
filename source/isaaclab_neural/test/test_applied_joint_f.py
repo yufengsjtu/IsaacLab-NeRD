@@ -210,6 +210,31 @@ def test_simulate_physics_only_overlays_unless_skipped(monkeypatch) -> None:
     ]
 
 
+def test_nerd_post_step_callbacks_run_after_solver_before_sensors(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(NewtonNerdManager, "_nerd_active", True)
+    monkeypatch.setattr(NewtonNerdManager, "_skip_applied_effort_overlay", True)
+    monkeypatch.setattr(NewtonNerdManager, "_solver_dt", 0.005)
+    monkeypatch.setattr(NewtonNerdManager, "_num_substeps", 1)
+    monkeypatch.setattr(NewtonNerdManager, "_decimation", 2)
+    monkeypatch.setattr(NewtonNerdManager, "_adapter", None)
+    monkeypatch.setattr(NewtonNerdManager, "_prepare_nerd_contacts", classmethod(lambda cls: None))
+    monkeypatch.setattr(NewtonNerdManager, "_run_post_actuator_hooks", classmethod(lambda cls: None))
+    monkeypatch.setattr(
+        NewtonNerdManager, "_run_solver_substeps", classmethod(lambda cls, contacts: calls.append("solve"))
+    )
+    monkeypatch.setattr(NewtonNerdManager, "_post_step_callbacks", [lambda: calls.append("post")])
+    monkeypatch.setattr(
+        NewtonNerdManager, "_update_sensors", classmethod(lambda cls, contacts: calls.append("sensors"))
+    )
+    monkeypatch.setattr(NewtonNerdManager, "_sync_upstream_newton_state", classmethod(lambda cls: None))
+    NewtonNerdManager._simulate_full()
+    assert calls == ["solve", "solve", "post", "sensors"]
+    calls.clear()
+    NewtonNerdManager._simulate_physics_only()
+    assert calls == ["solve", "post", "sensors"]
+
+
 def test_training_eval_joint_f_step_skips_applied_effort_overlay(monkeypatch) -> None:
     from isaaclab_neural.eval.training_evaluator import TrainingRolloutEvaluator
 
