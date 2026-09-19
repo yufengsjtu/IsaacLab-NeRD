@@ -52,6 +52,7 @@ BODY_FORCE_TARGET_KEY = "body_net_contact_forces_b"
 DEFAULT_ACTIVE_CONTACT_FORCE_THRESHOLD_N = 1.0
 
 NON_MODEL_DATA_KEYS = {
+    "physics_step",
     "contact_token_body_ids",
     "contact_token_world_ids",
     "root_body_qd",
@@ -266,6 +267,13 @@ class VanillaTrainer:
 
         force_head_cfg = cfg["network"].get("body_net_contact_force_head", {})
         self.force_head_enabled = bool(getattr(self.neural_model, "predict_body_net_contact_forces", False))
+        self.finger_force_head_enabled = bool(getattr(self.neural_model, "predict_finger_object_normal_forces", False))
+        requested_finger_head = cfg["network"].get("finger_object_normal_force_head", {}).get("enabled", False)
+        if requested_finger_head != self.finger_force_head_enabled:
+            raise ValueError("The checkpoint's filtered finger-force head does not match the training configuration.")
+        self.finger_force_loss_weight = float(
+            algo_cfg.get("loss", {}).get("finger_object_normal_force", {}).get("weight", 1.0)
+        )
         force_loss_cfg = algo_cfg.get("loss", {}).get("body_net_contact_force", {})
         self.force_loss_weight = float(force_loss_cfg.get("weight", force_head_cfg.get("loss_weight", 1.0)))
         self.active_contact_force_threshold_n = float(
@@ -348,6 +356,9 @@ class VanillaTrainer:
 
             force_rms_missing = (
                 self.force_head_enabled and getattr(self.neural_model, "body_net_contact_force_rms", None) is None
+            ) or (
+                self.finger_force_head_enabled
+                and getattr(self.neural_model, "finger_object_normal_force_rms", None) is None
             )
             checkpoint_loss_weights_missing = self._checkpoint is not None and "loss_weights" not in self._checkpoint
             if (
@@ -363,6 +374,10 @@ class VanillaTrainer:
                 self.neural_model_unwrapped.set_output_rms(self.dataset_rms["prediction_target"])
                 if self.force_head_enabled:
                     self.neural_model_unwrapped.set_body_net_contact_force_rms(self.dataset_rms[BODY_FORCE_TARGET_KEY])
+                if self.finger_force_head_enabled:
+                    self.neural_model_unwrapped.set_finger_object_normal_force_rms(
+                        self.dataset_rms["finger_object_normal_forces_b"]
+                    )
                 self.loss_weights = (
                     1.0 / torch.sqrt(self.dataset_rms["relative_states"].var + 1e-5)
                     if algo_cfg.get("weighted_loss", True)
@@ -603,6 +618,8 @@ class VanillaTrainer:
             eval_horizon=self.eval_horizon,
             device=self.device,
             require_terrain_context=self.eval_require_terrain_context,
+            rebase_env_origins=bool(eval_cfg.get("rebase_env_origins", False)),
+            preserve_source_origins=bool(eval_cfg.get("preserve_source_origins", False)),
             contact_context_validation=self.eval_contact_context_validation,
             state_context_tolerance=self.eval_state_context_tolerance,
             contact_context_tolerance=self.eval_contact_context_tolerance,
@@ -667,6 +684,16 @@ class VanillaTrainer:
 
     def _validate_force_label_datasets(self) -> None:
         """Require force labels in every dataset when the auxiliary head is enabled."""
+        if getattr(self, "finger_force_head_enabled", False):
+            missing_finger = [
+                name
+                for name, dataset in {"train": self.train_dataset, **self.valid_datasets}.items()
+                if dataset is not None and "finger_object_normal_forces_w" not in getattr(dataset, "data_keys", ())
+            ]
+            if missing_finger:
+                raise ValueError(
+                    f"Filtered finger-force head requires finger_object_normal_forces_w labels: {missing_finger}."
+                )
         if not self.force_head_enabled:
             return
         datasets = {"train": self.train_dataset, **self.valid_datasets}
@@ -723,6 +750,7 @@ class VanillaTrainer:
             "persistent_workers": use_persistent_workers,
         }
         if loader_workers > 0:
+            kwargs["multiprocessing_context"] = "spawn"
             kwargs["prefetch_factor"] = self.prefetch_factor
             kwargs["worker_init_fn"] = _data_worker_init
         return DataLoader(**kwargs)
@@ -838,6 +866,8 @@ class VanillaTrainer:
             data.pop(key)
         if not self.force_head_enabled:
             data.pop(BODY_FORCE_LABEL_KEY, None)
+        if not getattr(self, "finger_force_head_enabled", False):
+            data.pop("finger_object_normal_forces_w", None)
         for key, value in data.items():
             data[key] = value.to(self.device, non_blocking=self.non_blocking_data_transfer)
         if "contact_masks" in data:
@@ -861,6 +891,13 @@ class VanillaTrainer:
                     f"but the model force head expects {expected_num_bodies}."
                 )
             data[BODY_FORCE_TARGET_KEY] = force_target
+        if getattr(self, "finger_force_head_enabled", False):
+            force_w = data.pop("finger_object_normal_forces_w", None)
+            if force_w is None or force_w.shape[-2:] != (2, 3) or not torch.isfinite(force_w).all():
+                raise ValueError("Filtered finger-force training requires finite [B, T, 2, 3] labels.")
+            data["finger_object_normal_forces_b"] = transform_body_net_contact_forces_to_current_root_frame(
+                force_w, data["root_body_q"]
+            )
         self.neural_solver.process_neural_model_inputs(data)
         data["prediction_target"] = self.neural_solver.convert_next_states_to_prediction(
             states=data["states"],
@@ -873,8 +910,9 @@ class VanillaTrainer:
         if self.neural_model_unwrapped.is_rnn:
             self.neural_model_unwrapped.init_rnn(self.batch_size)
         prediction_target = data["prediction_target"]
-        model_output = self._forward_model(data, train, return_aux=self.force_head_enabled)
-        if self.force_head_enabled:
+        finger_enabled = getattr(self, "finger_force_head_enabled", False)
+        model_output = self._forward_model(data, train, return_aux=self.force_head_enabled or finger_enabled)
+        if self.force_head_enabled or finger_enabled:
             prediction = model_output.state_prediction
         else:
             prediction = model_output
@@ -892,6 +930,33 @@ class VanillaTrainer:
             normalized_target = force_rms.normalize(force_target)
             force_loss = torch.nn.functional.mse_loss(normalized_prediction, normalized_target)
             loss = loss + self.force_loss_weight * force_loss
+
+        finger_prediction: torch.Tensor | None = None
+        finger_target: torch.Tensor | None = None
+        finger_loss: torch.Tensor | None = None
+        contact_loss: torch.Tensor | None = None
+        if finger_enabled:
+            finger_prediction = model_output.auxiliary_predictions["finger_object_normal_forces_b"]
+            finger_target = data["finger_object_normal_forces_b"]
+            assert finger_target is not None
+            finger_rms = self.neural_model_unwrapped.finger_object_normal_force_rms
+            if finger_rms is None:
+                raise RuntimeError("Filtered finger-force training requires its RMS statistics.")
+            raw_force_prediction = model_output.auxiliary_predictions["finger_object_normal_forces_raw_b"]
+            finger_loss = cast(
+                torch.Tensor,
+                torch.nn.functional.mse_loss(
+                    finger_rms.normalize(raw_force_prediction), finger_rms.normalize(finger_target)
+                ),
+            )
+            contact_loss = cast(
+                torch.Tensor,
+                torch.nn.functional.binary_cross_entropy_with_logits(
+                    model_output.auxiliary_predictions["finger_object_contact_logits"],
+                    (finger_target.norm(dim=-1) > 0.01).to(finger_target.dtype),
+                ),
+            )
+            loss = loss + self.finger_force_loss_weight * (finger_loss + contact_loss)
 
         with torch.no_grad():
             predicted_next_states = self.neural_solver.convert_prediction_to_next_states(
@@ -929,6 +994,32 @@ class VanillaTrainer:
                         force_target,
                         self.active_contact_force_threshold_n,
                     )
+                )
+            if (
+                finger_prediction is not None
+                and finger_target is not None
+                and finger_loss is not None
+                and contact_loss is not None
+            ):
+                error_sq = (finger_prediction - finger_target).square().sum(-1)
+                active = finger_target.norm(dim=-1) > 0.01
+                predicted_active = finger_prediction.norm(dim=-1) > 0.01
+                true_positive = (active & predicted_active).sum()
+                loss_itemized.update(
+                    {
+                        "finger_normal_force_normalized_MSE": float(finger_loss.detach().cpu()),
+                        "finger_normal_contact_BCE": float(contact_loss.detach().cpu()),
+                        "finger_normal_force_RMSE_N": float(error_sq.mean().sqrt().cpu()),
+                        "finger_normal_force_active_RMSE_N": float(error_sq[active].mean().sqrt().cpu())
+                        if active.any()
+                        else 0.0,
+                        "finger_normal_force_right_RMSE_N": float(error_sq[..., 0].mean().sqrt().cpu()),
+                        "finger_normal_force_left_RMSE_N": float(error_sq[..., 1].mean().sqrt().cpu()),
+                        "finger_normal_contact_precision": float(
+                            (true_positive / predicted_active.sum().clamp_min(1)).cpu()
+                        ),
+                        "finger_normal_contact_recall": float((true_positive / active.sum().clamp_min(1)).cpu()),
+                    }
                 )
         return loss, loss_itemized
 

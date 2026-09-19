@@ -293,6 +293,13 @@ def dataset_cache_complete(
                     ):
                         print(f"Rejected cached dataset without owner-frame primary_body_q poses: {dataset_path}")
                         return False
+            if experiment.get("require_finger_object_normal_forces", False):
+                from isaaclab_neural.contacts.finger_object_force import LABEL_KEY, validate_force_metadata
+
+                if LABEL_KEY not in data_group:
+                    print(f"Rejected cached dataset without filtered finger normal-force labels: {dataset_path}")
+                    return False
+                validate_force_metadata(data_group)
             if experiment.get("record_body_net_contact_forces", False):
                 force_key = "body_net_contact_forces_w"
                 expected_primary_bodies = int(experiment.get("num_primary_bodies", 17))

@@ -184,7 +184,9 @@ def test_training_eval_joint_f_step_skips_applied_effort_overlay(monkeypatch) ->
 
     seen: list[bool] = []
     monkeypatch.setattr("isaaclab_neural.eval.training_evaluator.wp.from_torch", lambda value: value)
-    NewtonNerdManager._control = SimpleNamespace(joint_f=SimpleNamespace(assign=lambda _value: None))
+    monkeypatch.setattr(
+        NewtonNerdManager, "_control", SimpleNamespace(joint_f=SimpleNamespace(assign=lambda _value: None))
+    )
     monkeypatch.setattr(
         NewtonNerdManager,
         "_simulate_physics_only",
@@ -203,7 +205,6 @@ def test_training_eval_joint_f_step_skips_applied_effort_overlay(monkeypatch) ->
     try:
         evaluator._step_joint_f(torch.zeros(2, 3))
     finally:
-        NewtonNerdManager._control = None
         NewtonNerdManager._skip_applied_effort_overlay = False
 
     assert seen == [True]

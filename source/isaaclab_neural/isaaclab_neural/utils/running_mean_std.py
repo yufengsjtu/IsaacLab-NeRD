@@ -13,6 +13,10 @@ import torch.nn as nn
 
 
 class RunningMeanStd(nn.Module):
+    mean: torch.Tensor
+    var: torch.Tensor
+    count: torch.Tensor
+
     def __init__(self, epsilon: float = 1e-4, shape: tuple[int, ...] = (), device="cuda:0"):
         """
         Calculates the running mean and std of a data stream
@@ -26,14 +30,14 @@ class RunningMeanStd(nn.Module):
         self.register_buffer("count", torch.tensor(epsilon, dtype=torch.float32, device=device))
 
     @torch.no_grad()
-    def update(self, arr: torch.tensor, batch_dim=False, time_dim=False) -> None:
+    def update(self, arr: torch.Tensor, batch_dim=False, time_dim=False) -> None:
         mean_dims = [i for i in range(int(batch_dim) + int(time_dim))]
         batch_mean = torch.mean(arr, dim=mean_dims)
         batch_var = torch.var(arr, dim=mean_dims, unbiased=False)
-        batch_count = np.prod(arr.shape[: int(batch_dim) + int(time_dim)])
+        batch_count = int(np.prod(arr.shape[: int(batch_dim) + int(time_dim)]))
         self.update_from_moments(batch_mean, batch_var, batch_count)
 
-    def update_from_moments(self, batch_mean: torch.tensor, batch_var: torch.tensor, batch_count: int) -> None:
+    def update_from_moments(self, batch_mean: torch.Tensor, batch_var: torch.Tensor, batch_count: int) -> None:
         delta = batch_mean - self.mean
         tot_count = self.count + batch_count
 
@@ -49,7 +53,7 @@ class RunningMeanStd(nn.Module):
         self.var.copy_(new_var)
         self.count.fill_(new_count)
 
-    def normalize(self, arr: torch.tensor, un_norm=False) -> torch.tensor:
+    def normalize(self, arr: torch.Tensor, un_norm=False) -> torch.Tensor:
         if not un_norm:
             result = (arr - self.mean) / torch.sqrt(self.var + 1e-5)
         else:

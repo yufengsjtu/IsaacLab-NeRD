@@ -11,12 +11,16 @@ import torch
 from isaaclab_neural.solvers.transformer_neural_solver import TransformerNeuralSolver
 
 
-def _history_solver(*, num_envs: int, history_length: int = 4) -> TransformerNeuralSolver:
+class _TransformerTestHarness(TransformerNeuralSolver):
+    history_snapshot = TransformerNeuralSolver._history_snapshot
+
+
+def _history_solver(*, num_envs: int, history_length: int = 4) -> _TransformerTestHarness:
     """Build a solver stub with a filled history window."""
-    solver = TransformerNeuralSolver.__new__(TransformerNeuralSolver)
+    solver = _TransformerTestHarness.__new__(_TransformerTestHarness)
     solver.num_envs = num_envs
     solver.num_states_history = history_length
-    solver.torch_device = torch.device("cpu")
+    solver.torch_device = "cpu"
     solver.predicted_body_net_contact_forces_b = None
     solver.use_kv_cache = False
     solver.use_feature_cache = False
@@ -30,7 +34,7 @@ def _history_solver(*, num_envs: int, history_length: int = 4) -> TransformerNeu
     solver.states_embedding = torch.zeros(num_envs, 4)
     solver.joint_f = torch.zeros(num_envs, 2)
     solver.gravity_dir = torch.zeros(num_envs, 3)
-    solver.contacts = {
+    solver.contact_inputs = {
         "contact_masks": torch.zeros(num_envs, 3, dtype=torch.bool),
         "contact_depths": torch.zeros(num_envs, 3),
     }
@@ -62,8 +66,8 @@ def _set_current_state(solver: TransformerNeuralSolver, value: float) -> None:
     solver.states_embedding.fill_(value)
     solver.joint_f.fill_(value)
     solver.gravity_dir.fill_(value)
-    solver.contacts["contact_masks"].zero_()
-    solver.contacts["contact_depths"].zero_()
+    solver.contact_inputs["contact_masks"].zero_()
+    solver.contact_inputs["contact_depths"].zero_()
 
 
 def test_reset_none_clears_history():
@@ -102,7 +106,7 @@ def test_partial_reset_copies_current_state_instead_of_zeros():
     solver.reset([0])
 
     assert len(solver.states_history) == 4
-    snapshot = solver._history_snapshot()
+    snapshot = solver.history_snapshot()
     for entry in solver.states_history:
         torch.testing.assert_close(entry["states"][0], snapshot["states"][0])
         torch.testing.assert_close(entry["root_body_q"][0], snapshot["root_body_q"][0])
@@ -113,4 +117,5 @@ def test_partial_reset_copies_current_state_instead_of_zeros():
         assert not torch.equal(entry["states"][0], torch.zeros_like(entry["states"][0]))
     for entry, expected in zip(solver.states_history, original_env1, strict=True):
         torch.testing.assert_close(entry["states"][1], expected)
+    assert solver.feature_cache_rebuild_env_ids is not None
     assert torch.equal(solver.feature_cache_rebuild_env_ids, torch.tensor([0]))

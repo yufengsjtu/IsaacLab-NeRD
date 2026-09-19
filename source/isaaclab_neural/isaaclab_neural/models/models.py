@@ -8,6 +8,7 @@
 # Licensed under the NVIDIA Source Code License [see LICENSE.md for details].
 
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -24,6 +25,7 @@ from isaaclab_neural.models.model_kan import KAN
 from isaaclab_neural.models.model_transformer import GPT, GPTConfig
 from isaaclab_neural.models.shared_per_body_contact_encoder import SharedPerBodyContactEncoder
 from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
+from isaaclab_neural.utils.running_mean_std import RunningMeanStd
 
 
 @dataclass
@@ -106,7 +108,7 @@ class ModelMixedInput(nn.Module):
             self.rnn = None
 
         if "transformer" in network_cfg:
-            model_args = dict(
+            gptconf = GPTConfig(
                 n_layer=network_cfg["transformer"]["n_layer"],
                 n_head=network_cfg["transformer"]["n_head"],
                 n_embd=network_cfg["transformer"]["n_embd"],
@@ -117,8 +119,6 @@ class ModelMixedInput(nn.Module):
                 position_encoding=network_cfg["transformer"].get("position_encoding", "learned_absolute"),
                 rope_base=network_cfg["transformer"].get("rope_base", 10000.0),
             )
-            gptconf = GPTConfig(**model_args)
-
             self.transformer_model = GPT(gptconf)
             self.transformer_model.to(self.device)
 
@@ -161,6 +161,20 @@ class ModelMixedInput(nn.Module):
                 self.num_bodies * 3,
                 head_network_cfg,
                 device=device,
+            )
+
+        finger_head_cfg = network_cfg.get("finger_object_normal_force_head", {})
+        self.predict_finger_object_normal_forces = bool(finger_head_cfg.get("enabled", False))
+        self.finger_object_normal_force_rms = None
+        if self.predict_finger_object_normal_forces:
+            from isaaclab_neural.contacts.finger_object_force import MODEL_CONTRACT
+
+            self.finger_object_force_contract = dict(MODEL_CONTRACT)
+            self.finger_object_normal_force_head = MLPDeterministic(
+                (self.feature_dim,), 6, finger_head_cfg.get("model", network_cfg["model"]), device=device
+            )
+            self.finger_object_contact_head = MLPDeterministic(
+                (self.feature_dim,), 2, finger_head_cfg.get("model", network_cfg["model"]), device=device
             )
 
         self.output_tanh = network_cfg.get("output_tanh", False)
@@ -259,7 +273,7 @@ class ModelMixedInput(nn.Module):
 
         feature_dim = 0
         for input_name in encoders:
-            feature_dim += encoders[input_name].out_features
+            feature_dim += cast(int, encoders[input_name].out_features)
 
         return encoders, feature_dim
 
@@ -288,15 +302,22 @@ class ModelMixedInput(nn.Module):
         """
         self.body_net_contact_force_rms = force_rms
 
+    def set_finger_object_normal_force_rms(self, force_rms):
+        """Set per-finger normal-force normalization statistics [N], shape [2, 3]."""
+        self.finger_object_normal_force_rms = force_rms
+
     def get_rms_info(self):
         """Return RMS keys and shapes for checkpoint reconstruction."""
         info = {}
         if self.input_rms is not None:
-            info["input_rms"] = {k: tuple(v.mean.shape) for k, v in self.input_rms.items()}
+            info["input_rms"] = {k: tuple(cast(torch.Tensor, v.mean).shape) for k, v in self.input_rms.items()}
         if self.output_rms is not None:
             info["output_rms"] = tuple(self.output_rms.mean.shape)
         if self.body_net_contact_force_rms is not None:
             info["body_net_contact_force_rms"] = tuple(self.body_net_contact_force_rms.mean.shape)
+        finger_rms = getattr(self, "finger_object_normal_force_rms", None)
+        if finger_rms is not None:
+            info["finger_object_normal_force_rms"] = tuple(finger_rms.mean.shape)
         return info
 
     def extract_input_features(self, input_dict):  # input can be in shape (B, input_dim) or (B, T, input_dim)
@@ -322,21 +343,23 @@ class ModelMixedInput(nn.Module):
     def _prepare_inputs(self, input_dict, inject_noise=False):
         """Normalize, augment, and mask model inputs."""
         if self.normalize_input:
-            for obs_key in self.input_rms.keys():
+            input_rms = self.input_rms
+            if input_rms is None:
+                raise RuntimeError("Input normalization requires input RMS statistics.")
+            for obs_key in input_rms.keys():
+                normalizer = cast(RunningMeanStd, input_rms[obs_key])
                 if obs_key == "contact_tokens":
                     input_dict[obs_key] = normalize_contact_tokens(
                         input_dict[obs_key],
-                        self.input_rms[obs_key],
+                        normalizer,
                     )
                 elif getattr(self, "use_native_contact_processing", False) and obs_key.startswith("contact_"):
                     contact_masks = input_dict.get("contact_masks")
                     if contact_masks is None:
                         raise ValueError("Contact RMS mode 'masked_shared' requires explicit contact_masks.")
-                    input_dict[obs_key] = normalize_contact_field(
-                        input_dict[obs_key], contact_masks, self.input_rms[obs_key]
-                    )
+                    input_dict[obs_key] = normalize_contact_field(input_dict[obs_key], contact_masks, normalizer)
                 else:
-                    input_dict[obs_key] = self.input_rms[obs_key].normalize(input_dict[obs_key])
+                    input_dict[obs_key] = normalizer.normalize(input_dict[obs_key])
 
         if inject_noise:
             for obs_key in input_dict.keys():
@@ -365,7 +388,10 @@ class ModelMixedInput(nn.Module):
         if self.output_tanh:
             output = torch.tanh(output)
         if self.normalize_output:
-            output = self.output_rms.normalize(output, un_norm=True)
+            output_rms = self.output_rms
+            if output_rms is None:
+                raise RuntimeError("Output normalization requires output RMS statistics.")
+            output = output_rms.normalize(output, un_norm=True)
         return output
 
     def _extract_trunk_features(self, input_dict, inject_noise=False):
@@ -374,15 +400,21 @@ class ModelMixedInput(nn.Module):
         features = self.extract_input_features(input_dict)  # (B, T, feature_dim)
 
         if self.is_rnn:
+            if self.rnn is None:
+                raise RuntimeError("RNN inference requires an initialized recurrent module.")
             features = self.rnn(features)  # (B, T, rnn_hidden_dim)
 
         if self.is_transformer:
+            if self.transformer_model is None:
+                raise RuntimeError("Transformer inference requires an initialized transformer module.")
             features = self.transformer_model(features)  # (B, T, transform_embed_dim)
 
         return features
 
     def _decode_state(self, features, deterministic=False):
         """Decode the state prediction from shared trunk features."""
+        if self.model is None:
+            raise RuntimeError("State prediction requires an initialized decoder.")
         output = self.model(features, deterministic=deterministic)
         return self._process_output(output)
 
@@ -445,6 +477,20 @@ class ModelMixedInput(nn.Module):
                 )
             auxiliary_predictions["body_net_contact_forces_b"] = force_prediction
 
+        if getattr(self, "predict_finger_object_normal_forces", False):
+            force_prediction = self.finger_object_normal_force_head(features, deterministic=deterministic)
+            force_prediction = force_prediction.unflatten(-1, (2, 3))
+            if self.normalize_output:
+                if self.finger_object_normal_force_rms is None:
+                    raise RuntimeError("Filtered normal-force output requires finger force RMS statistics.")
+                force_prediction = self.finger_object_normal_force_rms.normalize(force_prediction, un_norm=True)
+            contact_logits = self.finger_object_contact_head(features, deterministic=deterministic)
+            auxiliary_predictions["finger_object_contact_logits"] = contact_logits
+            auxiliary_predictions["finger_object_normal_forces_raw_b"] = force_prediction
+            auxiliary_predictions["finger_object_normal_forces_b"] = torch.where(
+                (contact_logits > 0.0).unsqueeze(-1), force_prediction, torch.zeros_like(force_prediction)
+            )
+
         if single_step:
             state_prediction = state_prediction[:, -1:, :]
             auxiliary_predictions = {
@@ -481,7 +527,8 @@ class ModelMixedInput(nn.Module):
             A tuple containing the latest prediction shaped ``(B, 1, output_dim)``
             and the updated encoded feature window.
         """
-        if not self.is_transformer or self.is_rnn:
+        transformer = self.transformer_model
+        if not self.is_transformer or transformer is None or self.is_rnn:
             raise RuntimeError("forward_feature_cached() requires a Transformer model without an RNN.")
         if self.training or torch.is_grad_enabled():
             raise RuntimeError(
@@ -502,10 +549,10 @@ class ModelMixedInput(nn.Module):
         can_append = (
             feature_cache is not None
             and feature_cache.shape[0] == batch_size
-            and feature_cache.shape[2] == self.transformer_model.config.vocab_size
+            and feature_cache.shape[2] == transformer.config.vocab_size
             and feature_cache.shape[1] in {history_length - 1, history_length}
         )
-        if can_append:
+        if can_append and feature_cache is not None:
             latest_inputs = {
                 key: value[:, -1:] if isinstance(value, torch.Tensor) else value for key, value in input_dict.items()
             }
@@ -534,8 +581,8 @@ class ModelMixedInput(nn.Module):
             prepared_inputs = self._prepare_inputs(dict(input_dict), inject_noise=False)
             feature_cache = self.extract_input_features(prepared_inputs)
 
-        features = self.transformer_model(feature_cache)
-        output = self._process_output(self.model(features, deterministic=deterministic))
+        features = transformer(feature_cache)
+        output = self._decode_state(features, deterministic=deterministic)
         return output[:, -1:, :], feature_cache
 
     def forward_cached(self, input_dict, cache=None, max_cache_length=None, deterministic=False):
@@ -550,20 +597,22 @@ class ModelMixedInput(nn.Module):
         Returns:
             A tuple containing the prediction shaped ``(B, 1, output_dim)`` and updated KV cache.
         """
-        if not self.is_transformer or self.is_rnn:
+        transformer = self.transformer_model
+        if not self.is_transformer or transformer is None or self.is_rnn:
             raise RuntimeError("forward_cached() requires a Transformer model without an RNN.")
 
         input_dict = self._prepare_inputs(dict(input_dict), inject_noise=False)
         features = self.extract_input_features(input_dict)
-        features, cache = self.transformer_model.forward_cached(features, cache, max_cache_length)
-        output = self._process_output(self.model(features, deterministic=deterministic))
+        features, cache = transformer.forward_cached(features, cache, max_cache_length)
+        output = self._decode_state(features, deterministic=deterministic)
         return output, cache
 
     def init_transformer_cache(self, batch_size, max_cache_length=None):
         """Create an empty cache for :meth:`forward_cached`."""
-        if not self.is_transformer:
+        transformer = self.transformer_model
+        if not self.is_transformer or transformer is None:
             raise RuntimeError("Cannot create a Transformer cache for a non-Transformer model.")
-        return self.transformer_model.init_kv_cache(
+        return transformer.init_kv_cache(
             batch_size,
             max_cache_length,
             device=self.device,
@@ -579,28 +628,46 @@ class ModelMixedInput(nn.Module):
 
     def rnn_hidden_states_size(self):
         if self.is_rnn:
+            if self.rnn is None:
+                raise RuntimeError("RNN state access requires an initialized recurrent module.")
             return self.rnn.hidden_states_size()
         else:
             return None
 
     def to(self, device):
-        for _, encoder in self.encoders.items():
+        if self.model is None:
+            raise RuntimeError("Device transfer requires an initialized state decoder.")
+        self.device = device
+        for encoder in self.encoders.values():
             encoder.to(device)
-        if self.rnn is not None:
-            self.rnn.to(device)
-        if self.transformer_model is not None:
-            self.transformer_model.to(device)
-        self.model.to(device)
-        if self.predict_body_net_contact_forces:
-            self.body_net_contact_force_head.to(device)
+        for name in (
+            "rnn",
+            "transformer_model",
+            "model",
+            "input_rms",
+            "output_rms",
+            "body_net_contact_force_head",
+            "body_net_contact_force_rms",
+            "finger_object_normal_force_head",
+            "finger_object_contact_head",
+            "finger_object_normal_force_rms",
+        ):
+            module = getattr(self, name, None)
+            if module is not None:
+                module.to(device)
+        return self
 
     def init_rnn(self, batch_size):
         if self.is_rnn:
+            if self.rnn is None:
+                raise RuntimeError("RNN initialization requires an initialized recurrent module.")
             return self.rnn.initialize_hidden_states(batch_size)
         return None
 
     def reset_rnn_hidden_states(self, batch_indices=None, hidden_states=None):
         if self.is_rnn:
+            if self.rnn is None:
+                raise RuntimeError("RNN reset requires an initialized recurrent module.")
             self.rnn.reset_hidden_states(batch_indices, hidden_states)
 
     def reset(self, batch_size):

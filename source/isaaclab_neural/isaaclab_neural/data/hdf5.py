@@ -267,6 +267,14 @@ def _validate_rollout_arrays(arrays: Mapping[str, Any], *, has_native_contacts: 
     if missing:
         raise ValueError(f"Rollout data is missing required fields: {missing}.")
 
+    finger_key = "finger_object_normal_forces_w"
+    if finger_key in arrays:
+        forces = arrays[finger_key]
+        if not has_native_contacts or forces.ndim != 4 or forces.shape[-2:] != (2, 3):
+            raise ValueError(f"{finger_key} requires native contacts and shape [B, T, 2, 3].")
+        if not np.issubdtype(forces.dtype, np.floating) or not np.isfinite(forces).all():
+            raise ValueError(f"{finger_key} requires finite floating-point labels.")
+
     force_key = "body_net_contact_forces_w"
     if force_key in arrays:
         if not has_native_contacts:
@@ -321,6 +329,10 @@ def _validate_append_target(
         raise ValueError(f"Dataset env mismatch: existing={data_group.attrs.get('env')!r}, new={env_name!r}.")
     if data_group.attrs.get("mode") != "trajectory":
         raise ValueError(f"Cannot append trajectories to dataset mode {data_group.attrs.get('mode')!r}.")
+    if "finger_object_normal_forces_w" in arrays:
+        from isaaclab_neural.contacts.finger_object_force import validate_force_metadata
+
+        validate_force_metadata(data_group)
     if "body_net_contact_forces_w" in arrays:
         expected_attrs = {
             "body_net_contact_force_schema": "per_primary_body_v1",
@@ -653,6 +665,11 @@ def _update_metadata(data_group: h5py.Group) -> None:
     data_group.attrs["total_transitions"] = states.shape[0] * states.shape[1]
     data_group.attrs["state_dim"] = states.shape[-1]
     data_group.attrs["next_state_dim"] = cast(h5py.Dataset, data_group["next_states"]).shape[-1]
+    if "finger_object_normal_forces_w" in data_group:
+        from isaaclab_neural.contacts.finger_object_force import METADATA
+
+        for key, value in METADATA.items():
+            data_group.attrs[key] = value
     if "body_net_contact_forces_w" in data_group:
         forces = cast(h5py.Dataset, data_group["body_net_contact_forces_w"])
         data_group.attrs["body_net_contact_force_schema"] = "per_primary_body_v1"

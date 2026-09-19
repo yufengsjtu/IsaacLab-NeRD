@@ -17,8 +17,9 @@ _FRANKA_Q_MIN = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, 
 _FRANKA_Q_MAX = np.array([2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973, 0.04, 0.04])
 _FRANKA_QD_LIM = np.full(9, 10.0)
 _FRANKA_F_LIM = np.array([100.0, 100.0, 100.0, 100.0, 20.0, 20.0, 20.0, 0.0, 0.0])
-_FRANKA_LIFT_CUBE_Q_MIN = np.array([0.2, -0.4, 0.0, -1.0, -1.0, -1.0, -1.0])
-_FRANKA_LIFT_CUBE_Q_MAX = np.array([0.8, 0.4, 0.4, 1.0, 1.0, 1.0, 1.0])
+# Core ``Isaac-Lift-Franka`` frame: base rotated 180 deg about z, table top at z = 0.255 [m].
+_FRANKA_LIFT_CUBE_Q_MIN = np.array([-0.9, -0.5, 0.25, -1.0, -1.0, -1.0, -1.0])
+_FRANKA_LIFT_CUBE_Q_MAX = np.array([-0.2, 0.5, 0.9, 1.0, 1.0, 1.0, 1.0])
 _FRANKA_LIFT_CUBE_QD_LIM = np.array([2.0, 2.0, 2.0, 4.0, 4.0, 4.0])
 _FRANKA_LIFT_CUBE_F_LIM = np.zeros(6)
 

@@ -51,6 +51,8 @@ def save_checkpoint(path, model, robot_name, cfg, **training_state):
         "robot_name": robot_name,
         "cfg": cfg,
     }
+    if getattr(model, "predict_finger_object_normal_forces", False):
+        checkpoint["finger_object_force_contract"] = model.finger_object_force_contract
     for key in [
         "optimizer_state_dict",
         "epoch",
@@ -102,6 +104,11 @@ def setup_rms_from_info(model, rms_info, device="cpu"):
     if "body_net_contact_force_rms" in rms_info:
         shape = rms_info["body_net_contact_force_rms"]
         model.body_net_contact_force_rms = RunningMeanStd(shape=tuple(shape), device=device)
+    if "finger_object_normal_force_rms" in rms_info:
+        shape = rms_info["finger_object_normal_force_rms"]
+        if tuple(shape) != (2, 3):
+            raise ValueError("Filtered finger-force RMS must have shape [2, 3].")
+        model.finger_object_normal_force_rms = RunningMeanStd(shape=tuple(shape), device=device)
 
 
 def reconstruct_model_from_checkpoint(checkpoint, neural_solver, device="cpu"):
@@ -113,6 +120,11 @@ def reconstruct_model_from_checkpoint(checkpoint, neural_solver, device="cpu"):
         return model
 
     cfg = checkpoint["cfg"]
+    if cfg["network"].get("finger_object_normal_force_head", {}).get("enabled", False):
+        from isaaclab_neural.contacts.finger_object_force import MODEL_CONTRACT
+
+        if checkpoint.get("finger_object_force_contract") != MODEL_CONTRACT:
+            raise ValueError("Checkpoint lacks the matching filtered finger normal-force contract.")
     input_sample = neural_solver.get_neural_model_inputs()
     output_dim = neural_solver.prediction_dim
     model = ModelMixedInput(

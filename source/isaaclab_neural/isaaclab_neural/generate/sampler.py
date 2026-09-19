@@ -196,12 +196,17 @@ class ActionTrajectorySampler:
             "gravity_dir": torch.zeros((num_envs, trajectory_length, 3), device=self.data_device),
             "contacts": {},
         }
-        if getattr(self.adapter, "contact_adapter", None) is not None:
+        contact_adapter = getattr(self.adapter, "contact_adapter", None)
+        if contact_adapter is not None:
             buffers["_native_contact_frames"] = []
-            num_primary = int(self.adapter.contact_adapter.num_primary_bodies_per_env)
+            num_primary = int(contact_adapter.num_primary_bodies_per_env)
             buffers["primary_body_q"] = torch.empty(
                 (num_envs, trajectory_length, num_primary, 7),
                 device=self.data_device,
+            )
+        if getattr(self.adapter, "finger_object_normal_force_sensors", ()):
+            buffers["finger_object_normal_forces_w"] = torch.empty(
+                (num_envs, trajectory_length, 2, 3), device=self.data_device
             )
         if getattr(self.adapter, "body_net_contact_force_recorder", None) is not None:
             buffers["body_net_contact_forces_w"] = torch.empty(
@@ -232,8 +237,11 @@ class ActionTrajectorySampler:
                 terrain_level.copy_(terrain.terrain_levels.to(self.data_device))
             if getattr(terrain, "terrain_types", None) is not None:
                 terrain_type.copy_(terrain.terrain_types.to(self.data_device))
-            if getattr(terrain, "env_origins", None) is not None:
-                env_origin.copy_(terrain.env_origins.to(self.data_device))
+        origins = getattr(terrain, "env_origins", None)
+        if origins is None:
+            origins = getattr(scene, "env_origins", None)
+        if origins is not None:
+            env_origin.copy_(getattr(origins, "torch", origins).to(self.data_device))
 
         state_world_ids = self.adapter.state_world_ids.to(self.data_device)
         root_world_ids = self.adapter.root_world_ids.to(self.data_device)
@@ -273,6 +281,10 @@ class ActionTrajectorySampler:
         inputs = self.adapter.raw_neural_inputs()
         self._copy_input(buffers["next_states"][:, step], inputs["states"])
         self._copy_input(buffers["joint_f"][:, step], inputs["joint_f"])
+        if "finger_object_normal_forces_w" in buffers:
+            self._copy_input(
+                buffers["finger_object_normal_forces_w"][:, step], self.adapter.finger_object_normal_forces_w()
+            )
         if "body_net_contact_forces_w" in buffers:
             self._copy_input(
                 buffers["body_net_contact_forces_w"][:, step],

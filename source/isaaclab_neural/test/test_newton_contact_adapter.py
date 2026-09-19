@@ -2,12 +2,15 @@
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
+# pyright: reportPrivateUsage=false, reportAttributeAccessIssue=false, reportArgumentType=false
 
-"""Tests for canonical Newton-native contact features."""
+"""Tests for canonical Newton-native contact features.
+
+These are intentional white-box tests built from incomplete Newton adapter stubs.
+"""
 
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 import warp as wp
@@ -15,7 +18,6 @@ from isaaclab_neural.contacts.native_pair_projector import project_native_pairs
 from isaaclab_neural.contacts.newton_contact_adapter import NewtonContactAdapter
 from isaaclab_neural.contacts.packing import get_contact_order, resolve_contact_packing_policy
 from isaaclab_neural.generate.adapter import DataGenerationAdapter
-from isaaclab_neural.solvers.neural_solver import _resolve_root_body_ids
 
 
 def _adapter() -> NewtonContactAdapter:
@@ -27,23 +29,13 @@ def _adapter() -> NewtonContactAdapter:
     return adapter
 
 
-def test_resolve_root_body_ids_uses_articulation_joint_children():
-    model = SimpleNamespace(
-        body_count=6,
-        joint_child=torch.tensor([5, 4, 2, 1]),
-        body_world_start=torch.tensor([0, 3]),
-    )
-
-    root_body_ids = _resolve_root_body_ids(model, np.asarray([0, 2, 4]), num_envs=2)
-
-    np.testing.assert_array_equal(root_body_ids, np.asarray([5, 2]))
-
-
 def test_contact_token_world_ids_are_derived_from_owner_bodies():
     adapter = DataGenerationAdapter.__new__(DataGenerationAdapter)
     adapter.device = torch.device("cpu")
     adapter.model = SimpleNamespace(body_world=torch.tensor([1, 0, 1, 0]))
-    adapter.contact_adapter = SimpleNamespace(contact_token_body_ids=torch.tensor([[1, -1], [0, 2]], dtype=torch.long))
+    contact_adapter = NewtonContactAdapter.__new__(NewtonContactAdapter)
+    contact_adapter.contact_token_body_ids = torch.tensor([[1, -1], [0, 2]], dtype=torch.long)
+    adapter.contact_adapter = contact_adapter
 
     world_ids = adapter.contact_token_world_ids
 
@@ -61,7 +53,7 @@ def test_canonicalize_contact_sides_puts_dynamic_body_first():
     thickness0 = torch.tensor([0.1, 0.2, 0.3])
     thickness1 = torch.tensor([0.4, 0.5, 0.6])
 
-    actual = adapter._canonicalize_contact_sides(
+    actual = adapter.canonicalize_contact_sides(
         shape0,
         shape1,
         point0,
@@ -82,6 +74,13 @@ def test_canonicalize_contact_sides_puts_dynamic_body_first():
         actual_offset0,
         actual_offset1,
     ) = actual
+    assert actual_shape0 is not None
+    assert actual_shape1 is not None
+    assert actual_point0 is not None
+    assert actual_point1 is not None
+    assert actual_normal is not None
+    assert actual_t0 is not None
+    assert actual_t1 is not None
     torch.testing.assert_close(actual_shape0, torch.tensor([1, 2, 1]))
     torch.testing.assert_close(actual_shape1, torch.tensor([0, 0, 2]))
     torch.testing.assert_close(actual_point0[:, 0], torch.tensor([1.0, 2.0, 5.0]))
@@ -198,7 +197,7 @@ def test_canonicalize_contact_sides_prefers_primary_robot_over_dynamic_object():
     adapter.primary_body_mask.zero_()
     adapter.primary_body_mask[7] = True
 
-    actual = adapter._canonicalize_contact_sides(
+    actual = adapter.canonicalize_contact_sides(
         torch.tensor([1]),
         torch.tensor([2]),
         torch.tensor([[1.0, 0.0, 0.0]]),
@@ -306,16 +305,16 @@ def test_contact_adapter_reports_truncation():
     adapter._dropped_contacts_gpu = torch.zeros((), dtype=torch.long)
     adapter._truncated_frames_gpu = torch.zeros((), dtype=torch.long)
     raw = {
-        "surface_separation": torch.tensor([-0.2, -0.1]),
-        "shape0": torch.tensor([1, 1]),
-        "shape1": torch.tensor([0, 0]),
-        "point0_world": torch.zeros(2, 3),
-        "point1_world": torch.tensor([[0.0, 0.0, 0.2], [0.0, 0.0, 0.1]]),
-        "normal": torch.tensor([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]]),
-        "thickness0": torch.zeros(2),
-        "thickness1": torch.zeros(2),
+        "surface_separation": torch.tensor([-0.2, -0.1, 0.0]),
+        "shape0": torch.tensor([1, 1, 1]),
+        "shape1": torch.tensor([0, 0, 0]),
+        "point0_world": torch.zeros(3, 3),
+        "point1_world": torch.tensor([[0.0, 0.0, 0.2], [0.0, 0.0, 0.1], [0.0, 0.0, 0.0]]),
+        "normal": torch.tensor([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0], [0.0, 0.0, 0.0]]),
+        "thickness0": torch.zeros(3),
+        "thickness1": torch.zeros(3),
     }
-    adapter._contact_count = lambda _contacts: 2
+    adapter._contact_count = lambda _contacts: 3
     adapter._read_raw_contacts = lambda _contacts, _count, _state: raw
 
     adapter.update(None, None)

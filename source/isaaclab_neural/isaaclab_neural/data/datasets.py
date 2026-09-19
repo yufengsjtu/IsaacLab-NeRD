@@ -32,7 +32,12 @@ INTEGER_DATASET_KEYS = {
     "contact_token_world_ids",
 }
 DatasetLoadMode = Literal["eager", "lazy"]
-STRUCTURED_DATASET_KEYS = {"contact_tokens", "body_net_contact_forces_w", "primary_body_q"}
+STRUCTURED_DATASET_KEYS = {
+    "contact_tokens",
+    "body_net_contact_forces_w",
+    "primary_body_q",
+    "finger_object_normal_forces_w",
+}
 
 
 def validate_native_only_data_group(data_group: h5py.Group) -> None:
@@ -108,7 +113,10 @@ def _resolve_dataset_path(hdf5_dataset_path: str | Path) -> Path:
 
 
 def validate_body_net_contact_force_metadata(data_group: h5py.Group) -> tuple[str, ...] | None:
-    """Reject missing or ambiguous per-body net contact-force labels."""
+    """Reject missing or ambiguous contact-force labels."""
+    from isaaclab_neural.contacts.finger_object_force import validate_force_metadata
+
+    validate_force_metadata(data_group)
     force_key = "body_net_contact_forces_w"
     schema = _decode_attr(data_group.attrs.get("body_net_contact_force_schema", ""))
     if force_key not in data_group and not schema:
@@ -828,7 +836,9 @@ class LazyTrajectoryDataset(Dataset):
 
     def close(self) -> None:
         """Close the lazily opened HDF5 file handle."""
-        self._hdf5.close()
+        handle = getattr(self, "_hdf5", None)
+        if handle is not None:
+            handle.close()
 
     def __del__(self) -> None:
         self.close()

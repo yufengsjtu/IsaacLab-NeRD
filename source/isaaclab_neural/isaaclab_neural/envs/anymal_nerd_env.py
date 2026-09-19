@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 
 from isaaclab_newton.physics import NewtonCollisionPipelineCfg, NewtonShapeCfg
 
@@ -38,11 +39,11 @@ def apply_contact_mode_mdp(env_cfg) -> None:
     """Configure geometry-based contact MDP terms for Newton-native contacts."""
     solver_cfg = env_cfg.sim.physics.solver_cfg
     solver_cfg.contact_mode = normalize_contact_mode(solver_cfg.contact_mode)
-    if solver_cfg.num_contacts_per_env == 0:
+    if solver_cfg.num_contacts_per_env == 0 or not isinstance(env_cfg, (AnymalCFlatEnvCfg, AnymalCRoughEnvCfg)):
         return
     # NeRD has no constraint-solver contact force. Do not initialize the stock
     # force sensor merely to infer binary contact state.
-    env_cfg.scene.contact_forces = None
+    env_cfg.scene = replace(env_cfg.scene, contact_forces=None)
     env_cfg.rewards.feet_air_time = RewTerm(
         func=GeometryFeetAirTime,  # type: ignore[arg-type]
         weight=0.5,

@@ -195,6 +195,13 @@ class DataGenerationAdapter:
         self.control = self.backend.control
         self._body_world_torch: torch.Tensor | None = None
         self.body_net_contact_force_recorder: BodyNetContactForceRecorder | None = None
+        self.finger_object_normal_force_sensors = tuple(
+            getattr(getattr(self.env, "cfg", None), "finger_object_normal_force_sensors", ())
+        )
+        if self.finger_object_normal_force_sensors:
+            from isaaclab_neural.contacts.finger_object_force import validate_sensors
+
+            validate_sensors(self.env.scene, self.finger_object_normal_force_sensors)
 
         from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 
@@ -333,6 +340,14 @@ class DataGenerationAdapter:
         if self.body_net_contact_force_recorder is None:
             return ()
         return tuple(self.body_net_contact_force_recorder.primary_body_names)
+
+    def finger_object_normal_forces_w(self) -> torch.Tensor:
+        """Return post-solve filtered finger forces [N], shape [B, 2, 3], in world axes."""
+        from isaaclab_neural.contacts.finger_object_force import read_normal_forces
+
+        if not self.finger_object_normal_force_sensors:
+            raise RuntimeError("Filtered finger normal-force recording is not enabled.")
+        return read_normal_forces(self.env.scene, self.finger_object_normal_force_sensors)
 
     def body_net_contact_forces_w(self) -> torch.Tensor:
         """Return current per-primary-body resultant contact forces [N].

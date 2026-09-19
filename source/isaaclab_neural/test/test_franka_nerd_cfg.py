@@ -20,6 +20,7 @@ from isaaclab_neural.envs.franka_reach_nerd_env import (
     FRANKA_REACH_DATASET_COMMAND_RESAMPLE_S,
     FRANKA_REACH_DATASET_SOFT_JOINT_POS_LIMIT_FACTOR,
     FrankaReachDatasetGenEnvCfg,
+    FrankaReachPolicyEnvCfg,
     NerdFrankaReachEnvCfg,
 )
 from isaaclab_neural.envs.franka_scene import FRANKA_PANDA_CFG as NERD_FRANKA_PANDA_CFG
@@ -33,7 +34,8 @@ from isaaclab.envs import mdp
 from isaaclab.envs.mdp.actions.actions_cfg import JointPositionActionCfg
 from isaaclab.utils.string import resolve_matching_names
 
-from isaaclab_tasks.contrib.lift.config.franka.joint_pos_env_cfg import FrankaCubeLiftEnvCfg
+from isaaclab_tasks.core.lift.config.franka.franka_env_cfg import FRANKA_PANDA_LIFT_CFG, FrankaLiftEnvCfg
+from isaaclab_tasks.core.lift.lift_env_cfg import PhysicsCfg as LiftPhysicsCfg
 from isaaclab_tasks.core.reach.config.franka.franka_reach_env_cfg import FrankaReachEnvCfg
 from isaaclab_tasks.core.reach.reach_env_cfg import EventCfg as ReachEventCfg
 from isaaclab_tasks.utils.hydra import collect_presets, resolve_presets
@@ -50,12 +52,12 @@ def test_nerd_inlined_panda_matches_shared_legacy_asset() -> None:
     assert inlined["soft_joint_pos_limit_factor"] == shared["soft_joint_pos_limit_factor"]
 
 
-@pytest.mark.parametrize("cfg_type", [FrankaReachEnvCfg, FrankaReachDatasetGenEnvCfg, NerdFrankaReachEnvCfg])
-def test_franka_reach_pipeline_defaults_to_legacy_at_60_hz(cfg_type) -> None:
+@pytest.mark.parametrize("cfg_type", [FrankaReachDatasetGenEnvCfg, FrankaReachPolicyEnvCfg, NerdFrankaReachEnvCfg])
+def test_franka_reach_pipeline_uses_core_lift_robot_at_60_hz(cfg_type) -> None:
     cfg = resolve_presets(cfg_type(), {"newton_mjwarp"})
-    assert "/Assets/Isaac/6.0/" in cfg.scene.robot.spawn.usd_path
-    assert cfg.scene.robot.spawn.usd_path.endswith("/Legacy/panda_instanceable.usd")
-    assert set(cfg.scene.robot.actuators) == {"panda_shoulder", "panda_forearm", "panda_hand"}
+    assert cfg.scene.robot.spawn.usd_path == FRANKA_PANDA_LIFT_CFG.spawn.usd_path
+    assert cfg.scene.robot.spawn.variants == FRANKA_PANDA_LIFT_CFG.spawn.variants
+    assert set(cfg.scene.robot.actuators) == {"panda_arm", "panda_hand", "panda_finger2_passive"}
     assert cfg.sim.dt == 1.0 / 60.0
     assert cfg.decimation == 2
     assert cfg.sim.physics.num_substeps == 1
@@ -70,8 +72,6 @@ def test_franka_reach_nerd_is_contact_free_and_tableless() -> None:
     assert cfg.scene.robot.spawn.articulation_props.enabled_self_collisions is False
     standard = resolve_presets(FrankaReachEnvCfg(), {"newton_mjwarp"})
     resolve_presets(cfg, {"newton_mjwarp"})
-    standard.scene.robot.spawn.articulation_props.enabled_self_collisions = False
-    assert cfg.scene.robot.to_dict() == standard.scene.robot.to_dict()
     for field in ("observations", "actions", "events", "commands", "rewards", "terminations", "curriculum"):
         assert getattr(cfg, field).to_dict() == getattr(standard, field).to_dict(), field
     assert cfg.sim.dt == standard.sim.dt
@@ -90,10 +90,10 @@ def test_franka_reach_dataset_gen_drops_table_articulation() -> None:
 
     assert cfg.scene.table is None
     assert cfg.scene.robot.spawn.articulation_props.enabled_self_collisions is False
-    standard = FrankaReachEnvCfg()
-    standard.scene.robot.spawn.articulation_props.enabled_self_collisions = False
-    standard.scene.robot.soft_joint_pos_limit_factor = FRANKA_REACH_DATASET_SOFT_JOINT_POS_LIMIT_FACTOR
-    assert cfg.scene.robot.to_dict() == standard.scene.robot.to_dict()
+    expected_robot = FRANKA_PANDA_LIFT_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    expected_robot.spawn.articulation_props.enabled_self_collisions = False
+    expected_robot.soft_joint_pos_limit_factor = FRANKA_REACH_DATASET_SOFT_JOINT_POS_LIMIT_FACTOR
+    assert cfg.scene.robot.to_dict() == expected_robot.to_dict()
     assert hasattr(cfg.sim.physics, "newton_mjwarp")
     assert cfg.commands.ee_pose.debug_vis is False
     assert isinstance(cfg.actions.arm_action, IncrementalJointPositionActionCfg)
@@ -163,98 +163,158 @@ def test_franka_reach_nerd_keeps_rl_joint_position_action() -> None:
     assert cfg.commands.ee_pose.resampling_time_range == (4.0, 4.0)
 
 
-def test_franka_lift_nerd_keeps_contacts_and_static_table() -> None:
+def test_franka_lift_nerd_uses_core_task_with_nominal_physics() -> None:
     cfg = NerdFrankaLiftEnvCfg()
+    standard = FrankaLiftEnvCfg()
 
-    assert cfg.scene.table is not None
-    assert cfg.scene.robot.spawn.usd_path.endswith("Robots/FrankaEmika/Legacy/panda_instanceable.usd")
-    assert cfg.scene.table.spawn.size == (0.9, 1.3, 0.05)
+    assert cfg.scene.robot.spawn.usd_path == FRANKA_PANDA_LIFT_CFG.spawn.usd_path
+    clearance = cfg.events.conditional_reset.params["valid_criteria"]["robot_table_clearance"]
+    assert clearance.body_names == ["panda_link[2-7]", "panda_hand", ".*finger"]
+    assert cfg.scene.table.spawn.size == (0.8, 1.5, 0.5)
+    assert cfg.scene.table.init_state.pos[2] + cfg.scene.table.spawn.size[2] / 2 == pytest.approx(0.255)
     assert cfg.scene.table.spawn.rigid_props is None
-    assert cfg.scene.object is not None
-    standard = FrankaCubeLiftEnvCfg()
-    for scene_field in ("robot", "object", "ee_frame", "plane", "light"):
-        assert getattr(cfg.scene, scene_field).to_dict() == getattr(standard.scene, scene_field).to_dict()
-    for field in ("observations", "actions", "events", "commands", "rewards", "terminations", "curriculum"):
+    assert cfg.scene.object.spawn.size == (0.05, 0.05, 0.05)
+    for field in ("observations", "actions", "commands", "rewards"):
         assert getattr(cfg, field).to_dict() == getattr(standard, field).to_dict(), field
-    assert cfg.sim.dt == standard.sim.dt
-    assert cfg.decimation == standard.decimation
-    assert cfg.episode_length_s == standard.episode_length_s
+    assert cfg.curriculum is None
+    assert cfg.events.variable_gravity is None
+    assert cfg.events.joint_stiffness_and_damping is None
+    assert cfg.terminations.object_out_of_bound.params["in_bound_range"]["z"] == (0.0, 2.0)
+    assert cfg.sim.dt == standard.sim.dt == 1.0 / 120.0
+    assert cfg.decimation == standard.decimation == 4
     assert isinstance(cfg.sim.physics, NerdNewtonCfg)
     assert cfg.sim.physics.solver_cfg.num_contacts_per_env == 64
-    assert cfg.sim.physics.solver_cfg.states_frame == "world"
+    assert cfg.sim.physics.solver_cfg.states_frame == "body"
+    assert cfg.sim.physics.solver_cfg.contact_representation == "contact_tokens"
     preset_names = {name for fields in collect_presets(cfg).values() for name in fields}
     assert "newton_mjwarp" in preset_names
 
 
-def test_franka_lift_dataset_gen_exposes_newton_mjwarp() -> None:
+def test_franka_lift_dataset_gen_exposes_core_newton_mjwarp() -> None:
     cfg = FrankaLiftCubeDatasetGenEnvCfg()
 
-    assert cfg.scene.table.spawn.size == (0.9, 1.3, 0.05)
+    assert cfg.scene.table.spawn.size == (0.8, 1.5, 0.5)
+    assert cfg.scene.table.init_state.pos[2] + cfg.scene.table.spawn.size[2] / 2 == pytest.approx(0.255)
+    assert isinstance(cfg.sim.physics, LiftPhysicsCfg)
     assert isinstance(cfg.sim.physics.newton_mjwarp, NewtonCfg)
-    assert cfg.sim.physics.newton_mjwarp.solver_cfg.nconmax == 100
+    assert cfg.sim.physics.newton_mjwarp.solver_cfg.nconmax == 200
     assert cfg.sim.physics.newton_mjwarp.use_cuda_graph is False
-    nerd = NerdFrankaLiftEnvCfg()
-    assert cfg.scene.to_dict() == nerd.scene.to_dict()
-    for field in ("observations", "actions", "events", "commands", "rewards", "terminations", "curriculum"):
-        assert getattr(cfg, field).to_dict() == getattr(nerd, field).to_dict(), field
+    assert cfg.actions.action.scale == 0.1
+    assert gym.spec("Isaac-Lift-Cube-Franka-Dataset-Gen-v0").kwargs["default_agent"] == "rsl_rl"
 
 
-def test_franka_lift_scene_preserves_parent_robot_overrides() -> None:
-    cfg = FrankaCubeLiftEnvCfg()
-    stiffness = cfg.scene.robot.actuators["panda_shoulder"].stiffness
-    assert isinstance(stiffness, (float, int))
-    cfg.scene.robot.actuators["panda_shoulder"].stiffness = stiffness * 2
-    expected = cfg.scene.robot.to_dict()
+def test_franka_lift_scene_preserves_core_robot_drives() -> None:
+    cfg = FrankaLiftEnvCfg()
+    expected = cfg.scene.robot.actuators["panda_arm"].to_dict()
     apply_franka_lift_nerd_scene(cfg)
-    assert cfg.scene.robot.to_dict() == expected
-    assert cfg.scene.robot.spawn.articulation_props.enabled_self_collisions is True
+    assert cfg.scene.robot.actuators["panda_arm"].to_dict() == expected
+    assert cfg.scene.robot.spawn.variants == FRANKA_PANDA_LIFT_CFG.spawn.variants
 
 
 @pytest.mark.integration
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Newton MJWarp requires CUDA")
-def test_franka_lift_resting_cube_does_not_earn_lifting_reward() -> None:
+def test_franka_lift_dataset_gen_has_joint_robot_free_cube_and_static_table() -> None:
     from isaaclab_neural.generate.adapter import DataGenerationAdapter
     from isaaclab_neural.physics import NerdSolverCfg
     from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
 
     from isaaclab.app import launch_simulation
-    from isaaclab.envs.manager_based_rl_env import ManagerBasedRLEnv
-
-    from isaaclab_tasks.contrib.lift import mdp as lift_mdp
+    from isaaclab.envs import ManagerBasedRLEnv
 
     cfg = resolve_presets(FrankaLiftCubeDatasetGenEnvCfg(), {"newton_mjwarp"})
     cfg.scene.num_envs = 2
     cfg.seed = 0
-    cfg.commands.object_pose.debug_vis = False
-    with launch_simulation(cfg, {"device": "cuda:0"}):
+    with launch_simulation(cfg, {"device": "cuda:0", "visualizer": []}):
         with newton_material_binding_api_autofix():
-            env: ManagerBasedRLEnv = cast(
-                ManagerBasedRLEnv, gym.make("Isaac-Lift-Cube-Franka-Dataset-Gen-v0", cfg=cfg).unwrapped
-            )
-        try:
-            assert isinstance(env, ManagerBasedRLEnv)
+            env = cast(ManagerBasedRLEnv, gym.make("Isaac-Lift-Cube-Franka-Dataset-Gen-v0", cfg=cfg).unwrapped)
             env.reset()
+        try:
             adapter = DataGenerationAdapter(
-                env, NerdSolverCfg(name="NeuralSolver", states_frame="world", num_contacts_per_env=64)
+                env,
+                NerdSolverCfg(
+                    name="NeuralSolver",
+                    states_frame="body",
+                    contact_mode="newton_native",
+                    contact_representation="contact_tokens",
+                    num_contacts_per_env=64,
+                    max_contact_tokens=64,
+                    contact_packing_policy="body_round_robin_pair_atomic",
+                ),
             )
             assert adapter.solver.articulations_per_env == 2
-            assert adapter.solver.dof_q_per_env == len(JOINT_Q_MIN["Franka-Lift"])
-            assert adapter.solver.dof_qd_per_env == len(JOINT_QD_LIM["Franka-Lift"])
-            actions = torch.zeros((env.num_envs, env.action_manager.total_action_dim), device=env.device)
-            actions[:, -1] = 1.0
-            for _ in range(round(2.0 / env.step_dt)):
-                obs, reward, terminated, truncated, _ = adapter.step(actions)
-                assert torch.isfinite(obs["policy"]).all()
-                assert torch.isfinite(reward).all()
-                assert not (terminated | truncated).any()
+            assert (adapter.state_dim, adapter.joint_f_dim) == (31, 15)
+            assert adapter.solver.free_joint_indices.tolist() == [11]
+            assert adapter.contact_adapter is not None
+            assert adapter.contact_adapter.num_primary_bodies_per_env == 12
+            action = torch.zeros((env.num_envs, env.action_manager.total_action_dim), device=env.device)
+            for frame in range(cfg.decimation):
+                adapter.step_action_frame(action, process_action=frame == 0)
             inputs = adapter.raw_neural_inputs()
-            assert torch.isfinite(inputs["contact_depths"]).all()
-            assert inputs["contact_normals"].abs().sum() > 0
-            height = env.scene["object"].data.root_pos_w.torch[:, 2]
-            surface = cfg.scene.table.init_state.pos[2] + cfg.scene.table.spawn.size[2] / 2
-            assert torch.all(height > surface)
-            lifted = lift_mdp.object_is_lifted(env, **cfg.rewards.lifting_object.params)
-            assert not lifted.any(), height.tolist()
+            assert torch.isfinite(inputs["states"]).all()
+            assert torch.isfinite(inputs["contact_tokens"]).all()
+        finally:
+            env.close()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Newton MJWarp requires CUDA")
+def test_lift_predicted_normal_forces_feed_policy_rewards_and_partial_reset() -> None:
+    from isaaclab_neural.contacts.finger_object_force import SENSOR_NAMES, TARGET_KEY, read_normal_forces
+    from isaaclab_neural.models.models import ModelMixedInputOutput
+    from isaaclab_neural.physics.nerd_newton_manager import NewtonNerdManager
+    from isaaclab_neural.train.train import build_launch_cfg
+    from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
+
+    from isaaclab.app import launch_simulation
+
+    from isaaclab_tasks.core.lift.mdp.observations import fingers_contact_force_b
+
+    cfg = resolve_presets(NerdFrankaLiftEnvCfg(), {"newton_mjwarp"})
+    cfg.scene.num_envs = 2
+    cfg.seed = 0
+    cfg.sim.physics.solver_cfg.name = "NeuralSolver"
+    cfg.events.conditional_reset.params["buffer_size_per_group"] = 4
+    cfg.events.conditional_reset.params["max_prefill_iters"] = 100
+    cfg.observations.perception.object_point_cloud.params["visualize"] = False
+    with launch_simulation(build_launch_cfg(cfg), {"device": "cuda:0", "visualizer": []}):
+        with NewtonNerdManager._defer_neural_model_loading(), newton_material_binding_api_autofix():
+            env = gym.make("Isaac-Lift-Cube-Franka-NeRD-v0", cfg=cfg).unwrapped
+        try:
+            solver = env.neural_adapter.solver
+            force = torch.tensor(
+                [[[30.0, 0.0, 0.0], [0.0, -4.0, 0.0]], [[0.0, 0.0, 2.0], [0.0, 0.0, 0.0]]], device=env.device
+            )
+
+            class PrescribedForce(torch.nn.Module):
+                predict_finger_object_normal_forces = True
+
+                def forward_with_aux(self, inputs, *, single_step):
+                    current = inputs["states"][:, -1:]
+                    return ModelMixedInputOutput(
+                        solver.convert_next_states_to_prediction(current, current), {TARGET_KEY: force[:, None]}
+                    )
+
+            solver.set_neural_solver_model(PrescribedForce())
+            env.reset()
+            action = torch.zeros(2, 9, device=env.device)
+            for _ in range(6):
+                observations, *_ = env.step(action)
+            torch.testing.assert_close(fingers_contact_force_b(env, list(SENSOR_NAMES)), force.flatten(1))
+            torch.testing.assert_close(
+                observations["proprio"][:, -30:].reshape(2, 5, 6),
+                force.clamp(-20.0, 20.0).flatten(1)[:, None].expand(-1, 5, -1),
+            )
+            term = cfg.rewards.good_finger_contact
+            torch.testing.assert_close(term.func(env, **term.params), torch.tensor([True, False], device=env.device))
+            before = read_normal_forces(env.scene).clone()
+            env.reset(env_ids=[0])
+            after = read_normal_forces(env.scene)
+            torch.testing.assert_close(after[0], torch.zeros_like(after[0]))
+            torch.testing.assert_close(after[1], before[1])
+            torch.testing.assert_close(env.obs_buf["proprio"][0, -30:], torch.zeros(30, device=env.device))
+            solver.set_neural_solver_model(torch.nn.Identity())
+            with pytest.raises(RuntimeError, match="filtered finger-object"):
+                NewtonNerdManager.publish_finger_forces()
         finally:
             env.close()
 
@@ -288,6 +348,7 @@ def test_franka_gym_ids_are_registered() -> None:
     for env_id in (
         "Isaac-Reach-Franka-NeRD-v0",
         "Isaac-Reach-Franka-Dataset-Gen-v0",
+        "Isaac-Reach-Franka-Policy-v0",
         "Isaac-Lift-Cube-Franka-NeRD-v0",
         "Isaac-Lift-Cube-Franka-Dataset-Gen-v0",
     ):

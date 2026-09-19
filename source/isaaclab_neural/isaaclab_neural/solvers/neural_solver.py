@@ -12,7 +12,7 @@
 
 import warnings
 from contextlib import nullcontext
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import torch
@@ -28,18 +28,10 @@ from isaaclab_neural.solvers.world_layout import resolve_neural_solver_layout
 from isaaclab_neural.utils import newton_utils, torch_utils, warp_utils
 from isaaclab_neural.utils.newton_utils import base_joint_type
 
+if TYPE_CHECKING:
+    from isaaclab_neural.models.models import ModelMixedInputOutput
+
 MIN_CONTACT_EVENT_THRESHOLD = 0.12
-
-
-def _resolve_root_body_ids(model, articulation_starts: np.ndarray, num_envs: int) -> np.ndarray:
-    """Return the root-link body id for each articulation row."""
-    joint_child = getattr(model, "joint_child", None)
-    if joint_child is not None:
-        root_body_ids = np.asarray(joint_child.numpy())[articulation_starts[:num_envs]]
-        if np.all(root_body_ids >= 0):
-            return root_body_ids.astype(np.int64, copy=False)
-
-    raise ValueError("Cannot resolve articulation root bodies from Newton joint_child metadata.")
 
 
 class NeuralSolver(SolverBase):
@@ -100,11 +92,11 @@ class NeuralSolver(SolverBase):
         self.solver_name = name
         if model is None:
             raise ValueError("NeuralSolver requires a Newton model.")
+        super().__init__(model)
         self.torch_device = wp.device_to_torch(model.device)
-        self.model = model
-        self.neural_model = neural_model
+        self.neural_model: torch.nn.Module | None = neural_model
         if neural_model is not None:
-            self.neural_model.to(self.torch_device)
+            neural_model.to(self.torch_device)
 
         if min_contact_event_threshold is not None:
             self.min_contact_event_threshold = min_contact_event_threshold
@@ -172,7 +164,9 @@ class NeuralSolver(SolverBase):
         self.root_body_qd = torch.empty((self.num_envs, 6), device=self.torch_device)
         self.states = torch.empty((self.num_envs, self.state_dim), device=self.torch_device)
         self.joint_f = torch.empty((self.num_envs, self.joint_f_dim), device=self.torch_device)
-        self.contacts = {} if self.contact_adapter is None else self.contact_adapter.to_neural_inputs()
+        self.contact_inputs: dict[str, torch.Tensor] = (
+            {} if self.contact_adapter is None else self.contact_adapter.to_neural_inputs()
+        )
 
         self.gravity_dir = torch.zeros((self.num_envs, 3), device=self.torch_device)
         self.gravity_dir[:, self.model.up_axis] = -1.0
@@ -198,7 +192,37 @@ class NeuralSolver(SolverBase):
         self._init_prediction()
         self._configure_auxiliary_prediction_cache()
 
+    @property
+    def contacts(self) -> Any:
+        """Deprecated NeRD feature alias; use the typed ``contact_inputs`` mapping.
+
+        This compatibility boundary retains the old dictionary API without storing
+        neural features in Newton's native contact-buffer property.
+        """
+        warnings.warn(
+            "NeuralSolver.contacts is deprecated; use NeuralSolver.contact_inputs for neural contact features.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.contact_inputs
+
+    @contacts.setter
+    def contacts(self, value: Any) -> None:
+        warnings.warn(
+            "NeuralSolver.contacts is deprecated; use NeuralSolver.contact_inputs for neural contact features.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if not isinstance(value, dict):
+            raise TypeError("NeRD contact inputs must be a dictionary; pass native Newton contacts to step().")
+        self.contact_inputs = value
+
     def _build_dof_types(self):
+        joint_q_start = self.model.joint_q_start
+        joint_qd_start = self.model.joint_qd_start
+        joint_types = self.model.joint_type
+        if joint_q_start is None or joint_qd_start is None or joint_types is None:
+            raise ValueError("NeuralSolver requires Newton joint position, velocity, and type metadata.")
         # compute information about the joint dofs
         self.joint_q_end_wp = wp.empty(self.num_joints_per_env, dtype=int, device=self.device)
         self.is_angular_dof_wp = wp.empty(self.dof_q_per_env, dtype=bool, device=self.device)
@@ -208,9 +232,9 @@ class NeuralSolver(SolverBase):
             determine_angular_dofs,
             dim=self.num_joints_per_env,
             inputs=[
-                self.model.joint_type,
-                self.model.joint_q_start,
-                self.model.joint_qd_start,
+                joint_types,
+                joint_q_start,
+                joint_qd_start,
                 self.model.joint_limit_lower,
                 self.model.joint_limit_upper,
             ],
@@ -218,9 +242,11 @@ class NeuralSolver(SolverBase):
             device=self.model.device,
         )
 
-        self.joint_q_start = self.model.joint_q_start.numpy()[: self.num_joints_per_env]
+        self.joint_q_start = joint_q_start.numpy()[: self.num_joints_per_env]
+        self.joint_qd_start = joint_qd_start.numpy()[: self.num_joints_per_env]
         self.joint_q_end = self.joint_q_end_wp.numpy()
-        self.joint_types = self.model.joint_type.numpy()[: self.num_joints_per_env]
+        self.joint_types = joint_types.numpy()[: self.num_joints_per_env]
+        self.free_joint_indices = np.flatnonzero(self.joint_types == JointType.FREE)
         self.is_angular_dof = self.is_angular_dof_wp.numpy()
         self.is_continuous_dof = self.is_continuous_dof_wp.numpy()
         # Type of the first non-FIXED joint — i.e., the "base" joint after
@@ -265,10 +291,16 @@ class NeuralSolver(SolverBase):
         else:
             raise NotImplementedError
 
-    def set_neural_solver_model(self, neural_solver_model):
+    def set_neural_solver_model(self, neural_solver_model: torch.nn.Module) -> None:
         self.neural_model = neural_solver_model
-        self.neural_model.to(self.torch_device)
+        neural_solver_model.to(self.torch_device)
         self._configure_auxiliary_prediction_cache()
+
+    def _require_neural_model(self) -> torch.nn.Module:
+        neural_model = self.neural_model
+        if neural_model is None:
+            raise RuntimeError("Attach a neural model with set_neural_solver_model() before training or inference.")
+        return neural_model
 
     def _configure_auxiliary_prediction_cache(self):
         """Create the online force cache only when the neural head is enabled."""
@@ -288,12 +320,21 @@ class NeuralSolver(SolverBase):
             )
         else:
             self.predicted_body_net_contact_forces_b = None
+        if getattr(self.neural_model, "predict_finger_object_normal_forces", False) and (
+            getattr(self, "use_kv_cache", False) or getattr(self, "use_feature_cache", False)
+        ):
+            raise ValueError("Filtered finger-force prediction requires uncached auxiliary inference.")
+        self.predicted_finger_object_normal_forces_b = (
+            torch.zeros((self.num_envs, 2, 3), device=self.torch_device)
+            if getattr(self.neural_model, "predict_finger_object_normal_forces", False)
+            else None
+        )
 
     def train(self):
-        self.neural_model.train()
+        self._require_neural_model().train()
 
     def eval(self):
-        self.neural_model.eval()
+        self._require_neural_model().eval()
 
     def reset(self, env_ids=None, world_mask=None, flags=None):
         """Reset solver auxiliary state.
@@ -313,14 +354,15 @@ class NeuralSolver(SolverBase):
         """
         if world_mask is not None or flags is not None:
             return
-        predicted_forces = getattr(self, "predicted_body_net_contact_forces_b", None)
-        if predicted_forces is None:
-            return
-        if env_ids is None:
-            predicted_forces.zero_()
-            return
-        env_ids = torch.as_tensor(env_ids, device=predicted_forces.device, dtype=torch.long)
-        predicted_forces[env_ids] = 0.0
+        for name in ("predicted_body_net_contact_forces_b", "predicted_finger_object_normal_forces_b"):
+            predicted_forces = getattr(self, name, None)
+            if predicted_forces is None:
+                continue
+            if env_ids is None:
+                predicted_forces.zero_()
+            else:
+                indices = torch.as_tensor(env_ids, device=predicted_forces.device, dtype=torch.long)
+                predicted_forces[indices] = 0.0
 
     def sync_from_newton(
         self,
@@ -343,17 +385,79 @@ class NeuralSolver(SolverBase):
         del update_history
         self._update_states(newton_states, contacts, joint_f)
 
+    def translate_world_inputs(
+        self, inputs: dict[str, torch.Tensor], translation: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """Translate raw trajectories and contact geometry between replicated worlds.
+
+        Joint angles, free-body orientations, velocities, forces, contact identities,
+        and padding are preserved. Static scene geometry is not moved. Use this when
+        assigning recorded robot/object trajectories to a different replica's table.
+
+        Args:
+            inputs: Raw world-frame states and optional contact/history fields with
+                leading batch dimension. Unmodified fields are shared with the input.
+            translation: Destination minus source world origin [m], shape ``[B, 3]``.
+
+        Returns:
+            Inputs with all free-joint positions and world-space points translated,
+            without mutating the recorded tensors.
+        """
+        if translation.shape != (inputs["states"].shape[0], 3):
+            raise ValueError("World translation must have shape [batch_size, 3].")
+        result = dict(inputs)
+        for key in ("states", "next_states"):
+            if key not in inputs:
+                continue
+            value = inputs[key].clone()
+            shift = translation.to(value).reshape(value.shape[0], *([1] * (value.ndim - 2)), 3)
+            for joint_id in self.free_joint_indices:
+                q_start = int(self.joint_q_start[joint_id])
+                value[..., q_start : q_start + 3] += shift
+            result[key] = value
+        for key in ("root_body_q", "primary_body_q", "env_origin"):
+            if key not in inputs:
+                continue
+            value = inputs[key].clone()
+            value[..., :3] += translation.to(value).reshape(value.shape[0], *([1] * (value.ndim - 2)), 3)
+            result[key] = value
+        for key in ("contact_points_0", "contact_points_1"):
+            if key not in inputs:
+                continue
+            points = inputs[key].unflatten(-1, (-1, 3))
+            shifted = points + translation.to(points).reshape(points.shape[0], *([1] * (points.ndim - 2)), 3)
+            if "contact_masks" in inputs:
+                shifted = torch.where(inputs["contact_masks"].unsqueeze(-1), shifted, points)
+            result[key] = shifted.flatten(-2)
+        if "contact_tokens" in inputs:
+            tokens = inputs["contact_tokens"].clone()
+            shift = translation.to(tokens).reshape(tokens.shape[0], *([1] * (tokens.ndim - 2)), 3)
+            tokens[..., 4:7] = torch.where(tokens[..., :1] > 0.5, tokens[..., 4:7] + shift, tokens[..., 4:7])
+            result["contact_tokens"] = tokens
+        return result
+
     def _before_model_forward(self):
         pass
 
     def _forward_neural_model(self, model_inputs):
         """Predict state and update any enabled diagnostic auxiliary caches."""
-        if self.predicted_body_net_contact_forces_b is None:
-            return self.neural_model.forward(model_inputs, single_step=True)
+        neural_model = self._require_neural_model()
+        finger_forces = getattr(self, "predicted_finger_object_normal_forces_b", None)
+        if self.predicted_body_net_contact_forces_b is None and finger_forces is None:
+            return neural_model.forward(model_inputs, single_step=True)
 
-        model_output = self.neural_model.forward_with_aux(model_inputs, single_step=True)
-        predicted_forces = model_output.auxiliary_predictions["body_net_contact_forces_b"]
-        self.predicted_body_net_contact_forces_b.copy_(predicted_forces[:, -1])
+        forward_with_aux = getattr(neural_model, "forward_with_aux", None)
+        if not callable(forward_with_aux):
+            raise TypeError("Auxiliary force prediction requires a callable forward_with_aux() on the neural model.")
+        model_output = cast("ModelMixedInputOutput", forward_with_aux(model_inputs, single_step=True))
+        if self.predicted_body_net_contact_forces_b is not None:
+            predicted_forces = model_output.auxiliary_predictions["body_net_contact_forces_b"]
+            self.predicted_body_net_contact_forces_b.copy_(predicted_forces[:, -1])
+        if finger_forces is not None:
+            prediction = model_output.auxiliary_predictions["finger_object_normal_forces_b"][:, -1]
+            if prediction.shape != finger_forces.shape or not torch.isfinite(prediction).all():
+                raise ValueError("Filtered finger-force prediction must be finite [B, 2, 3].")
+            finger_forces.copy_(prediction)
         return model_output.state_prediction
 
     def _model_forward(self, model_inputs):
@@ -418,10 +522,14 @@ class NeuralSolver(SolverBase):
 
         if self.contact_adapter is not None and contacts is None:
             raise RuntimeError("Newton contacts are not initialized; cannot update NeRD contact inputs.")
+        body_q = newton_states.body_q
+        body_qd = newton_states.body_qd
+        if body_q is None or body_qd is None:
+            raise ValueError("NeuralSolver requires Newton body pose and velocity buffers.")
         self._acquire_states_to_torch(newton_states, self.states)
         self.wrap2PI(self.states)
-        self.root_body_q = wp.to_torch(newton_states.body_q).index_select(0, self.root_body_ids)
-        self.root_body_qd = wp.to_torch(newton_states.body_qd).index_select(0, self.root_body_ids)
+        self.root_body_q = wp.to_torch(body_q).index_select(0, self.root_body_ids)
+        self.root_body_qd = wp.to_torch(body_qd).index_select(0, self.root_body_ids)
         if self.joint_f_dim > 0:
             self.joint_f = wp.to_torch(joint_f).view(self.num_envs, self.joint_f_dim)
         if self.contact_adapter is not None:
@@ -429,7 +537,7 @@ class NeuralSolver(SolverBase):
             with step_profile.section("adapter_update"):
                 self.contact_adapter.update(contacts, newton_states)
             with step_profile.section("to_neural_inputs"):
-                self.contacts = self.contact_adapter.to_neural_inputs()
+                self.contact_inputs = self.contact_adapter.to_neural_inputs()
             self.primary_body_q = getattr(self.contact_adapter, "primary_body_q", None)
 
     def get_contact_masks(
@@ -556,7 +664,7 @@ class NeuralSolver(SolverBase):
             "states": self.states,
             "joint_f": self.joint_f,
             "gravity_dir": self.gravity_dir,
-            **self.contacts,
+            **self.contact_inputs,
         }
         if self.primary_body_q is not None:
             model_inputs["primary_body_q"] = self.primary_body_q
@@ -573,7 +681,7 @@ class NeuralSolver(SolverBase):
             "states_embedding": self.states_embedding,
             "joint_f": self.joint_f,
             "gravity_dir": self.gravity_dir,
-            **self.contacts,
+            **self.contact_inputs,
         }
         if self.contact_token_frame == "owner" and self.primary_body_q is not None:
             model_inputs["primary_body_q"] = self.primary_body_q
@@ -1072,30 +1180,21 @@ class NeuralSolver(SolverBase):
 
         assert states.shape[0] == root_body_q.shape[0]
 
-        if self.base_joint_type == JointType.FREE:
+        states_body = states.clone()
+        for joint_id in self.free_joint_indices:
+            q_start = int(self.joint_q_start[joint_id])
+            v_start = self.dof_q_per_env + int(self.joint_qd_start[joint_id])
             # velocity representation is [lin_vel, ang_vel]
             (pos_body, quat_body, lin_vel_body, ang_vel_body) = torch_utils.convert_states_w2b(
                 body_frame_pos,
                 body_frame_quat,
-                p=states[:, 0:3],
-                quat=states[:, 3:7],
-                lin_vel=states[:, self.dof_q_per_env : self.dof_q_per_env + 3],
-                ang_vel=states[:, self.dof_q_per_env + 3 : self.dof_q_per_env + 6],
+                p=states[:, q_start : q_start + 3],
+                quat=states[:, q_start + 3 : q_start + 7],
+                lin_vel=states[:, v_start : v_start + 3],
+                ang_vel=states[:, v_start + 3 : v_start + 6],
             )
-            root_vel_body = torch.cat([lin_vel_body, ang_vel_body], dim=-1)
-            quat_body_normalized = torch_utils.normalize(quat_body)
-            states_body = torch.cat(
-                [
-                    pos_body,
-                    quat_body_normalized,
-                    states[:, 7 : self.dof_q_per_env],
-                    root_vel_body,
-                    states[:, self.dof_q_per_env + 6 :],
-                ],
-                dim=1,
-            )
-        else:
-            states_body = states.clone()
+            states_body[:, q_start : q_start + 7] = torch.cat((pos_body, torch_utils.normalize(quat_body)), dim=-1)
+            states_body[:, v_start : v_start + 6] = torch.cat((lin_vel_body, ang_vel_body), dim=-1)
 
         return states_body.view(*shape)
 
@@ -1217,31 +1316,24 @@ class NeuralSolver(SolverBase):
 
             assert states.shape[0] == anchor_frame_q.shape[0]
 
+            states_world = states.clone()
             # only need to convert the states of the FREE base joint
-            if self.base_joint_type == JointType.FREE:
+            for joint_id in self.free_joint_indices:
+                q_start = int(self.joint_q_start[joint_id])
+                v_start = self.dof_q_per_env + int(self.joint_qd_start[joint_id])
                 # velocity representation is [lin_vel, ang_vel]
                 (pos_world, quat_world, lin_vel_world, ang_vel_world) = torch_utils.convert_states_b2w(
                     anchor_frame_pos,
                     anchor_frame_quat,
-                    p=states[:, 0:3],
-                    quat=states[:, 3:7],
-                    lin_vel=states[:, self.dof_q_per_env : self.dof_q_per_env + 3],
-                    ang_vel=states[:, self.dof_q_per_env + 3 : self.dof_q_per_env + 6],
+                    p=states[:, q_start : q_start + 3],
+                    quat=states[:, q_start + 3 : q_start + 7],
+                    lin_vel=states[:, v_start : v_start + 3],
+                    ang_vel=states[:, v_start + 3 : v_start + 6],
                 )
-                root_vel_world = torch.cat([lin_vel_world, ang_vel_world], dim=-1)
-                quat_world_normalized = torch_utils.normalize(quat_world)
-                states_world = torch.cat(
-                    [
-                        pos_world,
-                        quat_world_normalized,
-                        states[:, 7 : self.dof_q_per_env],
-                        root_vel_world,
-                        states[:, self.dof_q_per_env + 6 :],
-                    ],
-                    dim=1,
+                states_world[:, q_start : q_start + 7] = torch.cat(
+                    (pos_world, torch_utils.normalize(quat_world)), dim=-1
                 )
-            else:
-                states_world = states.clone()
+                states_world[:, v_start : v_start + 6] = torch.cat((lin_vel_world, ang_vel_world), dim=-1)
 
             return states_world.view(*shape)
         raise NotImplementedError(f"Unsupported states frame: {self.states_frame}")

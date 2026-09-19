@@ -23,15 +23,18 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import h5py
 import isaaclab_neural.envs  # noqa: F401 - registers Franka dataset-generation tasks
 import numpy as np
 import torch
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedRLEnv
 
 REACH_DATASET_GEN_TASK = "Isaac-Reach-Franka-Dataset-Gen-v0"
 LIFT_DATASET_GEN_TASK = "Isaac-Lift-Cube-Franka-Dataset-Gen-v0"
@@ -168,10 +171,12 @@ def read_replay_dataset_info(dataset_path: str | Path) -> ReplayDatasetInfo:
     """
     path = Path(dataset_path).expanduser()
     with h5py.File(path, "r", swmr=True, libver="latest") as dataset_file:
-        if "data" not in dataset_file or "states" not in dataset_file["data"]:
-            raise ValueError(f"Dataset {path} is missing data/states.")
-        data_group = cast(h5py.Group, dataset_file["data"])
-        states = cast(h5py.Dataset, data_group["states"])
+        data_group = dataset_file.get("data")
+        if not isinstance(data_group, h5py.Group):
+            raise ValueError(f"Dataset {path} is missing the data/states dataset.")
+        states = data_group.get("states")
+        if not isinstance(states, h5py.Dataset):
+            raise ValueError(f"Dataset {path} is missing the data/states dataset.")
         if states.ndim != 3:
             raise ValueError(f"data/states must have shape [N, T, D], got {tuple(states.shape)}.")
         traj_lengths = None
@@ -317,6 +322,27 @@ def apply_terrain_context(terrain: Any, context: Mapping[str, torch.Tensor]) -> 
     terrain.terrain_types[:count].copy_(terrain_type.to(device=device, dtype=terrain.terrain_types.dtype))
 
 
+def rebase_replay_batch(batch: dict[str, torch.Tensor], adapter: Any) -> dict[str, torch.Tensor]:
+    """Translate free objects into the displayed replicas without moving static geometry.
+
+    Args:
+        batch: Recorded world-frame states with per-trajectory ``env_origin`` [m].
+        adapter: Recording adapter bound to the destination scene.
+
+    Returns:
+        Translated tensors for rigid-object replicas; unchanged input for fixed-base
+        contact-free tasks and terrain-patch replay.
+    """
+    scene = adapter.env.scene
+    if len(adapter.solver.free_joint_indices) == 0 or getattr(scene, "terrain", None) is not None:
+        return batch
+    if "env_origin" not in batch:
+        raise ValueError("Free-object replay requires recorded env_origin metadata.")
+    origins = scene.env_origins
+    origins = getattr(origins, "torch", origins).to(batch["env_origin"])
+    return adapter.solver.translate_world_inputs(batch, origins - batch["env_origin"])
+
+
 def requested_newton_visualizer(args: argparse.Namespace) -> bool:
     """Return whether the launcher requested a Newton visualizer."""
     visualizers = getattr(args, "visualizer", None)
@@ -352,7 +378,7 @@ def configure_env(env_cfg, args: argparse.Namespace) -> None:
             "Isaac-Lift-Cube-Franka-Dataset-Gen-v0 with presets=newton_mjwarp, "
             "not a NeRD task."
         )
-    if not isinstance(physics_cfg, NewtonCfg):
+    if physics_cfg is None or not isinstance(physics_cfg, NewtonCfg):
         raise ValueError("Franka dataset replay requires a Newton physics preset (presets=newton_mjwarp).")
     if not isinstance(physics_cfg.solver_cfg, MJWarpSolverCfg):
         raise ValueError("Franka dataset replay requires the MJWarp solver.")
@@ -416,7 +442,7 @@ def run_replay(env_cfg, args: argparse.Namespace, info: ReplayDatasetInfo) -> No
 
     with launch_simulation(env_cfg, args):
         with newton_material_binding_api_autofix():
-            env = gym.make(args.task, cfg=env_cfg, device=args.device).unwrapped
+            env = cast("ManagerBasedRLEnv", gym.make(args.task, cfg=env_cfg, device=args.device).unwrapped)
             env.reset()
         adapter = DataGenerationAdapter(env, solver_cfg)
         if adapter.state_dim != info.state_dim:
@@ -433,7 +459,7 @@ def run_replay(env_cfg, args: argparse.Namespace, info: ReplayDatasetInfo) -> No
                     rng,
                     args.trajectory_index,
                 )
-                batch = load_replay_batch(info.path, indices)
+                batch = rebase_replay_batch(load_replay_batch(info.path, indices), adapter)
                 states = clip_and_pad_states(
                     batch["states"],
                     batch.get("traj_lengths"),
@@ -475,7 +501,7 @@ def main() -> None:
     def hydra_main(env_cfg, agent_cfg=None) -> None:
         run_replay(env_cfg, args, info)
 
-    hydra_main()
+    cast(Callable[[], None], hydra_main)()
 
 
 if __name__ == "__main__":

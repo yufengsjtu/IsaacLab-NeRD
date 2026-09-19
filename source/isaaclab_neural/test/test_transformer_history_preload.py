@@ -11,29 +11,27 @@ import torch
 from isaaclab_neural.solvers.transformer_neural_solver import TransformerNeuralSolver
 
 
-class _FakeTransformerSolver:
-    num_envs = 2
-    num_states_history = 10
-    use_kv_cache = False
-    torch_device = torch.device("cpu")
-    root_body_q = torch.zeros(2, 7)
-    states = torch.zeros(2, 4)
-    joint_f = torch.zeros(2, 2)
-    gravity_dir = torch.zeros(2, 3)
-    contacts = {
-        "contact_masks": torch.zeros(2, 3, dtype=torch.bool),
-        "contact_depths": torch.zeros(2, 3),
-    }
+class _FakeTransformerSolver(TransformerNeuralSolver):
+    history_snapshot = TransformerNeuralSolver._history_snapshot
+    fill_history_rows = TransformerNeuralSolver._fill_history_rows_from_current_state
 
-    def reset_states_history(self):
-        self.states_history = deque(maxlen=self.num_states_history)
-
-    def _history_snapshot(self):
-        return TransformerNeuralSolver._history_snapshot(self)
-
-    @staticmethod
-    def embed_states(states):
-        return states.clone()
+    def __init__(self):
+        self.num_envs = 2
+        self.num_states_history = 10
+        self.use_kv_cache = False
+        self.use_feature_cache = False
+        self.torch_device = "cpu"
+        self.root_body_q = torch.zeros(2, 7)
+        self.states = torch.zeros(2, 4)
+        self.states_embedding = torch.zeros(2, 4)
+        self.states_embedding_type = "identical"
+        self.joint_f = torch.zeros(2, 2)
+        self.gravity_dir = torch.zeros(2, 3)
+        self.contact_inputs = {
+            "contact_masks": torch.zeros(2, 3, dtype=torch.bool),
+            "contact_depths": torch.zeros(2, 3),
+        }
+        self.reset_states_history()
 
 
 def _history(history_length: int = 9):
@@ -83,7 +81,7 @@ def test_history_collate_supports_flat_and_token_ranks():
 def test_preload_states_history_preserves_order_and_dtypes():
     solver = _FakeTransformerSolver()
 
-    TransformerNeuralSolver.preload_states_history(solver, _history())
+    solver.preload_states_history(_history())
 
     assert len(solver.states_history) == 9
     assert torch.equal(solver.states_history[0]["states"], _history()["states"][:, 0])
@@ -96,7 +94,7 @@ def test_preload_states_history_rejects_overlong_window():
     solver = _FakeTransformerSolver()
 
     try:
-        TransformerNeuralSolver.preload_states_history(solver, _history(history_length=11))
+        solver.preload_states_history(_history(history_length=11))
     except ValueError as error:
         assert "between 1 and 10" in str(error)
     else:
@@ -109,7 +107,7 @@ def test_preload_states_history_rejects_mismatched_contact_shape():
     history["contact_depths"] = torch.zeros(2, 9, 4)
 
     try:
-        TransformerNeuralSolver.preload_states_history(solver, history)
+        solver.preload_states_history(history)
     except ValueError as error:
         assert "History contact_depths must have shape" in str(error)
     else:
@@ -118,7 +116,7 @@ def test_preload_states_history_rejects_mismatched_contact_shape():
 
 def test_preload_states_history_squeezes_scalar_overflow_feature_axis():
     solver = _FakeTransformerSolver()
-    solver.contacts = {
+    solver.contact_inputs = {
         "contact_tokens": torch.zeros(2, 3, 17),
         "contact_token_overflow": torch.zeros(2, dtype=torch.long),
     }
@@ -128,7 +126,7 @@ def test_preload_states_history_squeezes_scalar_overflow_feature_axis():
         "contact_token_overflow": torch.zeros(2, 9, 1, dtype=torch.long),
     }
 
-    TransformerNeuralSolver.preload_states_history(solver, history)
+    solver.preload_states_history(history)
 
     assert solver.states_history[0]["contact_token_overflow"].shape == (2,)
     assert solver.states_history[0]["contact_token_overflow"].dtype == torch.long
@@ -141,14 +139,14 @@ def test_online_history_snapshot_does_not_alias_contact_buffers():
     solver.states_embedding = torch.zeros(2, 4)
     solver.joint_f = torch.zeros(2, 2)
     solver.gravity_dir = torch.zeros(2, 3)
-    solver.contacts = {
+    solver.contact_inputs = {
         "contact_tokens": torch.zeros(2, 3, 17),
         "contact_token_overflow": torch.zeros(2, dtype=torch.long),
     }
 
-    snapshot = TransformerNeuralSolver._history_snapshot(solver)
-    solver.contacts["contact_tokens"].fill_(1.0)
-    solver.contacts["contact_token_overflow"].fill_(2)
+    snapshot = solver.history_snapshot()
+    solver.contact_inputs["contact_tokens"].fill_(1.0)
+    solver.contact_inputs["contact_token_overflow"].fill_(2)
 
     assert torch.count_nonzero(snapshot["contact_tokens"]) == 0
     assert torch.count_nonzero(snapshot["contact_token_overflow"]) == 0
@@ -158,13 +156,13 @@ def test_partial_history_fill_copies_current_snapshot_into_reset_rows():
     solver = _FakeTransformerSolver()
     solver.reset_states_history()
     solver.states_embedding = torch.zeros(2, 4)
-    solver.states_history.append(TransformerNeuralSolver._history_snapshot(solver))
-    solver.states_history.append(TransformerNeuralSolver._history_snapshot(solver))
+    solver.states_history.append(solver.history_snapshot())
+    solver.states_history.append(solver.history_snapshot())
     solver.states = torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
     solver.states_embedding = solver.states.clone()
     solver.joint_f = torch.tensor([[9.0, 10.0], [11.0, 12.0]])
 
-    TransformerNeuralSolver._fill_history_rows_from_current_state(solver, torch.tensor([1]))
+    solver.fill_history_rows(torch.tensor([1]))
 
     for entry in solver.states_history:
         assert torch.equal(entry["states"][0], torch.zeros(4))
@@ -178,13 +176,13 @@ def test_partial_history_fill_cannot_mutate_inference_mode_clones():
     solver.reset_states_history()
     solver.states_embedding = torch.zeros(2, 4)
     with torch.inference_mode():
-        solver.states_history.append(TransformerNeuralSolver._history_snapshot(solver))
+        solver.states_history.append(solver.history_snapshot())
     solver.states = torch.ones(2, 4)
     solver.states_embedding = torch.ones(2, 4)
     solver.joint_f = torch.ones(2, 2)
 
     try:
-        TransformerNeuralSolver._fill_history_rows_from_current_state(solver, torch.tensor([0]))
+        solver.fill_history_rows(torch.tensor([0]))
     except RuntimeError as error:
         assert "inference" in str(error).lower()
         return

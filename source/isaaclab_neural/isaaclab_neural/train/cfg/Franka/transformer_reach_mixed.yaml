@@ -42,22 +42,22 @@ algorithm:
   dataset:
     train_datasets:
       random_trajectory:
-        path: ./data/datasets/legacy-60hz/Franka-Reach/dataset_random_train.hdf5
+        path: ./data/datasets/menagerie-60hz/Franka-Reach/dataset_random_train.hdf5
         weight: 0.35
       rl_contract_trajectory:
-        path: ./data/datasets/legacy-60hz/Franka-Reach/dataset_rl_contract_train.hdf5
+        path: ./data/datasets/menagerie-60hz/Franka-Reach/dataset_rl_contract_train.hdf5
         weight: 0.2
       policy_noisy_trajectory:
-        path: ./data/datasets/legacy-60hz/Franka-Reach/dataset_policy_noisy_train.hdf5
+        path: ./data/datasets/menagerie-60hz/Franka-Reach/dataset_policy_noisy_train.hdf5
         weight: 0.25
       policy_trajectory:
-        path: ./data/datasets/legacy-60hz/Franka-Reach/dataset_policy_train.hdf5
+        path: ./data/datasets/menagerie-60hz/Franka-Reach/dataset_policy_train.hdf5
         weight: 0.2
     valid_datasets:
-      exp_trajectory: ./data/datasets/legacy-60hz/Franka-Reach/dataset_valid.hdf5
-      passive_trajectory: ./data/datasets/legacy-60hz/Franka-Reach/dataset_passive_valid.hdf5
-      policy_trajectory: ./data/datasets/legacy-60hz/Franka-Reach/dataset_policy_valid.hdf5
-      policy_noisy_trajectory: ./data/datasets/legacy-60hz/Franka-Reach/dataset_policy_noisy_valid.hdf5
+      exp_trajectory: ./data/datasets/menagerie-60hz/Franka-Reach/dataset_valid.hdf5
+      passive_trajectory: ./data/datasets/menagerie-60hz/Franka-Reach/dataset_passive_valid.hdf5
+      policy_trajectory: ./data/datasets/menagerie-60hz/Franka-Reach/dataset_policy_valid.hdf5
+      policy_noisy_trajectory: ./data/datasets/menagerie-60hz/Franka-Reach/dataset_policy_noisy_valid.hdf5
     max_capacity: 10000000
     load_mode: eager
     num_data_workers: 8
@@ -67,7 +67,7 @@ algorithm:
     action_mode: joint_f
     rollout_horizon: 10
     num_rollouts: 2048
-    dataset_path: ./data/datasets/legacy-60hz/Franka-Reach/dataset_policy_valid.hdf5
+    dataset_path: ./data/datasets/menagerie-60hz/Franka-Reach/dataset_policy_valid.hdf5
     passive: False
 
 inputs:

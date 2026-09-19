@@ -8,7 +8,7 @@
 import gymnasium as gym
 from isaaclab_tasks.core.cartpole import agents as cartpole_agents
 from isaaclab_tasks.core.reach.config.franka import agents as franka_reach_agents
-from isaaclab_tasks.contrib.lift.config.franka import agents as franka_lift_agents
+from isaaclab_tasks.core.lift.config.franka import agents as franka_lift_agents
 from isaaclab_tasks.contrib.velocity.config.anymal_c import agents as anymal_c_agents
 
 from .anymal_c_dataset_gen_cfg import AnymalCDatasetGenFlatEnvCfg, AnymalCDatasetGenRoughEnvCfg
@@ -22,6 +22,7 @@ from .franka_lift_nerd_env import (
 )
 from .franka_reach_nerd_env import (
     FrankaReachDatasetGenEnvCfg,
+    FrankaReachPolicyEnvCfg,
     NerdFrankaReachEnv,
     NerdFrankaReachEnvCfg,
 )
@@ -113,15 +114,24 @@ gym.register(
 )
 
 gym.register(
+    id="Isaac-Reach-Franka-Policy-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{FrankaReachPolicyEnvCfg.__module__}:FrankaReachPolicyEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{franka_reach_agents.__name__}.rsl_rl_ppo_cfg:FrankaReachPPORunnerCfg",
+        "default_agent": "rsl_rl",
+    },
+)
+
+gym.register(
     id="Isaac-Lift-Cube-Franka-NeRD-v0",
     entry_point=f"{NerdFrankaLiftEnv.__module__}:NerdFrankaLiftEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{NerdFrankaLiftEnvCfg.__module__}:NerdFrankaLiftEnvCfg",
-        "rl_games_cfg_entry_point": f"{franka_lift_agents.__name__}:rl_games_ppo_cfg.yaml",
-        "rsl_rl_cfg_entry_point": f"{franka_lift_agents.__name__}.rsl_rl_ppo_cfg:LiftCubePPORunnerCfg",
-        "skrl_cfg_entry_point": f"{franka_lift_agents.__name__}:skrl_ppo_cfg.yaml",
-        "sb3_cfg_entry_point": f"{franka_lift_agents.__name__}:sb3_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": f"{franka_lift_agents.__name__}.rsl_rl_ppo_cfg:FrankaPPORunnerCfg",
+        "default_agent": "rsl_rl",
     },
 )
 
@@ -131,6 +141,8 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{FrankaLiftCubeDatasetGenEnvCfg.__module__}:FrankaLiftCubeDatasetGenEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{franka_lift_agents.__name__}.rsl_rl_ppo_cfg:FrankaPPORunnerCfg",
+        "default_agent": "rsl_rl",
     },
 )
 
@@ -140,6 +152,7 @@ __all__ = [
     "AnymalCDatasetGenRoughEnvCfg",
     "FrankaLiftCubeDatasetGenEnvCfg",
     "FrankaReachDatasetGenEnvCfg",
+    "FrankaReachPolicyEnvCfg",
     "NerdAnymalCFlatEnv",
     "NerdAnymalCFlatEnvCfg",
     "NerdAnymalCRoughEnv",

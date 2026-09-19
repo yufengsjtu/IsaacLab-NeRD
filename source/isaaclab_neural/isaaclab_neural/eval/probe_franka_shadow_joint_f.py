@@ -23,7 +23,7 @@ Example::
 
     PYTHONPATH="$(pwd)/source/isaaclab_neural${PYTHONPATH:+:$PYTHONPATH}" \\
       uv run python -m isaaclab_neural.eval.probe_franka_shadow_joint_f \\
-      --policy-checkpoint ./pretrained/control_policy/franka_reach/model_999.pt \\
+      --policy-checkpoint ./pretrained/control_policy/franka_reach_menagerie/model_999.pt \\
       --num-envs 8 --num-steps 240 --visualizer none presets=newton_mjwarp
 """
 

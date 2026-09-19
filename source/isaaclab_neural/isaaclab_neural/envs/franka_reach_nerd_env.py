@@ -18,15 +18,15 @@ from isaaclab_tasks.core.reach.reach_env_cfg import ReachPhysicsCfg
 
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 
-from .franka_scene import FRANKA_PANDA_CFG, apply_franka_reach_contact_free_scene
+from .franka_scene import FRANKA_PANDA_CFG, apply_franka_lift_robot, apply_franka_reach_contact_free_scene
 from .incremental_joint_position import IncrementalJointPositionActionCfg, implicit_pd_rest_saturation_increment
 from .neural_env_wrapper import NerdManagerBasedRLEnv
 
 DEFAULT_FRANKA_REACH_NERD_MODEL_PATH: str | None = None
 
 _FRANKA_REACH_ARM_JOINTS = ["panda_joint.*"]
-# Clamp the incremental walk to 60% of each USD joint range. Legacy PD on joint 2
-# overshoots held targets by up to ~0.45 rad, which exceeded the 20% margin left by 0.8.
+# Clamp the incremental walk to 60% of each USD joint range, leaving margin for
+# transient overshoot under held saturation-scale targets.
 FRANKA_REACH_DATASET_SOFT_JOINT_POS_LIMIT_FACTOR = 0.6
 
 
@@ -49,11 +49,11 @@ def _arm_saturation_increment_scale() -> dict[str, float]:
 
 # Per-joint ``|Δq|`` [rad] so ``kp * Δq`` equals ``joint_effort_limit`` at rest.
 FRANKA_REACH_DATASET_INCREMENT_SCALE = _arm_saturation_increment_scale()
-"""Legacy Panda increments [rad], retained for callers of the original data recipe.
+"""Historical increments [rad], retained for callers of the original data recipe.
 
-Data generation derives runtime drive values via ``scale=None`` for either asset instead.
+Current data generation derives runtime drive values via ``scale=None`` instead.
 """
-# Physics frames to hold each absolute ``q_target``. Legacy Reach uses ``dt=1/60`` and
+# Physics frames to hold each absolute ``q_target``. Reach uses ``dt=1/60`` and
 # ``decimation=2``; 20 frames is 1/3 s.
 FRANKA_REACH_DATASET_ACTION_HOLD_FRAMES = 20
 # Dataset-Gen EE pose resample [s]. Lets the Reach policy finish the fast
@@ -93,9 +93,9 @@ class FrankaReachDatasetGenEnvCfg(FrankaReachEnvCfg):
 
     Random splits command ``q_target = clip(q + scale a, soft limits)`` with a
     per-joint ``scale`` of ``effort_limit / kp`` from the resolved robot
-    drives and hold that absolute target for 20 physics frames. The default
-    Legacy asset and 60 Hz physics step match the historical Reach policy.
-    At rest, ``|a| = 1`` therefore reaches each actuator's effort limit.
+    drives and hold that absolute target for 20 physics frames. The Menagerie
+    Panda runs at the Reach task's 60 Hz physics step. At rest, ``|a| = 1``
+    therefore reaches each actuator's effort limit.
     Random splits reset arm positions uniformly within the soft joint limits,
     with zero joint velocities and fingers at their clamped default positions.
     Policy and zero-action splits restore the Reach action and reset through
@@ -105,6 +105,7 @@ class FrankaReachDatasetGenEnvCfg(FrankaReachEnvCfg):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        apply_franka_lift_robot(self)
         apply_franka_reach_contact_free_scene(self)
         self.scene.robot.soft_joint_pos_limit_factor = FRANKA_REACH_DATASET_SOFT_JOINT_POS_LIMIT_FACTOR
         self.actions.arm_action = franka_reach_dataset_arm_action()
@@ -132,6 +133,21 @@ class FrankaReachDatasetGenEnvCfg(FrankaReachEnvCfg):
 
 
 @configclass
+class FrankaReachPolicyEnvCfg(FrankaReachDatasetGenEnvCfg):
+    """Dataset-Gen scene with the Reach RL action and reset, for training the control policy.
+
+    This is the environment the policy and zero-action dataset splits run in, so a
+    policy trained here matches the recorded action contract exactly.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.restore_reach_rl_arm_action()
+        # Ordinary Reach goal timing; Dataset-Gen shortens it for policy clips only.
+        self.commands.ee_pose.resampling_time_range = (4.0, 4.0)
+
+
+@configclass
 class NerdFrankaReachEnvCfg(FrankaReachEnvCfg):
     """Manager-based Franka Reach config using contact-free NeRD Newton physics."""
 
@@ -141,6 +157,7 @@ class NerdFrankaReachEnvCfg(FrankaReachEnvCfg):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        apply_franka_lift_robot(self)
         apply_franka_reach_contact_free_scene(self)
         self.actions.arm_action = franka_reach_rl_arm_action()
         nerd_physics = NerdNewtonCfg(

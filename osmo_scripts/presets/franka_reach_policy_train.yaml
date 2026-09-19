@@ -5,7 +5,7 @@
 
 workflow:
   base_name: franka-reach-policy-train
-  dataset_subdir: franka-reach-legacy-60hz-policy-train
+  dataset_subdir: franka-reach-menagerie-60hz-policy-train
   image: docker.io/rowany28070/isaac-lab-nerd:g1-develop
 
 resources:
@@ -16,7 +16,7 @@ resources:
   platform: ovx-l40s
 
 experiment:
-  dataset_dir: ./data/datasets/legacy-60hz
+  dataset_dir: ./data/datasets/menagerie-60hz
   env_name: Franka-Reach
   robot_name: Franka
   data_gen_task: Isaac-Reach-Franka-Dataset-Gen-v0
@@ -39,7 +39,7 @@ experiment:
   trajectory_length: 240
   write_chunk_transitions: 819200
   update_dataset_statistics: true
-  policy_checkpoint: ./pretrained/control_policy/franka_reach/model_999.pt
+  policy_checkpoint: ./pretrained/control_policy/franka_reach_menagerie/model_999.pt
   dataset_specs:
     - filename: dataset_train.hdf5
       seed: 0

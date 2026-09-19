@@ -117,6 +117,10 @@ def load_training_cfg(args):
     if args.checkpoint is not None:
         checkpoint = load_checkpoint(args.checkpoint, device=args.device)
         checkpoint_cfg = get_cfg_from_checkpoint(checkpoint, args.checkpoint)
+        if cfg["network"].get("finger_object_normal_force_head", {}).get("enabled", False) and not (
+            checkpoint_cfg["network"].get("finger_object_normal_force_head", {}).get("enabled", False)
+        ):
+            raise ValueError("Cannot resume filtered finger-force training from a checkpoint without that head.")
         if cfg["env"]["env_name"] != checkpoint_cfg["env"]["env_name"]:
             print_warning(
                 f"Environment name in cfg {cfg['env']['env_name']} is not equal to "

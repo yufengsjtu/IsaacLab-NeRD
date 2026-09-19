@@ -40,6 +40,9 @@ class NeuralEnvAdapter:
         register_scene = getattr(self.manager, "register_applied_effort_scene", None)
         if callable(register_scene):
             register_scene(scene)
+        sensors = getattr(getattr(self.isaaclab_env, "cfg", None), "finger_object_normal_force_sensors", ())
+        if sensors:
+            self.manager.register_finger_force_scene(scene, sensors)
         if patch_reset:
             self.install_reset_patch()
 
@@ -110,6 +113,9 @@ class NeuralEnvAdapter:
         reset_solver = getattr(self.solver, "reset", None)
         if reset_solver is not None:
             reset_solver(env_ids)
+        publish_forces = getattr(self.manager, "publish_finger_forces", None)
+        if callable(publish_forces):
+            publish_forces(resetting=True)
 
     def reset(
         self,

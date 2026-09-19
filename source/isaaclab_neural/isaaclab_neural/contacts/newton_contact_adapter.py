@@ -68,7 +68,7 @@ class NewtonContactAdapter:
         self.contact_filter = contact_filter
 
         if device is None:
-            self.device = wp.device_to_torch(model.device)
+            self.device = torch.device(wp.device_to_torch(model.device))
         else:
             self.device = torch.device(device)
 
@@ -382,14 +382,14 @@ class NewtonContactAdapter:
         body_ids_1 = self._shape_body_ids(raw["shape1"])
         world_ids = self._contact_env_ids(raw["shape0"], raw["shape1"])
         if state is not None:
-            rows = self._native_pair_encoder._directed_rows(raw, state)
+            rows = self._native_pair_encoder.directed_rows(raw, state)
             first = slice(0, pair_count)
             second = slice(pair_count, 2 * pair_count)
             body_ids_0 = rows.body_id[first]
             body_ids_1 = rows.body_id[second]
             world_ids = rows.world_id[first]
-            body_slots_0 = self._native_pair_encoder._body_slot(body_ids_0)
-            body_slots_1 = self._native_pair_encoder._body_slot(body_ids_1)
+            body_slots_0 = self._native_pair_encoder.body_slot(body_ids_0)
+            body_slots_1 = self._native_pair_encoder.body_slot(body_ids_1)
             lever_arms_0_w = rows.lever_world[first]
             lever_arms_1_w = rows.lever_world[second]
             relative_velocities_0_w = rows.velocity_world[first]
@@ -402,7 +402,14 @@ class NewtonContactAdapter:
             lever_arms_1_w = vector_zeros
             relative_velocities_0_w = vector_zeros
             relative_velocities_1_w = vector_zeros
-        valid = (world_ids >= 0) & (world_ids < self.num_envs)
+        normal = raw["normal"]
+        normal_norm = torch.linalg.vector_norm(normal, dim=-1)
+        valid = (
+            (world_ids >= 0)
+            & (world_ids < self.num_envs)
+            & torch.isfinite(normal_norm)
+            & (normal_norm > torch.finfo(normal.dtype).eps)
+        )
 
         point0_world = raw["point0_world"]
         point1_world = raw["point1_world"]
@@ -426,7 +433,7 @@ class NewtonContactAdapter:
             "points_1_w": point1_world[valid].to(dtype=torch.float32),
             "surface_points_0_w": surface0_world[valid].to(dtype=torch.float32),
             "surface_points_1_w": surface1_world[valid].to(dtype=torch.float32),
-            "normal_w": raw["normal"][valid].to(dtype=torch.float32),
+            "normal_w": normal[valid].to(dtype=torch.float32),
             "separation": raw["surface_separation"][valid].to(dtype=torch.float32),
             "thickness_0": raw["thickness0"][valid].to(dtype=torch.float32),
             "thickness_1": raw["thickness1"][valid].to(dtype=torch.float32),
@@ -592,7 +599,7 @@ class NewtonContactAdapter:
                 raw["_body_qd"] = self._warp_torch_view(state.body_qd)
         return raw
 
-    def _canonicalize_contact_sides(
+    def canonicalize_contact_sides(
         self,
         shape0: torch.Tensor,
         shape1: torch.Tensor,
@@ -603,7 +610,17 @@ class NewtonContactAdapter:
         thickness1: torch.Tensor,
         offset0: torch.Tensor | None = None,
         offset1: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor | None, ...]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
         """Put the dynamic robot side first and orient normals from side 0 to side 1."""
         body0 = self._shape_body_ids(shape0)
         body1 = self._shape_body_ids(shape1)
@@ -625,8 +642,12 @@ class NewtonContactAdapter:
         canonical_normal = torch.where(vector_swap, -normal, normal)
         canonical_thickness0 = torch.where(swap, thickness1, thickness0)
         canonical_thickness1 = torch.where(swap, thickness0, thickness1)
-        canonical_offset0 = None if offset0 is None else torch.where(vector_swap, offset1, offset0)
-        canonical_offset1 = None if offset1 is None else torch.where(vector_swap, offset0, offset1)
+        if offset0 is None or offset1 is None:
+            canonical_offset0 = None
+            canonical_offset1 = None
+        else:
+            canonical_offset0 = torch.where(vector_swap, offset1, offset0)
+            canonical_offset1 = torch.where(vector_swap, offset0, offset1)
         return (
             canonical_shape0,
             canonical_shape1,
@@ -638,6 +659,8 @@ class NewtonContactAdapter:
             canonical_offset0,
             canonical_offset1,
         )
+
+    _canonicalize_contact_sides = canonicalize_contact_sides
 
     def _shape_body_ids(self, shapes: torch.Tensor) -> torch.Tensor:
         """Return owning body indices, using ``-1`` for static or invalid shapes."""
@@ -861,8 +884,9 @@ class NewtonContactAdapter:
         valid = body_ids >= 0
         if not bool(valid.any()):
             return env_ids
-        if getattr(self, "body_world_torch", None) is not None:
-            env_ids[valid] = self.body_world_torch[body_ids[valid]]
+        body_world_torch = getattr(self, "body_world_torch", None)
+        if body_world_torch is not None:
+            env_ids[valid] = body_world_torch[body_ids[valid]]
         elif self.body_world is not None:
             body_world = torch.as_tensor(self.body_world, dtype=torch.long, device=shapes.device)
             env_ids[valid] = body_world[body_ids[valid]]

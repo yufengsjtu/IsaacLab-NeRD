@@ -27,6 +27,7 @@ class NewtonNerdManager(NewtonManager):
     _nerd_active: bool = False
     _neural_model_loading_deferred: bool = False
     _applied_effort_scenes: list = []
+    _finger_force_scenes: list = []
     _skip_applied_effort_overlay: bool = False
 
     _UPSTREAM_SYNC_ATTRS = (
@@ -59,6 +60,7 @@ class NewtonNerdManager(NewtonManager):
         cls._nerd_contact_adapter = None
         cls._nerd_active = False
         cls._applied_effort_scenes = []
+        cls._finger_force_scenes = []
         cls._skip_applied_effort_overlay = False
 
     @classmethod
@@ -257,6 +259,31 @@ class NewtonNerdManager(NewtonManager):
             cls._applied_effort_scenes.append(scene)
 
     @classmethod
+    def register_finger_force_scene(cls, scene, sensor_names) -> None:
+        """Register filtered finger normal-force consumers without changing policy/reward terms."""
+        from isaaclab_neural.contacts.finger_object_force import validate_sensors
+
+        validate_sensors(scene, sensor_names)
+        if not any(existing is scene for existing, _ in cls._finger_force_scenes):
+            cls._finger_force_scenes.append((scene, tuple(sensor_names)))
+
+    @classmethod
+    def publish_finger_forces(cls, *, resetting: bool = False) -> None:
+        """Publish cached post-step filtered normal forces [N], or clear them during reset."""
+        if not cls._finger_force_scenes:
+            return
+        from isaaclab_neural.contacts.finger_object_force import publish_normal_forces
+
+        forces = getattr(cls._solver, "predicted_finger_object_normal_forces_b", None)
+        if forces is None and not resetting:
+            raise RuntimeError(
+                "Lift NeRD deployment requires a checkpoint with the filtered finger-object normal-force head."
+            )
+        for scene, names in cls._finger_force_scenes:
+            values = forces if forces is not None else torch.zeros((scene.num_envs, 2, 3), device=scene["robot"].device)
+            publish_normal_forces(scene, values, names)
+
+    @classmethod
     def _run_post_actuator_hooks(cls) -> None:
         """Run telemetry callbacks, then overlay shadow PD into ``control.joint_f``."""
         for cb in cls._post_actuator_callbacks:
@@ -336,6 +363,7 @@ class NewtonNerdManager(NewtonManager):
 
     @classmethod
     def _update_sensors(cls, contacts) -> None:
+        cls.publish_finger_forces()
         if cls._newton_frame_transform_sensors:
             for sensor in cls._newton_frame_transform_sensors:
                 sensor.update(cls._state_0)
@@ -388,3 +416,4 @@ class NewtonNerdManager(NewtonManager):
                     should_reset = True
             if should_reset:
                 reset_solver(env_ids)
+        cls.publish_finger_forces(resetting=True)

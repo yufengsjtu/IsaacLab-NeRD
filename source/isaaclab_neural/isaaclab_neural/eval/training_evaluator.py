@@ -47,12 +47,20 @@ class TrainingRolloutEvaluator:
         max_contact_tokens: int | None = None,
         contact_packing_policy: str | None = None,
         contact_filter: str = "none",
+        rebase_env_origins: bool = False,
+        preserve_source_origins: bool = False,
     ):
         self.neural_env = neural_env
         self.device = device
         self.eval_horizon = eval_horizon
         self.history_length = int(getattr(neural_env.solver_neural, "num_states_history", 1))
         self.require_terrain_context = require_terrain_context
+        self.rebase_env_origins = rebase_env_origins
+        self.preserve_source_origins = preserve_source_origins
+        if preserve_source_origins and (rebase_env_origins or require_terrain_context):
+            raise ValueError("Original-coordinate evaluation cannot rebase origins or relocate terrain.")
+        if rebase_env_origins and require_terrain_context:
+            raise ValueError("Replica origin rebasing cannot be combined with terrain-patch restoration.")
         contact_mode = getattr(neural_env.solver_neural, "contact_mode", "newton_native")
         neural_env.solver_neural.contact_mode = normalize_contact_mode(contact_mode)
         if contact_context_validation is None:
@@ -77,6 +85,17 @@ class TrainingRolloutEvaluator:
                 contact_packing_policy=contact_packing_policy,
                 contact_filter=contact_filter,
             )
+            if preserve_source_origins:
+                context = self.trajectory_dataset.trajectory_context
+                if "source_env_id" not in context or "env_origin" not in context:
+                    raise ValueError("Source-origin evaluation requires source_env_id and env_origin metadata.")
+                self._source_origin_batches(
+                    {
+                        "states": torch.empty(len(context["source_env_id"]), 0),
+                        "source_env_id": torch.as_tensor(context["source_env_id"]),
+                        "env_origin": torch.as_tensor(context["env_origin"]),
+                    }
+                )
 
     @torch.no_grad()
     def evaluate_action_mode(
@@ -270,6 +289,11 @@ class TrainingRolloutEvaluator:
     ):
         if eval_mode not in ("rollout", "single-step"):
             raise ValueError(f"Unsupported eval_mode: {eval_mode}")
+        if getattr(self, "preserve_source_origins", False):
+            return self._evaluate_source_origin_rollout(
+                trajectories, control_key=control_key, step_fn=step_fn, eval_mode=eval_mode, render=render
+            )
+        trajectories = self._rebase_replica_trajectories(trajectories)
         env = self.neural_env
         num_envs = env.num_envs
         total_traj = (trajectories["states"].shape[0] // num_envs) * num_envs
@@ -323,6 +347,117 @@ class TrainingRolloutEvaluator:
         }
         return next_states_diff, trajectories_out, error_stats
 
+    def _source_origin_batches(self, trajectories: dict[str, torch.Tensor]) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        """Schedule each window in its original world, separating repeated world IDs."""
+        required = {"source_env_id", "env_origin", "states"}
+        if not required.issubset(trajectories):
+            raise ValueError(f"Source-origin evaluation requires {sorted(required)}.")
+        ids = trajectories["source_env_id"].reshape(-1).cpu()
+        count = trajectories["states"].shape[0]
+        if ids.numel() != count or ids.is_floating_point() or ids.dtype == torch.bool:
+            raise ValueError("source_env_id must contain one integer per trajectory.")
+        scene = self.neural_env.neural_adapter.isaaclab_env.scene
+        if getattr(scene, "terrain", None) is not None:
+            raise ValueError("Source-origin evaluation requires a replicated static scene, not terrain patches.")
+        origins = scene.env_origins
+        origins = getattr(origins, "torch", origins).detach().cpu()
+        if torch.any(ids < 0) or torch.any(ids >= len(origins)):
+            raise ValueError("source_env_id is outside the runtime world count; use the original collection grid.")
+        recorded_origins = trajectories["env_origin"].detach().cpu()
+        if recorded_origins.shape != (count, 3) or not torch.equal(recorded_origins, origins[ids]):
+            raise ValueError(
+                "Source origins do not match the original collection grid; changing num_envs alone is insufficient."
+            )
+        queues: dict[int, list[int]] = {}
+        for index, slot in enumerate(ids.tolist()):
+            queues.setdefault(slot, []).append(index)
+        batches = []
+        for offset in range(max((len(indices) for indices in queues.values()), default=0)):
+            pairs = [(indices[offset], slot) for slot, indices in queues.items() if offset < len(indices)]
+            batches.append((torch.tensor([p[0] for p in pairs]), torch.tensor([p[1] for p in pairs])))
+        return batches
+
+    def _source_origin_batch(
+        self,
+        trajectories: dict[str, torch.Tensor],
+        indices: torch.Tensor,
+        slots: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Fill unused worlds with valid reset history, without translating selected windows."""
+        env = self.neural_env
+        env.neural_adapter.reset()
+        solver = env.solver_neural
+        snapshot = {
+            key: getattr(solver, key) for key in ("states", "root_body_q", "root_body_qd", "joint_f", "gravity_dir")
+        }
+        snapshot.update(solver.contact_inputs)
+        snapshot["next_states"] = snapshot["states"]
+        snapshot["primary_body_q"] = getattr(solver, "primary_body_q", None)
+        batch = {}
+        for key, value in trajectories.items():
+            current = snapshot.get(key)
+            if current is not None and value.ndim >= 3:
+                target = current[:, None].expand(env.num_envs, value.shape[1], *current.shape[1:]).clone()
+            else:
+                target = torch.zeros((env.num_envs, *value.shape[1:]), dtype=value.dtype, device=self.device)
+            target.index_copy_(
+                0, slots.to(target.device), value.index_select(0, indices.to(value.device)).to(target.device)
+            )
+            batch[key] = target
+        return batch
+
+    def _evaluate_source_origin_rollout(self, trajectories, *, control_key, step_fn, eval_mode, render):
+        """Evaluate original-coordinate batches and return only requested windows in their original order."""
+        env = self.neural_env
+        if getattr(env.solver_neural, "contact_representation", None) != "contact_tokens":
+            raise ValueError("Source-origin evaluation currently requires contact tokens.")
+        batches = self._source_origin_batches(trajectories)
+        total = len(trajectories["states"])
+        if not total:
+            raise ValueError("Source-origin evaluation requires at least one window.")
+        offset = self._history_offset(trajectories)
+        states = torch.empty((total, self.eval_horizon + 1, env.solver_neural.state_dim), device=self.device)
+        states[:, 0] = trajectories["states"][:, offset].to(self.device)
+        target = trajectories["next_states"][:, offset : offset + self.eval_horizon].to(self.device)
+        controls = trajectories[control_key][:, offset : offset + self.eval_horizon].to(self.device)
+        env.solver_neural.eval()
+        for indices, slots in tqdm(batches):
+            batch = self._source_origin_batch(trajectories, indices, slots)
+            self._reset_from_context(batch, 0, env.num_envs, offset)
+            self._validate_runtime_state_context(batch, 0, env.num_envs, offset, env_ids=slots)
+            self._preload_history(batch, 0, env.num_envs, offset)
+            if eval_mode != "single-step":
+                self._validate_runtime_contact_tokens(batch, 0, env.num_envs, offset, env_ids=slots)
+            for step in range(self.eval_horizon):
+                if eval_mode == "single-step":
+                    self._reset_from_context(batch, 0, env.num_envs, offset + step)
+                    self._validate_runtime_state_context(batch, 0, env.num_envs, offset + step, env_ids=slots)
+                    self._preload_history(batch, 0, env.num_envs, offset + step)
+                    self._validate_runtime_contact_tokens(batch, 0, env.num_envs, offset + step, env_ids=slots)
+                prediction = step_fn(batch[control_key][:, offset + step])
+                states[indices.to(states.device), step + 1] = prediction.index_select(0, slots.to(prediction.device))
+                if render:
+                    env.unwrapped.render()
+        difference, statistics = self.calculate_error_metrics(target, states[:, 1:])
+        return difference, {"states": states, control_key: controls, "ground-truth": target}, statistics
+
+    def _rebase_replica_trajectories(self, trajectories: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Map recorded free objects and contacts onto unchanged replica geometry."""
+        if not getattr(self, "rebase_env_origins", False):
+            return trajectories
+        source_origins = trajectories.get("env_origin")
+        if source_origins is None:
+            raise ValueError("Replica rollout evaluation requires recorded env_origin metadata.")
+        scene = self.neural_env.neural_adapter.isaaclab_env.scene
+        if getattr(scene, "terrain", None) is not None:
+            raise ValueError("Replica origin rebasing is for replicated static scenes, not terrain patches.")
+        origins = scene.env_origins
+        origins = getattr(origins, "torch", origins).to(source_origins)
+        slots = torch.arange(source_origins.shape[0], device=origins.device) % self.neural_env.num_envs
+        return self.neural_env.solver_neural.translate_world_inputs(
+            trajectories, origins.index_select(0, slots) - source_origins
+        )
+
     def _reset_from_context(
         self,
         trajectories: dict[str, torch.Tensor],
@@ -345,7 +480,7 @@ class TrainingRolloutEvaluator:
     def _history_keys(self) -> set[str]:
         """Return dataset fields required to warm-start solver history."""
         solver = self.neural_env.solver_neural
-        keys = {"root_body_q", "states", "joint_f", "gravity_dir", *solver.contacts.keys()}
+        keys = {"root_body_q", "states", "joint_f", "gravity_dir", *solver.contact_inputs.keys()}
         if getattr(solver, "contact_token_frame", "root") == "owner":
             keys.add("primary_body_q")
         return keys
@@ -434,9 +569,14 @@ class TrainingRolloutEvaluator:
         start: int,
         end: int,
         history_offset: int,
+        env_ids: torch.Tensor | None = None,
     ) -> None:
         """Ensure reset-time state and root pose match the recorded frame."""
-        if not self.require_terrain_context:
+        if not (
+            self.require_terrain_context
+            or getattr(self, "rebase_env_origins", False)
+            or getattr(self, "preserve_source_origins", False)
+        ):
             return
         required = {"states", "root_body_q", "root_body_qd"}
         missing = sorted(required - set(trajectories))
@@ -452,6 +592,10 @@ class TrainingRolloutEvaluator:
         failures = []
         for key, runtime_value in runtime_context.items():
             recorded = trajectories[key][start:end, history_offset].to(runtime_value.device)
+            if env_ids is not None:
+                selection = env_ids.to(runtime_value.device)
+                runtime_value = runtime_value.index_select(0, selection)
+                recorded = recorded.index_select(0, selection)
             difference = torch.abs(runtime_value - recorded)
             if key == "root_body_q":
                 quaternion_error = torch.minimum(
@@ -459,15 +603,17 @@ class TrainingRolloutEvaluator:
                     torch.abs(runtime_value[..., 3:7] + recorded[..., 3:7]),
                 )
                 difference = torch.cat((difference[..., :3], quaternion_error), dim=-1)
-            elif key == "states" and getattr(solver, "base_joint_type", None) == JointType.FREE:
-                quaternion_error = torch.minimum(
-                    torch.abs(runtime_value[..., 3:7] - recorded[..., 3:7]),
-                    torch.abs(runtime_value[..., 3:7] + recorded[..., 3:7]),
-                )
-                difference = torch.cat(
-                    (difference[..., :3], quaternion_error, difference[..., 7:]),
-                    dim=-1,
-                )
+            elif key == "states":
+                quaternion_starts = [
+                    int(solver.joint_q_start[joint]) + 3 for joint in getattr(solver, "free_joint_indices", ())
+                ]
+                if not quaternion_starts and getattr(solver, "base_joint_type", None) == JointType.FREE:
+                    quaternion_starts = [3]
+                for q in quaternion_starts:
+                    difference[..., q : q + 4] = torch.minimum(
+                        torch.abs(runtime_value[..., q : q + 4] - recorded[..., q : q + 4]),
+                        torch.abs(runtime_value[..., q : q + 4] + recorded[..., q : q + 4]),
+                    )
             max_error = torch.max(difference).item()
             if not np.isfinite(max_error) or max_error > self.state_context_tolerance:
                 failures.append(f"{key}_max_error={max_error:.6g}")
@@ -486,7 +632,7 @@ class TrainingRolloutEvaluator:
         history_offset: int,
     ) -> None:
         """Ensure reset-time runtime contacts match the recorded current frame."""
-        if not self.require_terrain_context:
+        if not (self.require_terrain_context or getattr(self, "rebase_env_origins", False)):
             return
         solver = self.neural_env.solver_neural
         if getattr(solver, "contact_representation", "flat") == "contact_tokens":
@@ -501,17 +647,17 @@ class TrainingRolloutEvaluator:
             "contact_thicknesses_0",
             "contact_thicknesses_1",
         }
-        missing = sorted(required_keys - set(solver.contacts))
+        missing = sorted(required_keys - set(solver.contact_inputs))
         if missing:
             raise ValueError(f"Runtime contact context is missing fields required for set matching: {missing}.")
-        missing = sorted(set(solver.contacts) - set(trajectories))
+        missing = sorted(set(solver.contact_inputs) - set(trajectories))
         if missing:
             raise ValueError(f"Dataset contact context is missing runtime contact fields: {missing}.")
 
         dataset_contacts = {}
         runtime_contacts = {}
         slot_max_errors = {}
-        for key, runtime_value in solver.contacts.items():
+        for key, runtime_value in solver.contact_inputs.items():
             recorded = trajectories[key][start:end, history_offset].to(runtime_value.device)
             dataset_contacts[key] = recorded.bool() if runtime_value.dtype == torch.bool else recorded
             runtime_contacts[key] = runtime_value
@@ -593,19 +739,24 @@ class TrainingRolloutEvaluator:
         start: int,
         end: int,
         history_offset: int,
+        env_ids: torch.Tensor | None = None,
     ) -> None:
         """Compare recorded and runtime contact-token sets for diagnostics."""
         solver = self.neural_env.solver_neural
         required = {"contact_tokens", "contact_token_overflow"}
-        missing_runtime = sorted(required - set(solver.contacts))
+        missing_runtime = sorted(required - set(solver.contact_inputs))
         if missing_runtime:
             raise ValueError(f"Runtime contact-token context is missing fields: {missing_runtime}.")
         missing_dataset = sorted(required - set(trajectories))
         if missing_dataset:
             raise ValueError(f"Dataset contact-token context is missing fields: {missing_dataset}.")
 
-        runtime_tokens = solver.contacts["contact_tokens"]
+        runtime_tokens = solver.contact_inputs["contact_tokens"]
         recorded_tokens = trajectories["contact_tokens"][start:end, history_offset].to(runtime_tokens.device)
+        if env_ids is not None:
+            selection = env_ids.to(runtime_tokens.device)
+            runtime_tokens = runtime_tokens.index_select(0, selection)
+            recorded_tokens = recorded_tokens.index_select(0, selection)
         if recorded_tokens.shape != runtime_tokens.shape:
             raise ValueError(
                 f"Contact-token shape mismatch: dataset={tuple(recorded_tokens.shape)}, "
@@ -634,10 +785,14 @@ class TrainingRolloutEvaluator:
         def active_max(error: torch.Tensor) -> float:
             return float(error.max()) if error.numel() else 0.0
 
-        runtime_overflow = solver.contacts["contact_token_overflow"]
+        runtime_overflow = solver.contact_inputs["contact_token_overflow"]
         dataset_overflow = trajectories["contact_token_overflow"][start:end, history_offset].to(runtime_overflow.device)
+        if env_ids is not None:
+            selection = env_ids.to(runtime_overflow.device)
+            runtime_overflow = runtime_overflow.index_select(0, selection)
+            dataset_overflow = dataset_overflow.index_select(0, selection)
         overflow_mismatch = dataset_overflow != runtime_overflow
-        geometry_mismatch_per_env = torch.zeros(end - start, dtype=torch.bool, device=runtime_tokens.device)
+        geometry_mismatch_per_env = torch.zeros(len(runtime_tokens), dtype=torch.bool, device=runtime_tokens.device)
         if geometry_mismatch.any():
             geometry_mismatch_per_env[matches.env_ids[geometry_mismatch]] = True
         tokens_match = (
@@ -657,7 +812,7 @@ class TrainingRolloutEvaluator:
         )
         detail_rows = []
         for local_env in torch.nonzero(suspect_envs, as_tuple=False).flatten()[:8].tolist():
-            batch_index = start + local_env
+            batch_index = start + (local_env if env_ids is None else int(env_ids[local_env]))
             trajectory_index = int(trajectories.get("_dataset_trajectory_index", torch.full((end,), -1))[batch_index])
             window_start = int(trajectories.get("_dataset_window_start", torch.full((end,), -1))[batch_index])
             terrain_level = int(trajectories.get("terrain_level", torch.full((end,), -1))[batch_index])

@@ -21,6 +21,38 @@ from isaaclab_neural.generate.sampler import ActionTrajectorySampler
 from native_hdf5_samples import make_native_rollouts
 
 
+@pytest.mark.parametrize("load_mode", ["eager", "lazy"])
+def test_filtered_normal_force_labels_and_metadata(tmp_path, load_mode):
+    from isaaclab_neural.contacts.finger_object_force import LABEL_KEY, METADATA
+    from isaaclab_neural.data.datasets import create_trajectory_dataset
+
+    path = tmp_path / "finger.hdf5"
+    rollouts = make_native_rollouts()
+    n, t = rollouts["states"].shape[:2]
+    forces = torch.arange(n * t * 6, dtype=torch.float32).reshape(n, t, 2, 3)
+    rollouts[LABEL_KEY] = forces
+    write_rollouts_to_hdf5(path, rollouts, "Franka-Lift")
+    append_rollouts_to_hdf5(path, rollouts, "Franka-Lift")
+    dataset = create_trajectory_dataset(
+        load_mode=load_mode,
+        hdf5_dataset_path=path,
+        sample_sequence_length=t,
+        contact_representation="contact_tokens",
+        max_contact_tokens=8,
+    )
+    torch.testing.assert_close(dataset[0][LABEL_KEY], forces[0])
+    if load_mode == "lazy":
+        dataset.close()
+    with h5py.File(path, "r+") as f:
+        assert f["data"][LABEL_KEY].shape == (2 * n, t, 2, 3)
+        assert all(f["data"].attrs[k] == v for k, v in METADATA.items())
+        f["data"].attrs["finger_object_force_body_names"] = "panda_leftfinger,panda_rightfinger"
+    with pytest.raises(ValueError, match="metadata"):
+        create_trajectory_dataset(load_mode=load_mode, hdf5_dataset_path=path, sample_sequence_length=t)
+    with pytest.raises(ValueError, match="metadata"):
+        append_rollouts_to_hdf5(path, rollouts, "Franka-Lift")
+
+
 def test_sensor_names_map_to_primary_body_slot_order():
     indices = build_primary_body_sensor_indices(
         ["LF_SHANK", "/World/envs/env_0/Robot/base", "extra", "RF_SHANK"],
@@ -74,6 +106,8 @@ def test_sampler_allocates_and_copies_labels_only_after_step():
             "joint_f": torch.ones(2, 3),
         },
         body_net_contact_forces_w=lambda: post_solve_forces,
+        finger_object_normal_force_sensors=("right", "left"),
+        finger_object_normal_forces_w=lambda: post_solve_forces[:, :2],
     )
     sampler = ActionTrajectorySampler.__new__(ActionTrajectorySampler)
     sampler.adapter = adapter
@@ -90,6 +124,7 @@ def test_sampler_allocates_and_copies_labels_only_after_step():
         buffers["body_net_contact_forces_w"][:, 1],
         post_solve_forces - 1000.0,
     )
+    torch.testing.assert_close(buffers["finger_object_normal_forces_w"][:, 1], post_solve_forces[:, :2] - 1000.0)
 
 
 def _native_rollouts(num_primary_bodies: int = 5):

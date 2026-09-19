@@ -8,7 +8,7 @@
 # policy rollouts. Weighted training is configured in the training YAML.
 workflow:
   base_name: franka-reach-mixed
-  dataset_subdir: franka-reach-legacy-60hz-mixed
+  dataset_subdir: franka-reach-menagerie-60hz-mixed
   image: docker.io/rowany28070/isaac-lab-nerd:g1-develop
 
 resources:
@@ -19,7 +19,7 @@ resources:
   platform: ovx-l40s
 
 experiment:
-  dataset_dir: ./data/datasets/legacy-60hz
+  dataset_dir: ./data/datasets/menagerie-60hz
   env_name: Franka-Reach
   robot_name: Franka
   data_gen_task: Isaac-Reach-Franka-Dataset-Gen-v0
@@ -36,13 +36,13 @@ experiment:
   action_hold_frames: [2, 5, 10, 20, 40]
   states_frame: world
   train_transitions: 10000000
-  valid_transitions: 500000
+  valid_transitions: 1000000
   data_gen_num_envs: 1024
   train_num_envs: 64
   trajectory_length: 240
   write_chunk_transitions: 819200
   update_dataset_statistics: true
-  policy_checkpoint: ./pretrained/control_policy/franka_reach/model_999.pt
+  policy_checkpoint: ./pretrained/control_policy/franka_reach_menagerie/model_999.pt
   dataset_specs:
     - filename: dataset_random_train.hdf5
       seed: 0

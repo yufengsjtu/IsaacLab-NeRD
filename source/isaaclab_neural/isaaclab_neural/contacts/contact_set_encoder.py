@@ -226,12 +226,16 @@ class ContactSetEncoder:
                 lookup[int(body_id)] = local_slot
         return lookup
 
-    def _body_slot(self, body_ids: torch.Tensor) -> torch.Tensor:
+    def body_slot(self, body_ids: torch.Tensor) -> torch.Tensor:
+        """Map Newton body IDs to per-world primary-body slots."""
         safe = body_ids.clamp(min=0, max=self._body_slot_lookup.shape[0] - 1)
         slots = self._body_slot_lookup.index_select(0, safe)
         return torch.where(body_ids >= 0, slots, torch.full_like(slots, -1))
 
-    def _directed_rows(self, raw: dict[str, torch.Tensor], state: newton.State) -> _DirectedContactRows:
+    _body_slot = body_slot
+
+    def directed_rows(self, raw: dict[str, torch.Tensor], state: newton.State) -> _DirectedContactRows:
+        """Build the directed per-body rows used by native-pair and token encoders."""
         count = raw["shape0"].shape[0]
         if count == 0:
             empty = torch.empty(0, device=self.device)
@@ -260,8 +264,18 @@ class ContactSetEncoder:
         normal01 = raw["normal"]
         gap = raw["surface_separation"]
 
-        body_q = raw["_body_q"] if "_body_q" in raw else _as_torch_array(state.body_q, self.device)
-        body_qd = raw["_body_qd"] if "_body_qd" in raw else _as_torch_array(state.body_qd, self.device)
+        if "_body_q" in raw:
+            body_q = raw["_body_q"]
+        else:
+            if state.body_q is None:
+                raise ValueError("Contact encoding requires Newton body poses.")
+            body_q = _as_torch_array(state.body_q, self.device)
+        if "_body_qd" in raw:
+            body_qd = raw["_body_qd"]
+        else:
+            if state.body_qd is None:
+                raise ValueError("Contact encoding requires Newton body velocities.")
+            body_qd = _as_torch_array(state.body_qd, self.device)
 
         com0 = self._body_com_world(body_q, body0)
         com1 = self._body_com_world(body_q, body1)
@@ -299,6 +313,8 @@ class ContactSetEncoder:
             destination[first].copy_(first_value)
             destination[second].copy_(second_value)
         return rows
+
+    _directed_rows = directed_rows
 
     def _directed_row_scratch(self, contact_count: int) -> _DirectedContactRows:
         """Return reusable buffers for two directed rows per contact."""
@@ -344,12 +360,17 @@ class ContactSetEncoder:
         worlds = self.num_envs
         capacity = self.max_contact_tokens
         device = self.device
-        if packed is None:
-            packed = torch.zeros((worlds, capacity, CONTACT_TOKEN_DIM), dtype=torch.float32, device=device)
-        if overflow is None:
-            overflow = torch.zeros(worlds, dtype=torch.long, device=device)
-        if packed_body_ids is None:
-            packed_body_ids = torch.full((worlds, capacity), -1, dtype=torch.long, device=device)
+        packed_out = (
+            torch.zeros((worlds, capacity, CONTACT_TOKEN_DIM), dtype=torch.float32, device=device)
+            if packed is None
+            else packed
+        )
+        overflow_out = torch.zeros(worlds, dtype=torch.long, device=device) if overflow is None else overflow
+        body_ids_out = (
+            torch.full((worlds, capacity), -1, dtype=torch.long, device=device)
+            if packed_body_ids is None
+            else packed_body_ids
+        )
         if rows.valid.shape[0] % 2 != 0:
             raise RuntimeError("Directed contact rows must contain an even number of sides.")
         pairs = rows.valid.shape[0] // 2
@@ -380,10 +401,10 @@ class ContactSetEncoder:
             packing_policy="body_round_robin_pair_atomic",
             max_contact_tokens=capacity,
         )
-        packed.copy_(projected["contact_tokens"])
-        overflow.copy_(projected["contact_token_overflow"])
-        packed_body_ids.copy_(projected["contact_token_body_ids"])
-        return packed, overflow, packed_body_ids
+        packed_out.copy_(projected["contact_tokens"])
+        overflow_out.copy_(projected["contact_token_overflow"])
+        body_ids_out.copy_(projected["contact_token_body_ids"])
+        return packed_out, overflow_out, body_ids_out
 
     def _shape_body_ids(self, shapes: torch.Tensor) -> torch.Tensor:
         body_ids = torch.full(shapes.shape, -1, dtype=torch.long, device=shapes.device)
@@ -490,9 +511,12 @@ def transform_contact_tokens_to_body_frame(
         root_body_q = root_body_q.unsqueeze(0)
     if contact_tokens.ndim == 3:
         contact_tokens = contact_tokens.unsqueeze(1)
-        if root_body_q.ndim == 2:
-            root_body_q = root_body_q.unsqueeze(1)
-        elif root_body_q.ndim == 3 and root_body_q.shape[-1] == 7 and root_body_q.shape[1] == contact_tokens.shape[2]:
+        if (
+            root_body_q.ndim == 2
+            or root_body_q.ndim == 3
+            and root_body_q.shape[-1] == 7
+            and root_body_q.shape[1] == contact_tokens.shape[2]
+        ):
             root_body_q = root_body_q.unsqueeze(1)
 
     batch, time, tokens, _ = contact_tokens.shape

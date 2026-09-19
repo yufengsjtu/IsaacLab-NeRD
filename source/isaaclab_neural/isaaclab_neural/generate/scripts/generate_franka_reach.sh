@@ -14,7 +14,7 @@ export PYTHONPATH="${REPO_ROOT}/source/isaaclab_neural:${REPO_ROOT}/source/isaac
 
 exec uv run --project "${REPO_ROOT}" --no-sync python -m isaaclab_neural.generate.generate_dataset \
     --task Isaac-Reach-Franka-Dataset-Gen-v0 \
-    --dataset-dir "${REPO_ROOT}/data/datasets/legacy-60hz" \
+    --dataset-dir "${REPO_ROOT}/data/datasets/menagerie-60hz" \
     --env-name Franka-Reach \
     --robot-name Franka \
     --sample-mode action \

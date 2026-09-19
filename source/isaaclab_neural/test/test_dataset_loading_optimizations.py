@@ -21,7 +21,8 @@ from isaaclab_neural.contacts.contact_set_schema import (
 from isaaclab_neural.contacts.tensor_utils import ContactTokenMoments, MaskedContactMoments
 from isaaclab_neural.data.datasets import LazyBatchTransitionDataset, LazyTrajectoryDataset, TrajectoryDataset
 from isaaclab_neural.data.hdf5 import write_rollouts_to_hdf5
-from isaaclab_neural.train.trainers import _reset_validation_iterators, _synchronize_running_mean_std
+from isaaclab_neural.train import trainers as trainers_module
+from isaaclab_neural.train.trainers import VanillaTrainer
 from isaaclab_neural.utils.running_mean_std import RunningMeanStd
 from torch.utils.data import DataLoader
 
@@ -194,7 +195,7 @@ def test_lazy_trajectory_preserves_tokens_with_persistent_workers(tmp_path) -> N
         max_contact_tokens=3,
         contact_packing_policy="body_round_robin_pair_atomic",
     )
-    loader = DataLoader(dataset, batch_size=2, num_workers=2, persistent_workers=True)
+    loader = DataLoader(dataset, batch_size=2, num_workers=2, persistent_workers=True, multiprocessing_context="spawn")
     iterator = None
     try:
         for _ in range(2):
@@ -204,8 +205,35 @@ def test_lazy_trajectory_preserves_tokens_with_persistent_workers(tmp_path) -> N
             assert batch["contact_token_overflow"].dtype == torch.long
     finally:
         if iterator is not None:
-            iterator._shutdown_workers()
+            getattr(iterator, "_shutdown_workers")()
         dataset.close()
+
+
+class _DataLoaderTrainerHarness(VanillaTrainer):
+    make_dataloader = VanillaTrainer._make_dataloader
+
+
+@pytest.mark.parametrize("workers", [0, 1])
+def test_trainer_dataloader_avoids_fork_and_preserves_batches(workers) -> None:
+    trainer = _DataLoaderTrainerHarness.__new__(_DataLoaderTrainerHarness)
+    trainer.num_data_workers = workers
+    trainer.persistent_workers = False
+    trainer.pin_memory = False
+    trainer.prefetch_factor = 2
+    trainer.collate_fn = None
+    loader = trainer.make_dataloader(
+        dataset=torch.utils.data.TensorDataset(torch.arange(6)),
+        batch_size=2,
+        shuffle=False,
+        drop_last=False,
+    )
+    if workers:
+        assert loader.multiprocessing_context is not None
+        assert loader.multiprocessing_context.get_start_method() == "spawn"
+    else:
+        assert loader.multiprocessing_context is None
+    for _ in range(2):
+        assert torch.equal(torch.cat([batch[0] for batch in loader]), torch.arange(6))
 
 
 def test_lazy_batch_transition_preserves_contact_token_axes(tmp_path) -> None:
@@ -251,7 +279,7 @@ def test_running_mean_std_synchronize_matches_global_moments(monkeypatch) -> Non
         ],
     )
 
-    _synchronize_running_mean_std(rms)
+    getattr(trainers_module, "_synchronize_running_mean_std")(rms)
 
     torch.testing.assert_close(rms.mean, torch.tensor([4.0]), atol=1.0e-4, rtol=0.0)
     torch.testing.assert_close(rms.var, torch.tensor([5.0]), atol=5.0e-4, rtol=0.0)
@@ -302,9 +330,10 @@ def test_contact_token_moments_synchronize(monkeypatch) -> None:
 
 
 def test_validation_iterators_are_recreated_each_epoch() -> None:
-    loaders = {"valid": DataLoader(torch.arange(8), batch_size=2, shuffle=True)}
+    loaders = {"valid": DataLoader(torch.utils.data.TensorDataset(torch.arange(8)), batch_size=2, shuffle=True)}
 
-    first = _reset_validation_iterators(loaders)
-    second = _reset_validation_iterators(loaders)
+    reset_iterators = getattr(trainers_module, "_reset_validation_iterators")
+    first = reset_iterators(loaders)
+    second = reset_iterators(loaders)
 
     assert first["valid"] is not second["valid"]

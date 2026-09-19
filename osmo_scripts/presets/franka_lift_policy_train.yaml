@@ -1,0 +1,67 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Contact-aware Franka cube-lift dynamics trained on rollouts of the official
+# Newton MJWarp ``Isaac-Lift-Franka`` policy in the core-Lift Dataset-Gen scene
+# (Menagerie Panda, fixed cube, static table, nominal physics, 120 Hz frames).
+
+workflow:
+  base_name: franka-lift-policy-train
+  dataset_subdir: franka-lift-core-120hz-policy-normal-force-v1
+  image: docker.io/rowany28070/isaac-lab-nerd:g1-develop
+
+resources:
+  num_gpu: 8
+  num_cpu: 80
+  memory: 512Gi
+  storage: 512Gi
+  platform: ovx-l40s
+
+experiment:
+  dataset_dir: ./data/datasets/lift-core-policy-normal-force-v1
+  require_finger_object_normal_forces: true
+  env_name: Franka-Lift
+  robot_name: Franka-Lift
+  data_gen_task: Isaac-Lift-Cube-Franka-Dataset-Gen-v0
+  deployment_task: Isaac-Lift-Cube-Franka-Dataset-Gen-v0
+  train_task: Isaac-Lift-Cube-Franka-NeRD-v0
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Franka/transformer_lift.yaml
+  train_preset: newton_mjwarp
+  num_gpus: 8
+  contact_mode: newton_native
+  contact_representation: contact_tokens
+  num_contacts_per_env: 64
+  max_contact_tokens: 64
+  contact_packing_policy: body_round_robin_pair_atomic
+  sample_mode: action
+  initial_states_source: env
+  states_frame: body
+  train_transitions: 10000000
+  valid_transitions: 1000000
+  data_gen_num_envs: 1024
+  train_num_envs: 1024
+  trajectory_length: 600
+  write_chunk_transitions: 614400
+  update_dataset_statistics: true
+  policy_checkpoint: ./pretrained/official/Isaac-Lift-Franka_newtonmjwarp_none_rsl_rl.pt
+  dataset_specs:
+    - filename: dataset_train.hdf5
+      seed: 0
+      split: train
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+    - filename: dataset_valid.hdf5
+      seed: 1
+      split: valid
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+    - filename: dataset_zero_action_valid.hdf5
+      seed: 2
+      split: valid
+      task_kind: default
+      zero_actions: true
+      use_policy: false

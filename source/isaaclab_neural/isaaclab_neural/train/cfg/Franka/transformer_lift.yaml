@@ -5,10 +5,10 @@
 
 env:
   env_name: Franka-Lift
-  num_envs: 512
+  num_envs: 1024
   neural_solver_cfg:
     name: TransformerNeuralSolver
-    states_frame: world
+    states_frame: body
     anchor_frame_step: every
     states_embedding_type: identical
     prediction_type: relative
@@ -16,8 +16,10 @@ env:
     num_states_history: 10
     min_contact_event_threshold: 0.12
     contact_mode: newton_native
+    contact_representation: contact_tokens
     num_contacts_per_env: 64
-    contact_packing_policy: penetration_priority
+    max_contact_tokens: 64
+    contact_packing_policy: body_round_robin_pair_atomic
 
 algorithm:
   name: SequenceModelTrainer
@@ -32,42 +34,50 @@ algorithm:
   loss:
     type: MSE
     beta: 0.0
+    finger_object_normal_force:
+      weight: 1.0
   optimizer:
     type: Adam
     weight_decay: 0.0
-    lr_start: 2e-3
-    lr_end: 2e-4
+    lr_start: 2e-4
+    lr_end: 2e-5
     lr_schedule: linear
     betas: [0.9, 0.999]
 
   dataset:
-    train_dataset_path: ./data/datasets/Franka-Lift/dataset_train.hdf5
+    train_dataset_path: ./data/datasets/lift-core-policy-normal-force-v1/Franka-Lift/dataset_train.hdf5
     valid_datasets:
-      exp_trajectory: ./data/datasets/Franka-Lift/dataset_valid.hdf5
-      zero_action_trajectory: ./data/datasets/Franka-Lift/dataset_zero_action_valid.hdf5
+      exp_trajectory: ./data/datasets/lift-core-policy-normal-force-v1/Franka-Lift/dataset_valid.hdf5
+      zero_action_trajectory: ./data/datasets/lift-core-policy-normal-force-v1/Franka-Lift/dataset_zero_action_valid.hdf5
     max_capacity: 10000000
     load_mode: eager
-    num_data_workers: 8
+    num_data_workers: 0
 
   eval:
     mode: dataset
     action_mode: joint_f
     rollout_horizon: 10
     num_rollouts: 1024
-    dataset_path: ./data/datasets/Franka-Lift/dataset_valid.hdf5
+    preserve_source_origins: True
+    contact_context_validation: strict
+    dataset_path: ./data/datasets/lift-core-policy-normal-force-v1/Franka-Lift/dataset_valid.hdf5
 
 inputs:
   low_dim: [
     states_embedding,
-    contact_normals,
-    contact_points_0,
-    contact_points_1,
-    contact_depths,
     joint_f,
     gravity_dir
   ]
+  contact_set:
+    dim: 17
+    encoder_type: shared_per_body
+    body_latent_dim: 16
+    hidden_dim: 64
+    max_other_bodies: 32
 
 network:
+  finger_object_normal_force_head:
+    enabled: True
   normalize_input: True
   normalize_output: True
 
@@ -81,7 +91,7 @@ network:
     block_size: 32
     n_layer: 6
     n_head: 12
-    n_embd: 192
+    n_embd: 384
     dropout: 0.0
     bias: False
 

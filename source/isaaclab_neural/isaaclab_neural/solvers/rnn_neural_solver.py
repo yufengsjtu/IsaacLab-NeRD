@@ -10,9 +10,18 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
+from typing import TYPE_CHECKING, Protocol, cast
+
 import torch
 
 from .neural_solver import NeuralSolver
+
+if TYPE_CHECKING:
+
+    class _RecurrentModel(Protocol):
+        def init_rnn(self, batch_size: int) -> object: ...
+
+        def reset_rnn_hidden_states(self, batch_indices: torch.Tensor | None = None) -> None: ...
 
 
 class RNNNeuralSolver(NeuralSolver):
@@ -25,14 +34,21 @@ class RNNNeuralSolver(NeuralSolver):
 
     def reset(self, env_ids=None):
         """Reset recurrent state globally or for selected environments."""
+        super().reset(env_ids)
         self._step_count = 0
         if env_ids is None:
-            self.neural_model.init_rnn(self.num_envs)
+            self._require_recurrent_model().init_rnn(self.num_envs)
             return
 
         env_ids = self._normalize_env_ids(env_ids)
         if env_ids.numel() > 0:
-            self.neural_model.reset_rnn_hidden_states(batch_indices=env_ids)
+            self._require_recurrent_model().reset_rnn_hidden_states(batch_indices=env_ids)
+
+    def _require_recurrent_model(self) -> "_RecurrentModel":
+        neural_model = self._require_neural_model()
+        if not all(callable(getattr(neural_model, name, None)) for name in ("init_rnn", "reset_rnn_hidden_states")):
+            raise RuntimeError("RNNNeuralSolver requires callable init_rnn() and reset_rnn_hidden_states() methods.")
+        return cast("_RecurrentModel", neural_model)
 
     def _normalize_env_ids(self, env_ids) -> torch.Tensor:
         """Return env ids as a 1-D tensor on the solver torch device."""
@@ -44,6 +60,6 @@ class RNNNeuralSolver(NeuralSolver):
 
     def _before_model_forward(self):
         if self._step_count % self.reset_seq_length == 0:
-            self.neural_model.reset_rnn_hidden_states()
+            self._require_recurrent_model().reset_rnn_hidden_states()
             self._step_count = 0
         self._step_count += 1

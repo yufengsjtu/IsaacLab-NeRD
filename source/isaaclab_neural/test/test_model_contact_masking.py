@@ -5,12 +5,13 @@
 
 """Tests for contact padding at the neural encoder boundary."""
 
-from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import create_autospec
 
 import pytest
 import torch
 import torch.nn as nn
+from isaaclab_neural.contacts.newton_contact_adapter import NewtonContactAdapter
 from isaaclab_neural.contacts.tensor_utils import (
     MaskedContactMoments,
     mask_inactive_contact_fields,
@@ -18,6 +19,11 @@ from isaaclab_neural.contacts.tensor_utils import (
 from isaaclab_neural.models.models import ModelMixedInput
 from isaaclab_neural.solvers.neural_solver import NeuralSolver
 from isaaclab_neural.utils.running_mean_std import RunningMeanStd
+from newton import State
+
+
+class _NeuralTestHarness(NeuralSolver):
+    predict = NeuralSolver._forward_neural_model
 
 
 class _PassThrough(nn.Module):
@@ -29,6 +35,18 @@ class _PassThrough(nn.Module):
 def test_neural_solver_requires_newton_model():
     with pytest.raises(ValueError, match="requires a Newton model"):
         NeuralSolver(model=None)
+
+
+@pytest.mark.parametrize("operation", ["train", "eval", "forward"])
+def test_neural_solver_requires_attached_model_for_model_operations(operation):
+    solver = _NeuralTestHarness.__new__(_NeuralTestHarness)
+    solver.neural_model = None
+    solver.predicted_body_net_contact_forces_b = None
+    with pytest.raises(RuntimeError, match="neural model"):
+        if operation == "forward":
+            solver.predict({})
+        else:
+            getattr(solver, operation)()
 
 
 def test_legacy_contact_mode_is_rejected():
@@ -185,7 +203,7 @@ def test_native_contact_masks_cannot_be_reconstructed_from_separation():
 
 def test_native_contact_adapter_requires_newton_contacts():
     solver = NeuralSolver.__new__(NeuralSolver)
-    solver.contact_adapter = object()
+    solver.contact_adapter = create_autospec(NewtonContactAdapter, instance=True)
 
     with pytest.raises(RuntimeError, match="contacts are not initialized"):
-        solver._update_states(SimpleNamespace(), None, None)
+        solver.sync_from_newton(State(), None, None)

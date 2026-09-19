@@ -66,17 +66,20 @@ FRANKA_PANDA_CFG = ArticulationCfg(
 """Fixed-base Panda with the Isaac Lab Nucleus Legacy USD."""
 
 FRANKA_LIFT_TABLE_CFG = AssetBaseCfg(
-    prim_path="{ENV_REGEX_NS}/Table",
-    init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0.0, -0.028], rot=[0.0, 0.0, 0.0, 1.0]),
+    prim_path="{ENV_REGEX_NS}/table",
+    init_state=AssetBaseCfg.InitialStateCfg(pos=[-0.55, 0.0, 0.005], rot=[0.0, 0.0, 0.0, 1.0]),
     spawn=sim_utils.CuboidCfg(
-        size=(0.9, 1.3, 0.05),
+        size=(0.8, 1.5, 0.5),
         collision_props=CollisionPropertiesCfg(),
     ),
 )
-"""Static cuboid table used by Franka lift NeRD. It is not an articulation.
+"""Static cuboid table used by Franka lift NeRD. It is not a Newton body.
 
-The top surface is at z = -0.003 [m], matching the standard SeattleLabTable
-collider so a resting cube stays below the Lift reward's height threshold.
+The 0.8 m x 1.5 m top surface stays at z = 0.255 m, matching the core
+``Isaac-Lift-Franka`` table and the official policy. The collider extends downward
+to z = -0.245 m so cubes dropped by full-gravity reset cannot tunnel through the
+thin 0.04 m core table. A kinematic rigid body would otherwise enter the NeRD
+generalized state as a 13-DoF free joint.
 """
 
 
@@ -103,5 +106,52 @@ def apply_franka_reach_contact_free_scene(env_cfg) -> None:
 
 
 def apply_franka_lift_nerd_scene(env_cfg) -> None:
-    """Keep the cube dynamic and replace the USD table with a static collider."""
+    """Fix the core Lift object to the cube variant and replace the kinematic table with a static collider.
+
+    The core task's ``ObjectCfg`` preset defaults to per-environment random shapes;
+    NeRD state and contact-token layouts require one rigid object with fixed geometry.
+    """
+    from isaaclab_tasks.core.lift.lift_env_cfg import ObjectCfg
+
     env_cfg.scene.table = FRANKA_LIFT_TABLE_CFG.copy()
+    env_cfg.scene.object.spawn = ObjectCfg().cube
+    env_cfg.commands.object_pose.debug_vis = False
+    clearance = env_cfg.events.conditional_reset.params["valid_criteria"]["robot_table_clearance"]
+    clearance.body_names = ["panda_link[2-7]", "panda_hand", ".*finger"]
+
+
+FRANKA_LIFT_RANDOMIZATION_EVENTS = (
+    "robot_physics_material",
+    "object_physics_material",
+    "object_physics_inertia",
+    "joint_stiffness_and_damping",
+    "joint_friction",
+    "object_scale_mass",
+    "variable_gravity",
+    "gripper_closing_speed",
+)
+"""Core Lift domain-randomization event terms that change the ground-truth dynamics."""
+
+
+def apply_franka_lift_nominal_physics(env_cfg) -> None:
+    """Remove domain randomization and the ADR curriculum so every world runs the nominal dynamics.
+
+    The core Lift task scales drive gains, joint friction, contact materials, object
+    mass/inertia and gravity per world and schedules gravity from zero with ADR. A
+    NeRD model represents one dynamics, so recording and inference use the asset
+    values and full gravity. Reset-bank sampling and observation noise stay as the
+    policy expects.
+    """
+    for name in FRANKA_LIFT_RANDOMIZATION_EVENTS:
+        if hasattr(env_cfg.events, name):
+            setattr(env_cfg.events, name, None)
+    env_cfg.curriculum = None
+    # Final ADR value: with full gravity the object may rest on the table (z = 0.28 m).
+    env_cfg.terminations.object_out_of_bound.params["in_bound_range"]["z"] = (0.0, 2.0)
+
+
+def apply_franka_lift_robot(env_cfg) -> None:
+    """Install the core Lift Franka (Menagerie asset, Lift-calibrated drives) at ``{ENV_REGEX_NS}/Robot``."""
+    from isaaclab_tasks.core.lift.config.franka.franka_env_cfg import FRANKA_PANDA_LIFT_CFG
+
+    env_cfg.scene.robot = FRANKA_PANDA_LIFT_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")

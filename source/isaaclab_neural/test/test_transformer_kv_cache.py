@@ -15,6 +15,16 @@ from isaaclab_neural.models.models import ModelMixedInput
 from isaaclab_neural.solvers.transformer_neural_solver import TransformerNeuralSolver
 
 
+class _TransformerTestHarness(TransformerNeuralSolver):
+    """Expose solver extension hooks without changing the production API."""
+
+    predict = TransformerNeuralSolver._model_forward
+    rebuild_history_rows = TransformerNeuralSolver._mark_history_rows_for_rebuild
+
+    def process_neural_model_inputs(self, model_inputs):
+        return model_inputs
+
+
 def _gpt(position_encoding: str = "rope") -> GPT:
     torch.manual_seed(7)
     return GPT(
@@ -32,7 +42,7 @@ def _gpt(position_encoding: str = "rope") -> GPT:
 
 
 def test_solver_history_stacks_directly_into_batch_time_layout():
-    solver = TransformerNeuralSolver.__new__(TransformerNeuralSolver)
+    solver = _TransformerTestHarness.__new__(_TransformerTestHarness)
     solver.use_kv_cache = False
     solver.states_history = deque(
         (
@@ -40,7 +50,6 @@ def test_solver_history_stacks_directly_into_batch_time_layout():
             {"states": torch.tensor([[5.0], [6.0]]), "contact_token_overflow": torch.tensor([7, 8])},
         )
     )
-    solver.process_neural_model_inputs = lambda inputs: inputs
 
     inputs = solver.get_neural_model_inputs()
 
@@ -49,7 +58,7 @@ def test_solver_history_stacks_directly_into_batch_time_layout():
 
 
 def test_solver_kv_input_preparation_uses_only_latest_frame():
-    solver = TransformerNeuralSolver.__new__(TransformerNeuralSolver)
+    solver = _TransformerTestHarness.__new__(_TransformerTestHarness)
     solver.use_kv_cache = True
     solver.kv_cache_rebuild_env_ids = None
     solver.kv_cache_rebuild_inputs = None
@@ -57,7 +66,6 @@ def test_solver_kv_input_preparation_uses_only_latest_frame():
         ({"observation": torch.full((2, 6), float(step))} for step in range(5)),
         maxlen=5,
     )
-    solver.process_neural_model_inputs = lambda inputs: inputs
 
     inputs = solver.get_neural_model_inputs()
 
@@ -176,6 +184,7 @@ def test_rope_cached_forward_matches_full_prefix():
             predictions.append(prediction)
 
     torch.testing.assert_close(torch.cat(predictions, dim=1), expected, atol=1e-6, rtol=1e-5)
+    assert cache is not None
     assert cache.lengths.tolist() == [6, 6, 6]
     assert cache.next_positions.tolist() == [6, 6, 6]
 
@@ -222,13 +231,14 @@ def test_rope_cached_forward_matches_prefix_and_bounds_evicted_cache():
                 # to recomputing a fresh sliding window.
                 assert torch.isfinite(actual).all()
 
+    assert cache is not None
     assert cache.lengths.tolist() == [5, 5]
     assert cache.next_positions.tolist() == [12, 12]
 
 
 def test_solver_kv_cache_rebuilds_only_reset_rows():
     model = _mixed_input_model()
-    solver = TransformerNeuralSolver.__new__(TransformerNeuralSolver)
+    solver = _TransformerTestHarness.__new__(_TransformerTestHarness)
     solver.num_envs = 2
     solver.num_states_history = 5
     solver.use_feature_cache = False
@@ -239,15 +249,14 @@ def test_solver_kv_cache_rebuilds_only_reset_rows():
     solver.kv_cache_rebuild_env_ids = None
     solver.kv_cache_rebuild_inputs = None
     solver.neural_model = model
-    solver.torch_device = torch.device("cpu")
+    solver.torch_device = "cpu"
     solver.predicted_body_net_contact_forces_b = None
     solver.root_body_q = torch.zeros(2, 7)
     solver.states = torch.zeros(2, 4)
     solver.states_embedding = torch.zeros(2, 4)
     solver.joint_f = torch.zeros(2, 2)
     solver.gravity_dir = torch.zeros(2, 3)
-    solver.contacts = {}
-    solver.process_neural_model_inputs = lambda inputs: inputs
+    solver.contact_inputs = {}
 
     initial_values = torch.randn(2, 5, 6)
     solver.states_history = deque(
@@ -256,7 +265,7 @@ def test_solver_kv_cache_rebuilds_only_reset_rows():
     )
     with torch.inference_mode():
         for step in range(5):
-            solver._model_forward({"observation": initial_values[:, step : step + 1]})
+            solver.predict({"observation": initial_values[:, step : step + 1]})
 
         solver.reset([0])
         next_values = torch.randn(2, 1, 6)
@@ -265,9 +274,12 @@ def test_solver_kv_cache_rebuilds_only_reset_rows():
             "observation": torch.stack(tuple(entry["observation"] for entry in solver.states_history), dim=1)
         }
         model_inputs = solver.get_neural_model_inputs()
-        assert solver.kv_cache_rebuild_inputs["observation"].shape == (1, 5, 6)
+        assert solver.kv_cache_rebuild_inputs is not None
+        rebuild_observation = solver.kv_cache_rebuild_inputs["observation"]
+        assert isinstance(rebuild_observation, torch.Tensor)
+        assert rebuild_observation.shape == (1, 5, 6)
         expected = model(full_window, single_step=True)
-        actual = solver._model_forward(model_inputs)
+        actual = solver.predict(model_inputs)
 
     # The reset row is rebuilt from its complete solver window and remains
     # exactly equivalent. The uninterrupted row keeps incremental cache
@@ -275,8 +287,50 @@ def test_solver_kv_cache_rebuilds_only_reset_rows():
     torch.testing.assert_close(actual[0], expected[0], atol=1e-6, rtol=1e-5)
     assert model_inputs["observation"].shape == (2, 1, 6)
     assert solver.kv_cache_rebuild_inputs is None
+    assert solver.kv_cache is not None
     assert solver.kv_cache.lengths.tolist() == [5, 5]
     assert solver.kv_cache.next_positions.tolist() == [5, 6]
+
+
+@pytest.mark.parametrize("method_name", ["forward_feature_cached", "forward_cached", "reset_transformer_cache"])
+def test_solver_rejects_noncallable_cache_interfaces(monkeypatch, method_name):
+    model = _mixed_input_model()
+    solver = _TransformerTestHarness.__new__(_TransformerTestHarness)
+    solver.neural_model = model
+    solver.num_states_history = 5
+    solver.use_kv_cache = method_name != "forward_feature_cached"
+    solver.use_feature_cache = not solver.use_kv_cache
+    solver.feature_cache = None
+    solver.feature_cache_rebuild_env_ids = None
+    solver.kv_cache = None
+    solver.kv_cache_rebuild_env_ids = None
+    solver.kv_cache_rebuild_inputs = None
+    if method_name == "reset_transformer_cache":
+        solver.kv_cache = model.init_transformer_cache(2, 5)
+    monkeypatch.setattr(model, method_name, torch.tensor(1.0))
+    with pytest.raises(RuntimeError, match=method_name):
+        with torch.inference_mode():
+            if method_name == "reset_transformer_cache":
+                solver.rebuild_history_rows(torch.tensor([0]))
+            else:
+                solver.predict({"observation": torch.randn(2, 1, 6)})
+
+
+def test_solver_feature_cache_accepts_a_feature_only_custom_model():
+    class FeatureOnlyModel(torch.nn.Module):
+        def forward_feature_cached(self, inputs, cache, rebuild_batch_indices):
+            return inputs["observation"][:, -1:], inputs["observation"].clone()
+
+    solver = _TransformerTestHarness.__new__(_TransformerTestHarness)
+    solver.neural_model = FeatureOnlyModel()
+    solver.use_kv_cache = False
+    solver.use_feature_cache = True
+    solver.feature_cache = None
+    solver.feature_cache_rebuild_env_ids = None
+    observations = torch.randn(2, 3, 6)
+    actual = solver.predict({"observation": observations})
+    torch.testing.assert_close(actual, observations[:, -1:])
+    torch.testing.assert_close(solver.feature_cache, observations)
 
 
 def test_mixed_input_exposes_separate_cached_interface():

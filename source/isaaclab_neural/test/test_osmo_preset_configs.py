@@ -10,6 +10,7 @@ from __future__ import annotations
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
 import yaml
 
 PACKAGE_ROOT = Path(__file__).parents[1]
@@ -22,15 +23,16 @@ NON_ANYMAL_PRESETS = {
     "franka_reach_newton_native.yaml",
     "franka_reach_policy_train.yaml",
     "franka_reach_mixed.yaml",
+    "franka_lift_policy_train.yaml",
+    "franka_lift_mixed.yaml",
 }
 FRANKA_OSMO_IMAGE = "docker.io/rowany28070/isaac-lab-nerd:g1-develop"
 FRANKA_IMAGE_PRESETS = (
     "franka_reach_newton_native.yaml",
-    "franka_reach_newton_native_smoke.yaml",
     "franka_reach_policy_train.yaml",
-    "franka_reach_policy_train_smoke.yaml",
     "franka_reach_mixed.yaml",
-    "franka_reach_mixed_smoke.yaml",
+    "franka_lift_policy_train.yaml",
+    "franka_lift_mixed.yaml",
 )
 
 PUBLIC_PRESETS = {
@@ -38,6 +40,8 @@ PUBLIC_PRESETS = {
     "franka_reach_newton_native.yaml": "Franka-Reach",
     "franka_reach_policy_train.yaml": "Franka-Reach",
     "franka_reach_mixed.yaml": "Franka-Reach",
+    "franka_lift_policy_train.yaml": "Franka-Lift",
+    "franka_lift_mixed.yaml": "Franka-Lift",
     "anymal_newton_native.yaml": "Anymal-C-Flat-Native-v2",
     "anymal_rough_newton_native.yaml": "Anymal-C-Rough-Native-v2",
     "anymal_newton_native_contact_tokens.yaml": "Anymal-C-Flat-Native-v2",
@@ -53,6 +57,40 @@ PUBLIC_PRESETS = {
 def _load_yaml(path: Path) -> dict:
     with path.open(encoding="utf-8") as stream:
         return yaml.safe_load(stream)
+
+
+def test_franka_policy_mixed_comparisons_share_training_contracts() -> None:
+    for robot in ("reach", "lift"):
+        policy = _load_yaml(PRESET_DIR / f"franka_{robot}_policy_train.yaml")
+        mixed = _load_yaml(PRESET_DIR / f"franka_{robot}_mixed.yaml")
+        p, m = policy["experiment"], mixed["experiment"]
+        pc, mc = (_load_yaml(REPOSITORY_ROOT / e["train_cfg"]) for e in (p, m))
+        assert pc["network"] == mc["network"]
+        assert pc["env"] == mc["env"]
+        assert pc["inputs"] == mc["inputs"]
+        for key in ("optimizer", "loss", "batch_size", "num_epochs", "num_iters_per_epoch", "sample_sequence_length"):
+            assert pc["algorithm"][key] == mc["algorithm"][key]
+        assert p["train_transitions"] == m["train_transitions"] == 10_000_000
+        assert p["valid_transitions"] == m["valid_transitions"]
+        assert p["policy_checkpoint"] == m["policy_checkpoint"]
+        assert policy["workflow"]["dataset_subdir"] != mixed["workflow"]["dataset_subdir"]
+        common = (
+            ("dataset_policy_valid.hdf5", "dataset_passive_valid.hdf5")
+            if robot == "reach"
+            else ("dataset_valid.hdf5", "dataset_zero_action_valid.hdf5")
+        )
+        for filename in common:
+            assert next(s for s in p["dataset_specs"] if s["filename"] == filename) == next(
+                s for s in m["dataset_specs"] if s["filename"] == filename
+            )
+        train = [s for s in m["dataset_specs"] if s["split"] == "train"]
+        valid = [s for s in m["dataset_specs"] if s["split"] == "valid"]
+        assert {s["seed"] for s in train}.isdisjoint(s["seed"] for s in valid)
+        assert sum(s["num_transitions"] for s in train) == 10_000_000
+        if robot == "lift":
+            weights = [s["weight"] for s in mc["algorithm"]["dataset"]["train_datasets"].values()]
+            assert weights == [0.6, 0.2, 0.2]
+            assert p["require_finger_object_normal_forces"] and m["require_finger_object_normal_forces"]
 
 
 def test_public_preset_surface_is_intentional() -> None:
@@ -98,7 +136,7 @@ def test_public_presets_have_valid_unique_training_mappings() -> None:
             optimizer = algorithm["optimizer"]
             assert algorithm["num_epochs"] == 1000
             assert algorithm["num_iters_per_epoch"] == 1250
-            assert algorithm["batch_size"] == 1024
+            assert algorithm["batch_size"] == (512 if env_name == "Franka-Lift" else 1024)
             assert dataset_config["max_capacity"] == 10_000_000
             if env_name == "Anymal-C-Flat-Native-v2":
                 assert Path(algorithm["eval"]["dataset_path"]).name == "dataset_lstm_actuator_policy_valid.hdf5"
@@ -152,17 +190,22 @@ def test_public_presets_have_valid_unique_training_mappings() -> None:
                 assert float(train_config["algorithm"]["optimizer"]["lr_start"]) == 2e-4
                 assert float(train_config["algorithm"]["optimizer"]["lr_end"]) == 2e-5
                 assert experiment["trajectory_length"] == 200
-                assert workflow["dataset_subdir"] == "franka-reach-legacy-60hz-wide-reset-200"
-                smoke = _load_yaml(PRESET_DIR / "franka_reach_newton_native_smoke.yaml")
-                assert smoke["experiment"]["trajectory_length"] == experiment["trajectory_length"]
-                assert smoke["workflow"]["dataset_subdir"] == "franka-reach-legacy-60hz-wide-reset-200-smoke"
+                assert workflow["dataset_subdir"] == "franka-reach-menagerie-60hz-wide-reset-200"
+        elif env_name == "Franka-Lift":
+            assert experiment["sample_mode"] == "action"
+            assert experiment["trajectory_length"] == 600
+            assert experiment["train_num_envs"] == experiment["data_gen_num_envs"] == 1024
+            assert train_config["algorithm"]["eval"]["preserve_source_origins"]
+            assert not train_config["algorithm"]["eval"].get("rebase_env_origins", False)
+            assert experiment["contact_representation"] == "contact_tokens"
+            assert Path(experiment["policy_checkpoint"]).name.endswith("_rsl_rl.pt")
 
 
-def test_franka_legacy_dataset_paths_match_generation_and_training() -> None:
+def test_franka_menagerie_dataset_paths_match_generation_and_training() -> None:
     for path in PRESET_DIR.glob("franka_reach*.yaml"):
         preset = _load_yaml(path)
         experiment = preset["experiment"]
-        assert "legacy-60hz" in preset["workflow"]["dataset_subdir"]
+        assert "menagerie-60hz" in preset["workflow"]["dataset_subdir"]
         root = Path(experiment["dataset_dir"]) / experiment["env_name"]
         train = _load_yaml(REPOSITORY_ROOT / experiment["train_cfg"])
         dataset = train["algorithm"]["dataset"]
@@ -186,7 +229,7 @@ def test_osmo_dataset_directory_prefers_cli_then_preset(tmp_path, monkeypatch) -
     monkeypatch.setattr(run_experiment, "start_tensorboard", lambda *args: None)
     monkeypatch.setattr(run_experiment, "run_training", lambda *args: None)
     args = Namespace(
-        preset="franka_reach_newton_native_smoke",
+        preset="franka_reach_newton_native",
         preset_file=None,
         output_root=str(tmp_path),
         dataset_dir=None,
@@ -201,7 +244,7 @@ def test_osmo_dataset_directory_prefers_cli_then_preset(tmp_path, monkeypatch) -
         tensorboard_port=6006,
     )
     run_experiment.run(args)
-    assert generated[-1] == Path("data/datasets/legacy-60hz")
+    assert generated[-1] == Path("data/datasets/menagerie-60hz")
     args.dataset_dir = str(tmp_path / "explicit")
     run_experiment.run(args)
     assert generated[-1] == tmp_path / "explicit"
@@ -259,17 +302,18 @@ def test_compatible_anymal_presets_share_native_dataset_buckets() -> None:
     }
 
 
-def test_franka_reach_policy_train_smoke_matches_full_policy_recipe() -> None:
-    full = _load_yaml(PRESET_DIR / "franka_reach_policy_train.yaml")
-    smoke = _load_yaml(PRESET_DIR / "franka_reach_policy_train_smoke.yaml")
-    assert smoke["experiment"]["train_cfg"] == full["experiment"]["train_cfg"]
-    assert smoke["experiment"]["trajectory_length"] == full["experiment"]["trajectory_length"]
-    assert smoke["experiment"]["policy_checkpoint"] == full["experiment"]["policy_checkpoint"]
-    assert [item["use_policy"] for item in smoke["experiment"]["dataset_specs"]] == [
-        item["use_policy"] for item in full["experiment"]["dataset_specs"]
-    ]
-    assert smoke["experiment"]["train_transitions"] == 3200
-    assert smoke["workflow"]["image"] == full["workflow"]["image"] == FRANKA_OSMO_IMAGE
+def test_removed_franka_smoke_presets_are_rejected(monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from run_experiment import load_preset
+
+    for name in (
+        "franka_reach_newton_native_smoke",
+        "franka_reach_policy_train_smoke",
+        "franka_reach_mixed_smoke",
+        "franka_reach_replay_smoke",
+    ):
+        with pytest.raises(FileNotFoundError, match=f"Preset {name!r} not found"):
+            load_preset(name)
 
 
 def test_franka_osmo_dataset_args_omit_removed_headless_flag(tmp_path, monkeypatch) -> None:

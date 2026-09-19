@@ -12,11 +12,34 @@
 
 from collections import deque
 from collections.abc import Mapping
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 from newton import Contacts, State
 
 from .neural_solver import NeuralSolver
+
+if TYPE_CHECKING:
+    from isaaclab_neural.models.model_transformer import GPT
+
+    class _FeatureCacheModel(Protocol):
+        def forward_feature_cached(
+            self,
+            input_dict: dict[str, torch.Tensor | None],
+            feature_cache: torch.Tensor | None,
+            rebuild_batch_indices: torch.Tensor | None,
+        ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+    class _KVCacheModel(Protocol):
+        def forward_cached(
+            self,
+            input_dict: dict[str, torch.Tensor | None],
+            cache: GPT.KVCache | None,
+            *,
+            max_cache_length: int,
+        ) -> tuple[torch.Tensor, GPT.KVCache]: ...
+
+        def reset_transformer_cache(self, cache: GPT.KVCache, batch_indices: torch.Tensor) -> None: ...
 
 
 class TransformerNeuralSolver(NeuralSolver):
@@ -34,11 +57,11 @@ class TransformerNeuralSolver(NeuralSolver):
         self.num_states_history = num_states_history
         self.use_feature_cache = use_feature_cache
         self.use_kv_cache = use_kv_cache
-        self.feature_cache = None
-        self.feature_cache_rebuild_env_ids = None
-        self.kv_cache = None
-        self.kv_cache_rebuild_env_ids = None
-        self.kv_cache_rebuild_inputs = None
+        self.feature_cache: torch.Tensor | None = None
+        self.feature_cache_rebuild_env_ids: torch.Tensor | None = None
+        self.kv_cache: GPT.KVCache | None = None
+        self.kv_cache_rebuild_env_ids: torch.Tensor | None = None
+        self.kv_cache_rebuild_inputs: dict[str, torch.Tensor | None] | None = None
         super().__init__(**kwargs)
         self.reset_states_history()
 
@@ -56,7 +79,7 @@ class TransformerNeuralSolver(NeuralSolver):
         Args:
             history: Raw model inputs with shape ``[num_envs, history, features]``.
         """
-        required = {"root_body_q", "states", "joint_f", "gravity_dir", *self.contacts.keys()}
+        required = {"root_body_q", "states", "joint_f", "gravity_dir", *self.contact_inputs.keys()}
         if getattr(self, "contact_token_frame", "root") == "owner":
             required.add("primary_body_q")
         missing = sorted(required - set(history))
@@ -77,7 +100,7 @@ class TransformerNeuralSolver(NeuralSolver):
             "states": self.states,
             "joint_f": self.joint_f,
             "gravity_dir": self.gravity_dir,
-            **self.contacts,
+            **self.contact_inputs,
         }
         if getattr(self, "contact_token_frame", "root") == "owner":
             if self.primary_body_q is None:
@@ -161,7 +184,7 @@ class TransformerNeuralSolver(NeuralSolver):
         else:
             self.feature_cache_rebuild_env_ids = torch.unique(torch.cat((self.feature_cache_rebuild_env_ids, env_ids)))
         if self.kv_cache is not None:
-            self.neural_model.reset_transformer_cache(self.kv_cache, env_ids)
+            self._require_kv_cache_model().reset_transformer_cache(self.kv_cache, env_ids)
         if self.kv_cache_rebuild_env_ids is None:
             self.kv_cache_rebuild_env_ids = env_ids
         else:
@@ -176,7 +199,7 @@ class TransformerNeuralSolver(NeuralSolver):
         return normalized.reshape(-1)
 
     def sync_from_newton(
-        self, newton_states: State, contacts: Contacts, joint_f, *, update_history: bool = True
+        self, newton_states: State, contacts: Contacts | None, joint_f, *, update_history: bool = True
     ) -> None:
         """Synchronize cached inputs, optionally without appending to history."""
         if update_history:
@@ -184,7 +207,7 @@ class TransformerNeuralSolver(NeuralSolver):
         else:
             NeuralSolver._update_states(self, newton_states, contacts, joint_f)
 
-    def _update_states(self, newton_states: State, contacts: Contacts, joint_f):
+    def _update_states(self, newton_states: State, contacts: Contacts | None, joint_f):
         super()._update_states(newton_states, contacts, joint_f)
         self.states_history.append(self._history_snapshot())
 
@@ -196,7 +219,7 @@ class TransformerNeuralSolver(NeuralSolver):
             "states_embedding": self.states_embedding.clone(),
             "joint_f": self.joint_f.clone(),
             "gravity_dir": self.gravity_dir.clone(),
-            **{key: value.clone() for key, value in self.contacts.items()},
+            **{key: value.clone() for key, value in self.contact_inputs.items()},
         }
         if getattr(self, "contact_token_frame", "root") == "owner":
             if self.primary_body_q is None:
@@ -212,7 +235,7 @@ class TransformerNeuralSolver(NeuralSolver):
                 "states_embedding": torch.zeros_like(self.states_embedding),
                 "joint_f": torch.zeros_like(self.joint_f),
                 "gravity_dir": torch.zeros_like(self.gravity_dir),
-                **{key: torch.zeros_like(value) for key, value in self.contacts.items()},
+                **{key: torch.zeros_like(value) for key, value in self.contact_inputs.items()},
             }
             return {key: value.unsqueeze(1) for key, value in model_inputs.items()}
 
@@ -247,14 +270,26 @@ class TransformerNeuralSolver(NeuralSolver):
 
         return self.process_neural_model_inputs(model_inputs)
 
+    def _require_feature_cache_model(self) -> "_FeatureCacheModel":
+        neural_model = self._require_neural_model()
+        if not callable(getattr(neural_model, "forward_feature_cached", None)):
+            raise RuntimeError("use_feature_cache requires a model that implements forward_feature_cached().")
+        return cast("_FeatureCacheModel", neural_model)
+
+    def _require_kv_cache_model(self) -> "_KVCacheModel":
+        neural_model = self._require_neural_model()
+        if not all(
+            callable(getattr(neural_model, name, None)) for name in ("forward_cached", "reset_transformer_cache")
+        ):
+            raise RuntimeError("use_kv_cache requires callable forward_cached() and reset_transformer_cache() methods.")
+        return cast("_KVCacheModel", neural_model)
+
     def _model_forward(self, model_inputs):
         if self.use_kv_cache:
             return self._model_forward_kv_cached(model_inputs)
         if not self.use_feature_cache:
             return super()._model_forward(model_inputs)
-        if not hasattr(self.neural_model, "forward_feature_cached"):
-            raise RuntimeError("use_feature_cache requires a model that implements forward_feature_cached().")
-        prediction, self.feature_cache = self.neural_model.forward_feature_cached(
+        prediction, self.feature_cache = self._require_feature_cache_model().forward_feature_cached(
             model_inputs,
             self.feature_cache,
             self.feature_cache_rebuild_env_ids,
@@ -264,10 +299,8 @@ class TransformerNeuralSolver(NeuralSolver):
 
     def _model_forward_kv_cached(self, model_inputs):
         """Run one incremental step and selectively rebuild reset cache rows."""
-        if not hasattr(self.neural_model, "forward_cached"):
-            raise RuntimeError("use_kv_cache requires a model that implements forward_cached().")
-
-        prediction, self.kv_cache = self.neural_model.forward_cached(
+        neural_model = self._require_kv_cache_model()
+        prediction, self.kv_cache = neural_model.forward_cached(
             model_inputs,
             self.kv_cache,
             max_cache_length=self.num_states_history,
@@ -290,12 +323,14 @@ class TransformerNeuralSolver(NeuralSolver):
                 key: value[:, step : step + 1] if isinstance(value, torch.Tensor) else value
                 for key, value in rebuild_inputs.items()
             }
-            rebuilt_prediction, rebuilt_cache = self.neural_model.forward_cached(
+            rebuilt_prediction, rebuilt_cache = neural_model.forward_cached(
                 step_inputs,
                 rebuilt_cache,
                 max_cache_length=self.num_states_history,
             )
 
+        if rebuilt_cache is None or rebuilt_prediction is None:
+            raise RuntimeError("KV-cache reset rows require non-empty history inputs.")
         self.kv_cache.copy_rows_from(rebuilt_cache, rebuild_env_ids)
         prediction.index_copy_(0, rebuild_env_ids, rebuilt_prediction)
         return prediction
