@@ -38,6 +38,7 @@
 - Do not add debug output to production Warp kernels. Use temporary standalone reproductions and remove debug output before committing.
 - `isaaclab_neural` is not installed by the root uv project. Prefix NeRD tests with `PYTHONPATH="$PWD/source/isaaclab_neural:$PWD/source/isaaclab${PYTHONPATH:+:$PYTHONPATH}"` so tests load the current worktree, not another checkout.
 - When reusing an existing uv environment across worktrees, set `UV_PROJECT_ENVIRONMENT` to its absolute path and use `uv run --no-sync`; install the `test` extra first. Use `--frozen` when syncing extras without changing the lockfile.
+- For OSMO GPU numerical failures, record the physical node, GPU UUID and PCI bus ID. Compare the same captured inputs and weights across devices, including UUID-based remapping to logical `cuda:0`; matching GPU model names alone does not establish equivalent hardware health.
 
 ## Changelog and release metadata
 

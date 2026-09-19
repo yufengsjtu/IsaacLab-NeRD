@@ -23,8 +23,8 @@ fi
 python3 -m tensorboard.main --help >/dev/null
 
 if [[ "${ENABLE_WANDB:-false}" == "true" || "${ENABLE_WANDB:-0}" == "1" ]]; then
-    if ! python3 -c "import wandb" 2>/dev/null; then
-        $PIP wandb
+    if ! python3 -c 'import importlib.metadata; assert importlib.metadata.version("wandb") == "0.30.0"' 2>/dev/null; then
+        $PIP 'wandb==0.30.0'
     fi
     python3 -c "import wandb"
 fi
