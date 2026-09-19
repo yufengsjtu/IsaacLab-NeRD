@@ -20,15 +20,24 @@ Example::
 from __future__ import annotations
 
 import argparse
-import copy
-import importlib.metadata as metadata
 import json
 import sys
-from collections.abc import Mapping
 from pathlib import Path
 
 import isaaclab_neural.envs  # noqa: F401
 import torch
+from isaaclab_neural.eval.eval import (
+    build_policy_env as build_policy_env,
+)
+from isaaclab_neural.eval.eval import (
+    load_saved_agent_cfg_for_policy as load_saved_agent_cfg_for_policy,
+)
+from isaaclab_neural.eval.eval import (
+    normalize_runner_cfg as normalize_runner_cfg,
+)
+from isaaclab_neural.eval.eval import (
+    reset_policy as reset_policy,
+)
 
 from isaaclab.actuators import IdealPDActuatorCfg, ImplicitActuatorCfg
 
@@ -115,82 +124,6 @@ def summarize(records: dict[str, list[float]], *, num_success_resets: int, num_t
     summary["success_resets"] = float(num_success_resets)
     summary["timeouts"] = float(num_timeouts)
     return summary
-
-
-def load_saved_agent_cfg_for_policy(checkpoint_path: str, fallback_agent_cfg, *, device: str, seed: int):
-    """Load the RSL-RL runner config saved next to a policy checkpoint when available."""
-    agent_cfg_path = Path(checkpoint_path).expanduser().resolve().parent / "params" / "agent.yaml"
-    if not agent_cfg_path.exists():
-        return fallback_agent_cfg
-
-    import yaml
-
-    with agent_cfg_path.open("r") as f:
-        agent_cfg = yaml.safe_load(f)
-    if not isinstance(agent_cfg, Mapping):
-        raise ValueError(f"Expected a mapping in saved RSL-RL agent config: {agent_cfg_path}")
-
-    agent_cfg = copy.deepcopy(dict(agent_cfg))
-    agent_cfg["device"] = device
-    agent_cfg["seed"] = seed
-    print(f"[policy] using saved RSL-RL agent config: {agent_cfg_path}")
-    return agent_cfg
-
-
-def normalize_runner_cfg(agent_cfg, *, device: str):
-    """Return runner kwargs from a saved YAML mapping or an RSL-RL config object."""
-    if isinstance(agent_cfg, Mapping):
-        runner_cfg = copy.deepcopy(dict(agent_cfg))
-        runner_cfg["device"] = device
-        return (
-            runner_cfg,
-            runner_cfg.get("class_name", "OnPolicyRunner"),
-            runner_cfg.get("clip_actions"),
-            runner_cfg.get("device", device),
-        )
-
-    from isaaclab_rl.rsl_rl import handle_deprecated_rsl_rl_cfg
-
-    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, metadata.version("rsl-rl-lib"))
-    agent_cfg.device = device
-    runner_cfg = agent_cfg.to_dict() if hasattr(agent_cfg, "to_dict") else dict(vars(agent_cfg))
-    return (
-        runner_cfg,
-        getattr(agent_cfg, "class_name", "OnPolicyRunner"),
-        getattr(agent_cfg, "clip_actions", None),
-        getattr(agent_cfg, "device", device),
-    )
-
-
-def build_policy_env(env, agent_cfg, checkpoint_path: str, device: str):
-    """Wrap ``env`` and load the Reach RSL-RL checkpoint for inference."""
-    from rsl_rl.runners import DistillationRunner, OnPolicyRunner
-
-    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
-
-    runner_cfg, class_name, clip_actions, runner_device = normalize_runner_cfg(agent_cfg, device=device)
-    wrapped_env = RslRlVecEnvWrapper(env, clip_actions=clip_actions)
-    runner_cls = {"OnPolicyRunner": OnPolicyRunner, "DistillationRunner": DistillationRunner}.get(class_name)
-    if runner_cls is None:
-        raise ValueError(f"Unsupported RSL-RL runner class: {class_name}")
-
-    print(f"[policy] loading RSL-RL checkpoint: {checkpoint_path}")
-    runner = runner_cls(wrapped_env, runner_cfg, log_dir=None, device=runner_device)
-    runner.load(checkpoint_path, map_location=device)
-    return wrapped_env, runner.get_inference_policy(device=wrapped_env.unwrapped.device), runner
-
-
-def reset_policy(policy, runner, dones: torch.Tensor) -> None:
-    """Reset recurrent policy state on environment dones."""
-    if hasattr(policy, "reset"):
-        policy.reset(dones)
-        return
-
-    policy_state = getattr(getattr(runner, "alg", None), "policy", None)
-    if policy_state is None:
-        policy_state = getattr(getattr(runner, "alg", None), "actor_critic", None)
-    if policy_state is not None and hasattr(policy_state, "reset"):
-        policy_state.reset(dones)
 
 
 args_cli, hydra_args = parse_args()

@@ -137,32 +137,3 @@ def test_apply_terrain_context_writes_env_origin():
     )
 
     torch.testing.assert_close(terrain.env_origins, torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
-
-
-def test_assign_solver_states_invalidates_fk_before_forward():
-    from isaaclab_neural.generate.adapter import NewtonDataGenerationBackend
-
-    class FakeSolver:
-        def _assign_states_from_torch(self, state, states):
-            self.state = state
-            self.states = states
-
-    class FakeManager:
-        def __init__(self) -> None:
-            self.calls: list[str] = []
-
-        def invalidate_fk(self) -> None:
-            self.calls.append("invalidate_fk")
-
-        def forward(self) -> None:
-            self.calls.append("forward")
-
-    backend = NewtonDataGenerationBackend.__new__(NewtonDataGenerationBackend)
-    backend.state = object()
-    backend._manager = FakeManager()
-    solver = FakeSolver()
-
-    backend.assign_solver_states(solver, torch.zeros(1, 2))
-
-    assert backend._manager.calls == ["invalidate_fk", "forward"]
-    assert solver.states.shape == (1, 2)

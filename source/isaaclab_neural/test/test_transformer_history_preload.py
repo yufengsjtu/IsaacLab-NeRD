@@ -46,16 +46,7 @@ def _history(history_length: int = 9):
     }
 
 
-def _collate_history_like_solver(states_history: deque) -> dict[str, torch.Tensor]:
-    """Mirror TransformerNeuralSolver history assembly."""
-    model_inputs = torch.utils.data.default_collate(list(states_history))
-    for key, value in model_inputs.items():
-        assert value.ndim >= 2
-        model_inputs[key] = value.transpose(0, 1).contiguous()
-    return model_inputs
-
-
-def test_history_collate_supports_flat_and_token_ranks():
+def test_history_collate_supports_flat_and_token_ranks(monkeypatch):
     batch, time, tokens, dim = 4, 3, 128, 17
     history = deque(maxlen=time)
     for step in range(time):
@@ -68,7 +59,11 @@ def test_history_collate_supports_flat_and_token_ranks():
             }
         )
 
-    model_inputs = _collate_history_like_solver(history)
+    solver = _FakeTransformerSolver()
+    solver.num_envs = batch
+    solver.states_history = history
+    monkeypatch.setattr(solver, "process_neural_model_inputs", lambda inputs: inputs)
+    model_inputs = solver.get_neural_model_inputs()
 
     assert model_inputs["states"].shape == (batch, time, 37)
     assert model_inputs["contact_tokens"].shape == (batch, time, tokens, dim)
