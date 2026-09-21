@@ -8,14 +8,23 @@ from types import SimpleNamespace
 import pytest
 import torch
 from gymnasium.envs.registration import registry
+from isaaclab_newton.ik.newton_ik_objectives_cfg import NewtonIKPoseObjectiveCfg
+from isaaclab_newton.sim.schemas import MujocoRigidBodyCfg
+from isaaclab_physx.sim.schemas import PhysxRigidBodyCfg
 
 import isaaclab.envs.mdp as mdp
+from isaaclab.actuators import IdealPDActuatorCfg
 
 import isaaclab_tasks  # noqa: F401
-from isaaclab_tasks.utils.hydra import resolve_presets
+from isaaclab_tasks.utils.hydra import PresetCfg, resolve_presets
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
+from isaaclab_tasks.utils.preset_cli import enumerate_task_presets
+from isaaclab_tasks.utils.preset_target import PresetTarget
+
+from isaaclab_assets import FRANKA_PANDA_MENAGERIE_CFG
 
 _TASK = "Isaac-Reach-Franka"
+_OSC_TASK = "Isaac-Reach-Franka-OSC"
 _CONTRIB_DIFFIK_ABS_TASK = "IsaacContrib-Reach-Franka-IK-Abs"
 
 
@@ -30,9 +39,13 @@ def _load_reach_env_cfg(task: str, *presets: str):
     return cfg
 
 
-def _without_actions(cfg):
+def _without_controller_dependent_cfg(cfg):
     cfg_dict = cfg.to_dict()
     cfg_dict.pop("actions")
+    cfg_dict.pop("teleop_devices")
+    for rigid_props in cfg_dict["scene"]["robot"]["spawn"]["rigid_props"]:
+        rigid_props.pop("disable_gravity", None)
+        rigid_props.pop("gravcomp", None)
     return cfg_dict
 
 
@@ -61,6 +74,9 @@ _REACH_PRESET_CASES = [
     (_TASK, ("diffik_abs", "newton_mjwarp"), "DifferentialInverseKinematicsActionCfg", "NewtonCfg"),
     (_TASK, ("diffik_abs", "ovphysx"), "DifferentialInverseKinematicsActionCfg", "OvPhysxCfg"),
     (_TASK, ("newton_ik", "newton_mjwarp"), "NewtonInverseKinematicsActionCfg", "NewtonCfg"),
+    (_OSC_TASK, (), "OperationalSpaceControllerActionCfg", "NewtonCfg"),
+    (_OSC_TASK, ("isaacsim_physx",), "OperationalSpaceControllerActionCfg", "PhysxCfg"),
+    (_OSC_TASK, ("ovphysx",), "OperationalSpaceControllerActionCfg", "OvPhysxCfg"),
     ("Isaac-Reach-UR10", (), "JointPositionActionCfg", "NewtonCfg"),
     ("Isaac-Reach-UR10", ("isaacsim_physx",), "JointPositionActionCfg", "PhysxCfg"),
     ("Isaac-Reach-UR10", ("newton_mjwarp",), "JointPositionActionCfg", "NewtonCfg"),
@@ -96,7 +112,7 @@ def test_reach_ur10_physics_presets_change_only_physics():
     assert newton.rewards.action_magnitude.weight == pytest.approx(-0.005)
 
 
-def test_reach_action_presets_change_only_the_action_configuration():
+def test_reach_action_presets_preserve_controller_independent_configuration():
     joint_pos_physx = _load_env_cfg("joint_pos", "isaacsim_physx")
     diffik_physx = _load_env_cfg("diffik", "isaacsim_physx")
     joint_pos_newton = _load_env_cfg("joint_pos", "newton_mjwarp")
@@ -104,12 +120,63 @@ def test_reach_action_presets_change_only_the_action_configuration():
     newton_ik = _load_env_cfg("newton_ik", "newton_mjwarp")
 
     assert _load_env_cfg().actions.arm_action.to_dict() == joint_pos_newton.actions.arm_action.to_dict()
-    assert _without_actions(joint_pos_physx) == _without_actions(diffik_physx)
-    assert _without_actions(joint_pos_newton) == _without_actions(diffik_newton)
-    assert _without_actions(joint_pos_newton) == _without_actions(newton_ik)
+    assert _without_controller_dependent_cfg(joint_pos_physx) == _without_controller_dependent_cfg(diffik_physx)
+    assert _without_controller_dependent_cfg(joint_pos_newton) == _without_controller_dependent_cfg(diffik_newton)
+    assert _without_controller_dependent_cfg(joint_pos_newton) == _without_controller_dependent_cfg(newton_ik)
 
 
-def test_reach_tracks_success_without_terminating_and_rewards_precision():
+@pytest.mark.parametrize(
+    ("action_preset", "physics_preset"),
+    [("diffik", "isaacsim_physx"), ("newton_ik", "newton_mjwarp")],
+)
+def test_reach_relative_ik_presets_configure_six_dof_native_teleop_devices(action_preset, physics_preset):
+    cfg = _load_env_cfg(action_preset, physics_preset)
+
+    cfg.validate()
+    assert set(cfg.teleop_devices.devices) == {"keyboard", "gamepad", "spacemouse"}
+    assert all(not device_cfg.gripper_term for device_cfg in cfg.teleop_devices.devices.values())
+
+
+def test_reach_diffik_physx_configures_teleop_physics():
+    cfg = _load_env_cfg("diffik", "isaacsim_physx")
+    rigid_props = cfg.scene.robot.spawn.rigid_props
+
+    physx_props = next(props for props in rigid_props if isinstance(props, PhysxRigidBodyCfg))
+    assert physx_props.disable_gravity
+    assert physx_props.max_depenetration_velocity == pytest.approx(5.0)
+    assert not cfg.scene.robot.spawn.make_uninstanceable
+    assert cfg.scene.robot.spawn.collision_props is None
+    assert cfg.scene.robot.spawn.usd_path.endswith("/FrankaEmika/Legacy/panda_instanceable.usd")
+
+
+def test_reach_newton_ik_configures_gravity_compensation():
+    cfg = _load_env_cfg("newton_ik", "newton_mjwarp")
+    rigid_props = cfg.scene.robot.spawn.rigid_props
+
+    mujoco_props = next(props for props in rigid_props if isinstance(props, MujocoRigidBodyCfg))
+    assert mujoco_props.gravcomp == pytest.approx(1.0)
+    assert cfg.scene.robot.spawn.usd_path.endswith("/FrankaEmika/franka_panda.usda")
+
+
+def test_reach_newton_ik_uses_native_se3_command_convention():
+    cfg = _load_env_cfg("newton_ik", "newton_mjwarp")
+    pose_objectives = [
+        objective for objective in cfg.actions.arm_action.objectives if isinstance(objective, NewtonIKPoseObjectiveCfg)
+    ]
+
+    assert len(pose_objectives) == 1
+    assert pose_objectives[0].command_type == "pose"
+    assert pose_objectives[0].use_relative_mode
+    assert len(pose_objectives[0].scale) == 6
+
+
+def test_reach_default_preset_does_not_configure_se3_teleop_devices():
+    cfg = _load_env_cfg()
+
+    assert cfg.teleop_devices.devices == {}
+
+
+def test_reach_success_requires_position_and_orientation():
     cfg = _load_env_cfg()
 
     assert cfg.commands.ee_pose.position_success_threshold == pytest.approx(0.05)
@@ -190,46 +257,45 @@ def test_reach_tracks_success_without_terminating_and_rewards_precision():
     assert torch.equal(position_only_succeeded, torch.tensor([True, False, True]))
 
 
-def test_franka_defaults_match_historical_legacy_configuration():
-    from isaaclab_tasks.utils.hydra import collect_presets
+def test_reach_osc_effort_actuator_keeps_menagerie_velocity_limit():
+    """The zero-gain effort actuator must keep the asset's solver velocity limit; the USD authors none."""
+    cfg = _load_reach_env_cfg(_OSC_TASK)
+    arm_actuator = cfg.scene.robot.actuators["panda_arm"]
 
-    cfg = _load_env_cfg("newton_mjwarp")
-    raw_cfg = load_cfg_from_registry(_TASK, "env_cfg_entry_point")
-    names = {name for variants in collect_presets(raw_cfg).values() for name in variants}
-    assert names.isdisjoint({"legacy", "menagerie", "legacy_response", "tuned_response", "damped_response"})
-    assert "/Assets/Isaac/6.0/" in cfg.scene.robot.spawn.usd_path
-    assert cfg.scene.robot.spawn.usd_path.endswith("/Legacy/panda_instanceable.usd")
-    assert cfg.sim.dt == 1.0 / 60.0
-    assert cfg.decimation == cfg.sim.render_interval == 2
-    assert cfg.sim.physics.num_substeps == 1
-    assert cfg.sim.physics.solver_cfg.njmax == 50
-    assert cfg.sim.physics.solver_cfg.update_data_interval == 1
-    for name, effort in [("panda_shoulder", 87.0), ("panda_forearm", 12.0)]:
-        actuator = cfg.scene.robot.actuators[name]
-        assert (actuator.stiffness, actuator.damping, actuator.armature) == (80.0, 4.0, 0.001)
-        assert actuator.joint_effort_limit == effort
-    hand = cfg.scene.robot.actuators["panda_hand"]
-    assert (hand.stiffness, hand.damping, hand.joint_effort_limit) == (2000.0, 100.0, 200.0)
-    assert cfg.rewards.success is None
-    assert cfg.rewards.action_magnitude is None
-    assert cfg.terminations.success is None
-    assert cfg.rewards.end_effector_position_tracking_fine_grained.weight == 0.1
-    assert cfg.rewards.joint_vel.params["asset_cfg"].joint_names is None
+    assert isinstance(arm_actuator, IdealPDActuatorCfg)
+    assert arm_actuator.stiffness == 0.0 and arm_actuator.damping == 0.0
+    assert arm_actuator.joint_velocity_limit == FRANKA_PANDA_MENAGERIE_CFG.actuators["panda_arm"].joint_velocity_limit
 
 
-def test_franka_osc_retains_explicit_effort_drives():
-    from isaaclab.actuators import IdealPDActuatorCfg
+def test_reach_osc_resolves_controller_preset_values_to_defaults():
+    """The OSC action term replaces the arm-controller presets, so their side effects must not leak in."""
+    cfg = _load_reach_env_cfg(_OSC_TASK)
+    cfg.validate()
 
-    cfg = _load_reach_env_cfg("Isaac-Reach-Franka-OSC", "newton_mjwarp")
-    arm = cfg.scene.robot.actuators["panda_arm"]
-    assert isinstance(arm, IdealPDActuatorCfg)
-    assert arm.stiffness == 0.0
-    assert arm.damping == 0.0
-    assert cfg.scene.robot.spawn.rigid_props.disable_gravity is True
-    assert cfg.scene.robot.spawn.usd_path.endswith("/FrankaEmika/franka_panda.usda")
-    assert cfg.sim.dt == 1.0 / 120.0
-    assert cfg.decimation == 4
-    assert cfg.sim.physics.num_substeps == 2
+    physx_props = next(props for props in cfg.scene.robot.spawn.rigid_props if isinstance(props, PhysxRigidBodyCfg))
+    mujoco_props = next(props for props in cfg.scene.robot.spawn.rigid_props if isinstance(props, MujocoRigidBodyCfg))
+    preset_map = enumerate_task_presets(_OSC_TASK)
+    domain_presets = set(preset_map[PresetTarget.DOMAIN]) - set(preset_map[PresetTarget.PHYSICS])
+
+    assert not isinstance(cfg.rewards.action_magnitude.weight, PresetCfg)
+    assert cfg.rewards.action_magnitude.weight == _load_env_cfg().rewards.action_magnitude.weight
+    assert physx_props.disable_gravity is True
+    assert mujoco_props.gravcomp == pytest.approx(1.0)
+    assert cfg.teleop_devices.devices == {}
+    assert domain_presets == {"diffik_abs"}
+
+
+def test_reach_osc_diffik_abs_is_a_deprecated_no_op_alias():
+    """``presets=diffik_abs`` keeps resolving on the OSC task but warns and changes nothing."""
+    default_cfg = _load_reach_env_cfg(_OSC_TASK, "ovphysx")
+    default_cfg.validate()
+    alias_cfg = _load_reach_env_cfg(_OSC_TASK, "diffik_abs", "ovphysx")
+
+    with pytest.warns(FutureWarning, match="presets=diffik_abs"):
+        alias_cfg.validate()
+
+    assert type(alias_cfg.rewards.action_magnitude.weight) is float
+    assert alias_cfg.to_dict() == default_cfg.to_dict()
 
 
 def test_reach_newton_ik_rejects_physx():

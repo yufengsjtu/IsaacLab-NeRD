@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Franka Reach environment configuration."""
+"""Configuration for the Franka reach environment."""
 
 import math
 
@@ -11,21 +11,23 @@ from isaaclab_newton.envs.mdp.actions.newton_ik_actions_cfg import NewtonInverse
 from isaaclab_newton.ik.newton_ik_objectives_cfg import NewtonIKJointLimitObjectiveCfg, NewtonIKPoseObjectiveCfg
 from isaaclab_newton.ik.newton_ik_solver_cfg import NewtonIKSolverCfg
 from isaaclab_newton.physics import NewtonCfg
+from isaaclab_newton.sim.schemas import MujocoRigidBodyCfg
+from isaaclab_physx.sim.schemas import PhysxRigidBodyCfg
 
 import isaaclab.envs.mdp as mdp
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
+from isaaclab.devices import DevicesCfg
+from isaaclab.devices.gamepad import Se3GamepadCfg
+from isaaclab.devices.keyboard import Se3KeyboardCfg
+from isaaclab.devices.spacemouse import Se3SpaceMouseCfg
 from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
-from isaaclab.managers import RewardTermCfg, SceneEntityCfg
-from isaaclab.utils.configclass import configclass
+from isaaclab.utils import configclass
 
-from isaaclab_tasks.core.reach.reach_env_cfg import ReachEnvCfg, ReachPhysicsCfg, RewardsCfg, TerminationsCfg
 from isaaclab_tasks.utils import PresetCfg, preset
 
-##
-# Pre-defined configs
-##
-from isaaclab_assets.robots.franka import FRANKA_PANDA_CFG  # isort: skip
+from isaaclab_assets import FRANKA_PANDA_CFG, FRANKA_PANDA_MENAGERIE_CFG
 
+from ...reach_env_cfg import ReachEnvCfg
 
 ##
 # Environment configuration
@@ -131,30 +133,49 @@ class FrankaReachEnvCfg(ReachEnvCfg):
 
     def validate_config(self) -> None:
         """Validate the selected controller and physics backend."""
-
         if isinstance(self.actions.arm_action, NewtonInverseKinematicsActionCfg) and not isinstance(
             self.sim.physics, NewtonCfg
         ):
             raise ValueError("The 'newton_ik' action preset requires a Newton physics preset.")
 
-    def __post_init__(self) -> None:
-        # post init of parent
+    def __post_init__(self):
         super().__post_init__()
 
-        # switch robot to franka
-        self.scene.robot = FRANKA_PANDA_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-        self.scene.robot.spawn.usd_path = FRANKA_REACH_LEGACY_USD_PATH
-        self.scene.robot.spawn.rigid_props.disable_gravity = preset(default=False, diffik_abs=True)
-        self.sim.dt = 1.0 / 60.0
-        self.decimation = 2
-        self.sim.render_interval = 2
-        self.sim.physics = FrankaReachPhysicsCfg()
+        # Use the collision-complete legacy asset in PhysX until the Menagerie asset is corrected.
+        self.scene.robot = FRANKA_PANDA_MENAGERIE_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot.spawn.usd_path = preset(
+            default=self.scene.robot.spawn.usd_path,
+            isaacsim_physx=FRANKA_PANDA_CFG.spawn.usd_path,
+            physx=FRANKA_PANDA_CFG.spawn.usd_path,
+            ovphysx=FRANKA_PANDA_CFG.spawn.usd_path,
+        )
+        # IK targets need backend-native gravity control to hold steady between commands.
+        self.scene.robot.spawn.rigid_props = [
+            PhysxRigidBodyCfg(
+                disable_gravity=preset(default=False, diffik=True, diffik_abs=True, newton_ik=True),
+                max_depenetration_velocity=5.0,
+            ),
+            MujocoRigidBodyCfg(gravcomp=preset(default=None, diffik=1.0, diffik_abs=1.0, newton_ik=1.0)),
+        ]
         # override rewards
         self.rewards.end_effector_position_tracking.params["asset_cfg"].body_names = ["panda_hand"]
         self.rewards.end_effector_orientation_tracking.params["asset_cfg"].body_names = ["panda_hand"]
 
         # override actions
         self.actions.arm_action = FrankaArmActionCfg()
+        # Native SE(3) devices match the 6D relative differential and Newton IK actions.
+        relative_ik_teleop_devices = DevicesCfg(
+            devices={
+                "keyboard": Se3KeyboardCfg(gripper_term=False, sim_device=self.sim.device),
+                "gamepad": Se3GamepadCfg(gripper_term=False, sim_device=self.sim.device),
+                "spacemouse": Se3SpaceMouseCfg(gripper_term=False, sim_device=self.sim.device),
+            }
+        )
+        self.teleop_devices = preset(
+            default=DevicesCfg(),
+            diffik=relative_ik_teleop_devices,
+            newton_ik=relative_ik_teleop_devices,
+        )
         # override command generator body
         # end-effector is along z-direction
         self.commands.ee_pose.body_name = "panda_hand"
