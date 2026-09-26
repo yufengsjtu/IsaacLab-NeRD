@@ -77,17 +77,27 @@ class SO101SceneCfg(InteractiveSceneCfg):
 
     robot: ArticulationCfg = SO101_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
+        init_state=SO101_CFG.init_state.replace(
+            joint_pos={
+                "shoulder_pan": 0.0,
+                "shoulder_lift": 0.0,
+                "elbow_flex": 0.0,
+                "wrist_flex": 0.0,
+                "wrist_roll": 0.0,
+                "gripper": 0.0,
+            },
+        ),
+        actuators={"usd": SO101_CFG.actuators["usd"].replace(armature=0.028, joint_velocity_limit=5.0)},
         spawn=SO101_CFG.spawn.replace(
+            usd_path="omniverse://isaac-dev.ov.nvidia.com/Isaac/IsaacLab/Robots/SO101/so101.usda",
             variants={
-                "Robot": "robot",
-                "Sensor": "sensors",
                 "Physics": preset(
                     default="physics",
                     isaacsim_physx="physx",
                     physx="physx",
                     newton_mjwarp="physics",
                 ),
-            }
+            },
         ),
     )
 
