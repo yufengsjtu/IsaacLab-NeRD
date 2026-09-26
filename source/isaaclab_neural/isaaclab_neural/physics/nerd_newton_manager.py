@@ -28,14 +28,12 @@ class NewtonNerdManager(NewtonManager):
     _neural_model_loading_deferred: bool = False
     _applied_effort_scenes: list = []
     _finger_force_scenes: list = []
+    _robot_normal_force_scenes: list = []
     _skip_applied_effort_overlay: bool = False
 
     _UPSTREAM_SYNC_ATTRS = (
         "_builder",
-        "_model",
-        "_state_0",
-        "_state_1",
-        "_control",
+        "backend",
         "_contacts",
         "_solver",
         "_num_substeps",
@@ -61,6 +59,7 @@ class NewtonNerdManager(NewtonManager):
         cls._nerd_active = False
         cls._applied_effort_scenes = []
         cls._finger_force_scenes = []
+        cls._robot_normal_force_scenes = []
         cls._skip_applied_effort_overlay = False
 
     @classmethod
@@ -86,8 +85,8 @@ class NewtonNerdManager(NewtonManager):
 
         isaaclab_newton assets currently import ``NewtonManager`` directly for
         model/state views. Since ``NewtonNerdManager`` is a subclass, class
-        assignments such as ``cls._model = ...`` land on the subclass. Mirroring
-        keeps those upstream reads valid without editing isaaclab_newton files.
+        assignments can shadow shared lifecycle fields. Mirroring keeps upstream
+        reads valid while model/state/control allocations remain backend-owned.
         """
         if cls is NewtonManager:
             return
@@ -242,7 +241,7 @@ class NewtonNerdManager(NewtonManager):
                 return None
             if cls._collision_pipeline is None or cls._contacts is None:
                 raise RuntimeError("NeRD newton_native contact pipeline has not been initialized.")
-            cls._collision_pipeline.collide(cls._state_0, cls._contacts)
+            cls._collision_pipeline.collide(cls.backend.state_0, cls._contacts)
             return cls._contacts
 
     @classmethod
@@ -282,6 +281,33 @@ class NewtonNerdManager(NewtonManager):
         for scene, names in cls._finger_force_scenes:
             values = forces if forces is not None else torch.zeros((scene.num_envs, 2, 3), device=scene["robot"].device)
             publish_normal_forces(scene, values, names)
+
+    @classmethod
+    def register_robot_normal_force_scene(cls, scene, sensor_name: str) -> None:
+        """Register a SO101 scene consuming learned unfiltered robot normal forces."""
+        from isaaclab_neural.contacts.keyboard_normal_force import validate_sensor
+
+        validate_sensor(scene, sensor_name)
+        if not any(existing is scene for existing, _ in cls._robot_normal_force_scenes):
+            cls._robot_normal_force_scenes.append((scene, sensor_name))
+
+    @classmethod
+    def publish_robot_normal_forces(cls, *, resetting: bool = False) -> None:
+        """Publish cached world-frame robot normal forces [N], including cleared reset rows."""
+        if not cls._robot_normal_force_scenes:
+            return
+        from isaaclab_neural.contacts.keyboard_normal_force import BODY_NAMES, publish_normal_forces
+
+        forces = getattr(cls._solver, "predicted_robot_net_normal_forces_w", None)
+        if forces is None and not resetting:
+            raise RuntimeError("Keyboard deployment requires a robot normal-force checkpoint head.")
+        for scene, sensor_name in cls._robot_normal_force_scenes:
+            values = (
+                forces
+                if forces is not None
+                else torch.zeros((scene.num_envs, len(BODY_NAMES), 3), device=scene["robot"].device)
+            )
+            publish_normal_forces(scene, values, sensor_name)
 
     @classmethod
     def _run_post_actuator_hooks(cls) -> None:
@@ -336,11 +362,13 @@ class NewtonNerdManager(NewtonManager):
 
             with step_profile.section("actuator"):
                 if cls._adapter is not None:
-                    cls._adapter.step(cls._state_0, cls._control, physics_dt)
+                    cls._adapter.step(cls.backend.state_0, cls.backend.control, physics_dt)
                 cls._run_post_actuator_hooks()
 
             cls._run_solver_substeps(contacts)
 
+        for callback in cls._post_step_callbacks:
+            callback()
         cls._update_sensors(contacts)
         cls._sync_upstream_newton_state()
 
@@ -358,32 +386,35 @@ class NewtonNerdManager(NewtonManager):
         if not cls._skip_applied_effort_overlay:
             cls._overlay_applied_effort_into_joint_f()
         cls._run_solver_substeps(contacts)
+        for callback in cls._post_step_callbacks:
+            callback()
         cls._update_sensors(contacts)
         cls._sync_upstream_newton_state()
 
     @classmethod
     def _update_sensors(cls, contacts) -> None:
         cls.publish_finger_forces()
+        cls.publish_robot_normal_forces()
         if cls._newton_frame_transform_sensors:
             for sensor in cls._newton_frame_transform_sensors:
-                sensor.update(cls._state_0)
+                sensor.update(cls.backend.state_0)
         if cls._newton_imu_sensors:
             for sensor in cls._newton_imu_sensors:
-                sensor.update(cls._state_0)
+                sensor.update(cls.backend.state_0)
 
     @classmethod
     def sync_neural_solver(cls, *, update_history: bool = True) -> None:
         """Refresh neural-solver input caches from the current Newton state."""
         if not cls._nerd_active or cls._solver is None:
             return
-        if cls._control is None:
+        if cls.backend.control is None:
             raise RuntimeError("Cannot sync NeRD solver before Newton control is initialized.")
 
         contacts = cls._prepare_nerd_contacts()
         sync_from_newton = getattr(cls._solver, "sync_from_newton", None)
         if sync_from_newton is None:
             raise RuntimeError("Active NeRD solver does not implement sync_from_newton().")
-        sync_from_newton(cls._state_0, contacts, cls._control.joint_f, update_history=update_history)
+        sync_from_newton(cls.backend.state_0, contacts, cls.backend.control.joint_f, update_history=update_history)
         cls._sync_upstream_newton_state()
 
     @classmethod
@@ -417,3 +448,4 @@ class NewtonNerdManager(NewtonManager):
             if should_reset:
                 reset_solver(env_ids)
         cls.publish_finger_forces(resetting=True)
+        cls.publish_robot_normal_forces(resetting=True)

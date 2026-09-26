@@ -234,6 +234,111 @@ def test_token_round_robin_ranks_are_independent_per_frame() -> None:
     assert projected["contact_token_body_ids"][:, 0].tolist() == [10, 10]
 
 
+@pytest.mark.parametrize("both_sides", [False, True])
+def test_movable_filter_only_removes_immovable_pairs(both_sides):
+    pairs = {
+        key: value
+        for key, value in _native_rollouts(both_sides_on_first_pair=both_sides)["native_contacts"].items()
+        if key != "frame_counts"
+    }
+    original = {key: value.clone() for key, value in pairs.items()}
+    projected = project_native_pairs(
+        pairs,
+        num_frames=1,
+        representation="contact_tokens",
+        packing_policy="body_round_robin_pair_atomic",
+        max_contact_tokens=4,
+        contact_filter="solver_active_movable",
+        fixed_body_slots=(0,),
+    )
+    assert int((projected["contact_tokens"][..., 0] > 0.5).sum()) == (3 if both_sides else 1)
+    assert int(projected["contact_token_overflow"].sum()) == 0
+    for key in pairs:
+        torch.testing.assert_close(pairs[key], original[key])
+    pairs["separation"][1] = 0.1
+    inactive = project_native_pairs(
+        pairs,
+        num_frames=1,
+        representation="contact_tokens",
+        packing_policy="body_round_robin_pair_atomic",
+        max_contact_tokens=4,
+        contact_filter="solver_active_movable",
+        fixed_body_slots=(0,),
+    )
+    assert int((inactive["contact_tokens"][..., 0] > 0.5).sum()) == (2 if both_sides else 0)
+    if both_sides:
+        pairs["body_slots_1"][0] = -1
+        untracked = project_native_pairs(
+            pairs,
+            num_frames=1,
+            representation="contact_tokens",
+            packing_policy="body_round_robin_pair_atomic",
+            max_contact_tokens=4,
+            contact_filter="solver_active_movable",
+            fixed_body_slots=(0,),
+        )
+        assert int((untracked["contact_tokens"][..., 0] > 0.5).sum()) == 1
+    with pytest.raises(ValueError, match="fixed.*slots|mobility"):
+        project_native_pairs(
+            pairs,
+            num_frames=1,
+            representation="contact_tokens",
+            packing_policy="body_round_robin_pair_atomic",
+            max_contact_tokens=4,
+            contact_filter="solver_active_movable",
+        )
+
+
+def test_movable_filter_dataset_requires_recorded_mobility(tmp_path):
+    import json
+
+    from isaaclab_neural.data.datasets import create_trajectory_dataset
+
+    path = tmp_path / "native.hdf5"
+    write_rollouts_to_hdf5(path, _native_rollouts(), env_name="Test-Env")
+    kwargs = dict(
+        hdf5_dataset_path=path,
+        sample_sequence_length=2,
+        contact_representation="contact_tokens",
+        max_contact_tokens=4,
+        contact_packing_policy="body_round_robin_pair_atomic",
+        contact_filter="solver_active_movable",
+    )
+    with pytest.raises(ValueError, match="mobility|fixed.*slots"):
+        create_trajectory_dataset(load_mode="lazy", **kwargs)
+    with h5py.File(path, "a") as file:
+        file["data"].attrs["keyboard_contract"] = json.dumps(
+            {"contact_filter": "solver_active_movable", "contact_fixed_body_slots": [0]}
+        )
+    for mode in ("lazy", "eager"):
+        dataset = create_trajectory_dataset(load_mode=mode, **kwargs)
+        assert int((dataset[0]["contact_tokens"][..., 0] > 0.5).sum()) == 1
+        if hasattr(dataset, "close"):
+            dataset.close()
+
+
+def test_fixed_body_classification_inherits_parent_mobility():
+    from types import SimpleNamespace
+
+    from isaaclab_neural.contacts.newton_contact_adapter import find_immovable_primary_slots
+
+    class Array:
+        def __init__(self, values):
+            self.values = np.asarray(values)
+
+        def numpy(self):
+            return self.values
+
+    model = SimpleNamespace(
+        body_count=6,
+        body_flags=Array([1] * 6),
+        joint_parent=Array([-1, 0, 1, -1, 3, 4]),
+        joint_child=Array(range(6)),
+        joint_qd_start=Array([0, 0, 1, 1, 1, 2, 2]),
+    )
+    assert find_immovable_primary_slots(model, torch.tensor([[0, 1, 2], [3, 4, 5]])) == (0,)
+
+
 def test_native_schema_rejects_wrong_vector_shape(tmp_path) -> None:
     rollouts = _native_rollouts()
     rollouts["native_contacts"]["normal_w"] = torch.zeros((2, 4), dtype=torch.float32)

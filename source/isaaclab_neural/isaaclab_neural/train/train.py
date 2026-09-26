@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from datetime import timedelta
@@ -47,6 +48,7 @@ def configure_distributed(args) -> None:
     args.device = f"cuda:{args.local_rank}"
     timeout_seconds = int(os.environ.get("TORCH_DISTRIBUTED_TIMEOUT_SECONDS", "3600"))
     dist.init_process_group(backend="nccl", timeout=timedelta(seconds=timeout_seconds))
+    print(f"[DDP] Initialized rank {args.rank}/{args.world_size} on {args.device} (pid={os.getpid()}).", flush=True)
 
 
 def cleanup_distributed() -> None:
@@ -108,12 +110,55 @@ def build_launch_cfg(env_cfg):
     return launch_cfg
 
 
+_INPUT_SEMANTIC_SOLVER_KEYS = (
+    "name",
+    "num_states_history",
+    "contact_mode",
+    "contact_representation",
+    "contact_packing_policy",
+    "contact_filter",
+    "num_contacts_per_env",
+    "max_contact_tokens",
+    "contact_token_frame",
+    "states_frame",
+    "anchor_frame_step",
+    "states_embedding_type",
+    "prediction_type",
+    "orientation_prediction_parameterization",
+    "min_contact_event_threshold",
+)
+
+
+def _input_semantics(solver_cfg: dict) -> dict:
+    """Return solver fields that define model inputs/targets, resolving omitted keys to runtime defaults."""
+    defaults = NerdSolverCfg()
+    semantics = {}
+    for key in _INPUT_SEMANTIC_SOLVER_KEYS:
+        value = solver_cfg[key] if key in solver_cfg else getattr(defaults, key)
+        semantics[key] = tuple(value) if isinstance(value, list | tuple) else value
+    return semantics
+
+
+def validate_checkpoint_input_semantics(checkpoint_cfg: dict, cfg: dict) -> None:
+    """Reject resuming a checkpoint whose input or target semantics differ from the final training config."""
+    expected = _input_semantics(checkpoint_cfg["env"]["neural_solver_cfg"])
+    actual = _input_semantics(cfg["env"]["neural_solver_cfg"])
+    changed = {key: (expected[key], actual[key]) for key in expected if expected[key] != actual[key]}
+    if cfg["inputs"] != checkpoint_cfg["inputs"]:
+        changed["inputs"] = (checkpoint_cfg["inputs"], cfg["inputs"])
+    if changed:
+        raise ValueError(
+            "Checkpoint input semantics differ from the training configuration (checkpoint, requested): "
+            f"{changed}. Start a fresh model instead of resuming."
+        )
+
+
 def load_training_cfg(args):
     """Load training YAML and merge checkpoint/CLI overrides."""
     with open(Path(args.cfg).expanduser()) as cfg_file:
         cfg = yaml.load(cfg_file, Loader=yaml.SafeLoader)
 
-    checkpoint = None
+    checkpoint = checkpoint_cfg = None
     if args.checkpoint is not None:
         checkpoint = load_checkpoint(args.checkpoint, device=args.device)
         checkpoint_cfg = get_cfg_from_checkpoint(checkpoint, args.checkpoint)
@@ -121,6 +166,10 @@ def load_training_cfg(args):
             checkpoint_cfg["network"].get("finger_object_normal_force_head", {}).get("enabled", False)
         ):
             raise ValueError("Cannot resume filtered finger-force training from a checkpoint without that head.")
+        if cfg["network"].get("robot_net_normal_force_head", {}).get("enabled", False) and not (
+            checkpoint_cfg["network"].get("robot_net_normal_force_head", {}).get("enabled", False)
+        ):
+            raise ValueError("Cannot resume robot normal-force training from a checkpoint without that head.")
         if cfg["env"]["env_name"] != checkpoint_cfg["env"]["env_name"]:
             print_warning(
                 f"Environment name in cfg {cfg['env']['env_name']} is not equal to "
@@ -128,10 +177,12 @@ def load_training_cfg(args):
             )
         cfg["env"]["neural_solver_cfg"].update(checkpoint_cfg["env"]["neural_solver_cfg"])
         cfg["env"]["neural_solver_cfg"].pop("use_cuda_graph", None)
-        cfg["inputs"] = checkpoint_cfg["inputs"]
+        cfg["inputs"] = copy.deepcopy(checkpoint_cfg["inputs"])
         cfg["network"] = checkpoint_cfg["network"]
 
     handle_cfg_overrides(args.cfg_overrides, cfg)
+    if checkpoint_cfg is not None:
+        validate_checkpoint_input_semantics(checkpoint_cfg, cfg)
     if not args.no_time_stamp:
         timestamp = get_time_stamp()
         args.logdir = os.path.join(args.logdir, timestamp)
@@ -166,13 +217,8 @@ def validate_cfg(cfg) -> None:
             raise ValueError("reset_seq_length must equal sample_sequence_length for RNN training.")
 
 
-args_cli, hydra_args = get_parser().parse_known_args()
-configure_distributed(args_cli)
-sys.argv = [sys.argv[0]] + hydra_args
-
-
-@hydra_task_config(args_cli.task, "")
-def main(env_cfg, _agent_cfg=None) -> None:
+def train(env_cfg, args_cli) -> None:
+    """Train or evaluate a resolved environment in the parent training process."""
     cfg, checkpoint = load_training_cfg(args_cli)
     validate_cfg(cfg)
     configure_env(env_cfg, args_cli)
@@ -217,9 +263,22 @@ def main(env_cfg, _agent_cfg=None) -> None:
         env.close()
 
 
-if __name__ == "__main__":
-    set_random_seed(args_cli.seed)
+def main() -> None:
+    """Initialize the training process without side effects when imported by workers."""
+    args_cli, hydra_args = get_parser().parse_known_args()
+    sys.argv = [sys.argv[0]] + hydra_args
     try:
-        main()  # type: ignore[call-arg]
+        configure_distributed(args_cli)
+        set_random_seed(args_cli.seed)
+
+        @hydra_task_config(args_cli.task, "")
+        def run(env_cfg, _agent_cfg=None) -> None:
+            train(env_cfg, args_cli)
+
+        run()  # type: ignore[call-arg]
     finally:
         cleanup_distributed()
+
+
+if __name__ == "__main__":
+    main()

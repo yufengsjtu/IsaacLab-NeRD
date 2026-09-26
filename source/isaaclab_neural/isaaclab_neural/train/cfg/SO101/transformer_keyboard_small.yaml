@@ -1,0 +1,91 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+env:
+  env_name: SO101-Keyboard-Fixed
+  robot_name: SO101-Keyboard-Fixed
+  keyboard_variant: 0
+  num_envs: 8
+  neural_solver_cfg:
+    name: TransformerNeuralSolver
+    states_frame: body
+    anchor_frame_step: every
+    states_embedding_type: identical
+    prediction_type: relative
+    orientation_prediction_parameterization: quaternion
+    num_states_history: 4
+    contact_mode: newton_native
+    contact_representation: contact_tokens
+    contact_token_frame: owner
+    num_contacts_per_env: 256
+    max_contact_tokens: 256
+    contact_packing_policy: body_round_robin_pair_atomic
+
+algorithm:
+  name: SequenceModelTrainer
+  num_epochs: 20
+  num_iters_per_epoch: 50
+  sample_sequence_length: 4
+  batch_size: 64
+  num_valid_batches: 16
+  truncate_grad: true
+  grad_norm: 1.0
+  update_dataset_statistics: true
+  loss:
+    type: MSE
+    beta: 0.0
+    keyboard_key_position_scale_m: null
+    keyboard_robot_position_scale_rad: null
+    robot_net_normal_force:
+      weight: 1.0
+  optimizer:
+    type: Adam
+    weight_decay: 0.0
+    lr_start: 0.0003
+    lr_end: 0.00003
+    lr_schedule: linear
+    betas: [0.9, 0.999]
+  dataset:
+    train_dataset_path: ./logs/keyboard_poc/press_v2.hdf5
+    valid_datasets:
+      independent_seed: ./logs/keyboard_poc/valid_seed1.hdf5
+    max_capacity: 100000
+    load_mode: eager
+    num_data_workers: 0
+  eval:
+    interval: 0
+
+inputs:
+  low_dim: [states_embedding, joint_f, gravity_dir]
+  contact_set:
+    dim: 17
+    encoder_type: shared_per_body
+    body_latent_dim: 4
+    hidden_dim: 32
+    max_other_bodies: 128
+
+network:
+  robot_net_normal_force_head:
+    enabled: true
+  normalize_input: true
+  normalize_output: true
+  encoder:
+    low_dim:
+      layer_sizes: []
+      activation: relu
+      layernorm: false
+  transformer:
+    block_size: 4
+    n_layer: 2
+    n_head: 4
+    n_embd: 64
+    dropout: 0.0
+    bias: false
+  model:
+    output_tanh: false
+    mlp:
+      layer_sizes: [64]
+      activation: relu
+      layernorm: false

@@ -19,7 +19,7 @@ from .datasets import (
     create_trajectory_dataset,
     create_weighted_trajectory_dataset,
 )
-from .hdf5 import append_rollouts_to_hdf5, write_rollouts_to_hdf5
+from .hdf5 import append_rollouts_to_hdf5, create_virtual_trajectory_dataset, write_rollouts_to_hdf5
 from .terrain_context import (
     build_terrain_context,
     read_terrain_context,
@@ -40,6 +40,7 @@ __all__ = [
     "create_trajectory_dataset",
     "create_weighted_trajectory_dataset",
     "append_rollouts_to_hdf5",
+    "create_virtual_trajectory_dataset",
     "write_rollouts_to_hdf5",
     "build_terrain_context",
     "read_terrain_context",

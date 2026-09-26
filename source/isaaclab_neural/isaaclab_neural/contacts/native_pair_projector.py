@@ -14,6 +14,7 @@ import torch
 from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_FILTER_NONE,
     CONTACT_FILTER_SOLVER_ACTIVE,
+    CONTACT_FILTER_SOLVER_ACTIVE_MOVABLE,
     CONTACT_REPRESENTATION_FLAT,
     CONTACT_REPRESENTATION_TOKENS,
     CONTACT_TOKEN_DIM,
@@ -22,10 +23,31 @@ from isaaclab_neural.contacts.packing import ContactPackingPolicy
 
 
 def native_pair_solver_active_mask(native_pairs: Mapping[str, torch.Tensor]) -> torch.Tensor:
-    """Return whether each recorded pair was included by the Newton MJWarp solver."""
+    """Select negative recorded surface separation [m], not a measured-force threshold."""
     if "separation" not in native_pairs:
         raise ValueError("Solver-active classification requires native field 'separation'.")
     return native_pairs["separation"] < 0.0
+
+
+def native_pair_filter_mask(
+    native_pairs: Mapping[str, torch.Tensor], contact_filter: str, fixed_body_slots: tuple[int, ...] | None = None
+) -> torch.Tensor:
+    """Select input pairs without modifying solver contacts or using future force labels."""
+    if contact_filter == CONTACT_FILTER_NONE:
+        return torch.ones_like(native_pairs["separation"], dtype=torch.bool)
+    active = native_pair_solver_active_mask(native_pairs)
+    if contact_filter == CONTACT_FILTER_SOLVER_ACTIVE:
+        return active
+    if contact_filter != CONTACT_FILTER_SOLVER_ACTIVE_MOVABLE:
+        raise ValueError(f"Unsupported contact filter: {contact_filter!r}.")
+    if fixed_body_slots is None or any(type(slot) is not int or slot < 0 for slot in fixed_body_slots):
+        raise ValueError("Movable contact filtering requires verified fixed body slots (mobility metadata).")
+    fixed = torch.tensor(fixed_body_slots, device=active.device, dtype=torch.long)
+    immovable = [
+        (native_pairs[f"body_ids_{side}"] < 0) | torch.isin(native_pairs[f"body_slots_{side}"], fixed)
+        for side in (0, 1)
+    ]
+    return active & ~(immovable[0] & immovable[1])
 
 
 def _stable_segment_rank(keys: torch.Tensor) -> torch.Tensor:
@@ -70,14 +92,13 @@ def _filter_native_pairs(
     native_pairs: Mapping[str, torch.Tensor],
     frame_ids: torch.Tensor,
     contact_filter: str,
+    fixed_body_slots: tuple[int, ...] | None,
 ) -> tuple[Mapping[str, torch.Tensor], torch.Tensor, torch.Tensor]:
     """Select native pairs admitted by the requested contact filter."""
     source_indices = torch.arange(frame_ids.shape[0], device=frame_ids.device)
     if contact_filter == CONTACT_FILTER_NONE:
         return native_pairs, frame_ids, source_indices
-    if contact_filter != CONTACT_FILTER_SOLVER_ACTIVE:
-        raise ValueError(f"Unsupported contact filter: {contact_filter!r}.")
-    active = native_pairs["separation"] < 0.0
+    active = native_pair_filter_mask(native_pairs, contact_filter, fixed_body_slots)
     indices = torch.nonzero(active, as_tuple=False).reshape(-1)
     return (
         {name: value.index_select(0, indices) for name, value in native_pairs.items()},
@@ -294,6 +315,7 @@ def project_native_pairs(
     max_contact_tokens: int | None = None,
     return_pair_indices: bool = False,
     contact_filter: str = CONTACT_FILTER_NONE,
+    fixed_body_slots: tuple[int, ...] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Project complete native pairs into fixed-capacity model contact fields.
 
@@ -311,8 +333,11 @@ def project_native_pairs(
         return_pair_indices: Include private source-pair indices for flat
             runtime metadata maintenance.
         contact_filter: Native-pair selection applied before capacity packing.
-            ``"solver_active"`` keeps pairs with negative Newton MJWarp solver
-            clearance [m].
+            ``"solver_active"`` keeps pairs with negative recorded surface
+            separation [m]. ``"solver_active_movable"`` additionally removes pairs
+            whose two sides are immovable. It does not filter the native simulation.
+        fixed_body_slots: Verified immovable primary-body slots, required for movable filtering.
+            Untracked bodies with nonnegative body IDs are conservatively retained.
 
     Returns:
         Original fixed-capacity flat fields, or token, overflow, body-id, and
@@ -331,7 +356,9 @@ def project_native_pairs(
     native_pairs = dict(native_pairs)
     if "separation" not in native_pairs:
         raise ValueError("Native-pair projection requires field 'separation'.")
-    native_pairs, frame_ids, source_pair_indices = _filter_native_pairs(native_pairs, frame_ids, contact_filter)
+    native_pairs, frame_ids, source_pair_indices = _filter_native_pairs(
+        native_pairs, frame_ids, contact_filter, fixed_body_slots
+    )
 
     if representation == CONTACT_REPRESENTATION_FLAT:
         if flat_capacity is None or flat_capacity <= 0:

@@ -43,6 +43,9 @@ class NeuralEnvAdapter:
         sensors = getattr(getattr(self.isaaclab_env, "cfg", None), "finger_object_normal_force_sensors", ())
         if sensors:
             self.manager.register_finger_force_scene(scene, sensors)
+        robot_sensor = getattr(getattr(self.isaaclab_env, "cfg", None), "robot_normal_force_sensor", None)
+        if robot_sensor:
+            self.manager.register_robot_normal_force_scene(scene, robot_sensor)
         if patch_reset:
             self.install_reset_patch()
 
@@ -81,17 +84,17 @@ class NeuralEnvAdapter:
     @property
     def model(self):
         """Active Newton model."""
-        return self.manager._model
+        return self.manager.backend.model
 
     @property
     def state(self):
         """Current Newton input state."""
-        return self.manager._state_0
+        return self.manager.backend.state_0
 
     @property
     def control(self):
         """Current Newton control buffer."""
-        return self.manager._control
+        return self.manager.backend.control
 
     @property
     def states_torch(self) -> torch.Tensor:
@@ -116,6 +119,9 @@ class NeuralEnvAdapter:
         publish_forces = getattr(self.manager, "publish_finger_forces", None)
         if callable(publish_forces):
             publish_forces(resetting=True)
+        publish_robot_forces = getattr(self.manager, "publish_robot_normal_forces", None)
+        if callable(publish_robot_forces):
+            publish_robot_forces(resetting=True)
 
     def reset(
         self,

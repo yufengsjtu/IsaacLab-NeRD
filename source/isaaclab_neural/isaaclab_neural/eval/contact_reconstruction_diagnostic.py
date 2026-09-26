@@ -28,6 +28,7 @@ from isaaclab_neural.data.datasets import validate_native_only_data_group
 from isaaclab_neural.data.native_contacts import (
     NativeContactProjection,
     read_and_project_frames,
+    read_contact_mobility,
     resolve_native_projection,
     validate_native_storage,
 )
@@ -120,7 +121,7 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--contact-filter",
-        choices=("none", "solver_active"),
+        choices=("none", "solver_active", "solver_active_movable"),
         default="none",
         help="Native-pair selection applied before contact packing.",
     )
@@ -210,6 +211,7 @@ def _resolve_diagnostic_native_projection(
     native_group = validate_native_storage(dataset_file, total_transitions)
     return resolve_native_projection(
         has_native_contacts=native_group is not None,
+        fixed_body_slots=read_contact_mobility(data_group, contact_filter),
         contact_representation=contact_representation,
         num_contacts_per_env=num_contacts_per_env,
         max_contact_tokens=max_contact_tokens,

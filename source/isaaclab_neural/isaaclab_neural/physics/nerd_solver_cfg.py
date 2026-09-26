@@ -64,7 +64,7 @@ ContactPackingPolicy = Literal[
 ContactRepresentation = Literal["flat", "contact_tokens"]
 """Contact encoding used by the trained neural model."""
 
-ContactFilter = Literal["none", "solver_active"]
+ContactFilter = Literal["none", "solver_active", "solver_active_movable"]
 """Selection applied to Newton native pairs before fixed-capacity packing."""
 
 ContactTokenFrame = Literal["root", "owner"]
@@ -138,7 +138,9 @@ class NerdSolverCfg(NewtonSolverCfg):
     """Contact selection applied before packing.
 
     ``"solver_active"`` keeps native pairs with negative signed surface
-    separation [m]. ``"none"`` preserves all collision candidates.
+    separation [m]. ``"solver_active_movable"`` also removes pairs where both
+    sides are immovable, using verified body mobility. ``"none"`` preserves all candidates.
+    These filters affect neural inputs, not native collision solving.
     """
 
     max_contact_tokens: int = 64
@@ -179,8 +181,10 @@ class NerdSolverCfg(NewtonSolverCfg):
         self.contact_mode = normalize_contact_mode(self.contact_mode)
         if self.num_contacts_per_env < 0:
             raise ValueError("num_contacts_per_env must be non-negative.")
-        if self.contact_filter not in {"none", "solver_active"}:
+        if self.contact_filter not in {"none", "solver_active", "solver_active_movable"}:
             raise ValueError(f"Unsupported contact_filter: {self.contact_filter!r}.")
+        if self.contact_filter == "solver_active_movable" and self.contact_representation != "contact_tokens":
+            raise ValueError("solver_active_movable requires contact-token representation.")
         if self.contact_token_frame not in {"root", "owner"}:
             raise ValueError(f"Unsupported contact_token_frame: {self.contact_token_frame!r}.")
         if self.contact_representation == "contact_tokens":

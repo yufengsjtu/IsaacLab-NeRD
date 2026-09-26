@@ -53,6 +53,8 @@ def save_checkpoint(path, model, robot_name, cfg, **training_state):
     }
     if getattr(model, "predict_finger_object_normal_forces", False):
         checkpoint["finger_object_force_contract"] = model.finger_object_force_contract
+    if getattr(model, "predict_robot_net_normal_forces", False):
+        checkpoint["robot_normal_force_contract"] = model.robot_normal_force_contract
     for key in [
         "optimizer_state_dict",
         "epoch",
@@ -109,6 +111,13 @@ def setup_rms_from_info(model, rms_info, device="cpu"):
         if tuple(shape) != (2, 3):
             raise ValueError("Filtered finger-force RMS must have shape [2, 3].")
         model.finger_object_normal_force_rms = RunningMeanStd(shape=tuple(shape), device=device)
+    if "robot_net_normal_force_rms" in rms_info:
+        from isaaclab_neural.contacts.keyboard_normal_force import BODY_NAMES
+
+        shape = tuple(rms_info["robot_net_normal_force_rms"])
+        if shape != (len(BODY_NAMES), 3):
+            raise ValueError("Robot normal-force RMS must have shape [7, 3].")
+        model.robot_net_normal_force_rms = RunningMeanStd(shape=shape, device=device)
 
 
 def reconstruct_model_from_checkpoint(checkpoint, neural_solver, device="cpu"):
@@ -125,6 +134,11 @@ def reconstruct_model_from_checkpoint(checkpoint, neural_solver, device="cpu"):
 
         if checkpoint.get("finger_object_force_contract") != MODEL_CONTRACT:
             raise ValueError("Checkpoint lacks the matching filtered finger normal-force contract.")
+    if cfg["network"].get("robot_net_normal_force_head", {}).get("enabled", False):
+        from isaaclab_neural.contacts.keyboard_normal_force import MODEL_CONTRACT as ROBOT_NORMAL_CONTRACT
+
+        if checkpoint.get("robot_normal_force_contract") != ROBOT_NORMAL_CONTRACT:
+            raise ValueError("Checkpoint lacks the matching robot normal-force contract.")
     input_sample = neural_solver.get_neural_model_inputs()
     output_dim = neural_solver.prediction_dim
     model = ModelMixedInput(

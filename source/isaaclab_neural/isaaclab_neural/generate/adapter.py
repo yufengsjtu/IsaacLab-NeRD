@@ -110,16 +110,25 @@ class NewtonDataGenerationBackend:
 
         self._manager = NewtonManager
         self.device = device
-        self.model = NewtonManager._model
-        self.state = NewtonManager._state_0
-        self.control = NewtonManager._control
-        if self.model is None or self.state is None or self.control is None:
+        backend = NewtonManager.backend
+        if backend is None or backend.model is None or backend.state_0 is None or backend.control is None:
             raise RuntimeError("NewtonManager is not initialized. Create the env inside launch_simulation() first.")
+        self.model = backend.model
+        self.state = backend.state_0
+        self.control = backend.control
 
     @property
     def native_contacts(self):
         """Return Newton native contacts."""
         return self._manager._contacts
+
+    @property
+    def mjwarp_data(self) -> Any:
+        """Return the active MJWarp solver buffers for recording and restoring replay state."""
+        data = getattr(getattr(self._manager, "_solver"), "mjw_data", None)
+        if data is None:
+            raise RuntimeError("MJWarp replay requires an active solver exposing mjw_data.")
+        return data
 
     def collide_native_contacts(self):
         """Refresh and return Newton native contacts."""

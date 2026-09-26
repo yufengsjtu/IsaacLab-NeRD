@@ -27,6 +27,89 @@ def _write_source_package(project_root: Path, name: str, marker: str) -> Path:
     return package_root
 
 
+@pytest.mark.parametrize("operation", ["_load_or_create_dataset", "_replace_dataset"])
+def test_nvdataset_service_errors_do_not_trigger_writes(monkeypatch, operation):
+    from types import SimpleNamespace
+
+    monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
+    from lib import nvdataset_io
+
+    def fail(**kwargs):
+        raise RuntimeError("400 sdk_version_not_supported")
+
+    client = SimpleNamespace(
+        load_dataset=fail, create_and_load_dataset=lambda **kwargs: pytest.fail("unexpected write")
+    )
+    with pytest.raises(RuntimeError, match="sdk_version_not_supported"):
+        getattr(nvdataset_io, operation)(client, "test")
+
+
+def test_nvdataset_existing_code_requires_explicit_replace(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
+    from lib import nvdataset_io
+
+    client = SimpleNamespace(
+        load_dataset=lambda **kwargs: SimpleNamespace(id="existing"),
+        force_delete_dataset=lambda **kwargs: pytest.fail("unexpected deletion"),
+    )
+    with pytest.raises(FileExistsError):
+        nvdataset_io._replace_dataset(client, "existing")
+
+
+def test_nvdataset_exact_missing_name_can_be_created(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
+    from lib import nvdataset_io
+
+    def missing(**kwargs):
+        raise ValueError("Did not find dataset", kwargs["name"])
+
+    client = SimpleNamespace(load_dataset=missing, create_and_load_dataset=lambda **kwargs: kwargs["name"])
+    assert nvdataset_io._load_or_create_dataset(client, "new") == "new"
+
+
+def test_entrypoint_uses_preinstalled_nvdataset_without_online_pip():
+    text = (OSMO_SCRIPTS / "entrypoint.sh").read_text()
+    install = text.split("install_storage_deps()", 1)[1].split("upload_storage_output()", 1)[0]
+    nvdataset = install.split("nvdataset)", 1)[1].split(";;", 1)[0]
+    assert "/opt/nvdataset-venv/bin/python" in nvdataset
+    assert "pip install" not in nvdataset
+
+
+def test_nvdataset_sdk_version_is_checked_without_service_calls(monkeypatch):
+    monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
+    from lib import nvdataset_io
+
+    monkeypatch.setattr(nvdataset_io, "version", lambda name: "0.93.0")
+    with pytest.raises(RuntimeError, match="0.95.0"):
+        nvdataset_io._check_sdk_version()
+    monkeypatch.setattr(nvdataset_io, "version", lambda name: "0.95.0")
+    assert nvdataset_io._check_sdk_version() == "0.95.0"
+
+
+def test_nvdataset_delegate_isolates_simulator_python_paths(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
+    from lib import nvdataset_io
+
+    interpreter = tmp_path / "bin/python"
+    interpreter.parent.mkdir()
+    interpreter.write_text("test-interpreter")
+    monkeypatch.setenv("NVDATASET_PYTHON", str(interpreter))
+    monkeypatch.setenv("PYTHONPATH", "/simulator/python")
+    monkeypatch.setenv("PYTHONHOME", "/simulator/home")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/simulator/libs")
+    calls = []
+    monkeypatch.setattr(nvdataset_io.subprocess, "run", lambda command, **kwargs: calls.append((command, kwargs)))
+    assert nvdataset_io._delegate(["check"])
+    command, kwargs = calls[0]
+    assert command[0] == str(interpreter) and command[-1] == "check"
+    assert not {"PYTHONPATH", "PYTHONHOME", "LD_LIBRARY_PATH"} & kwargs["env"].keys()
+    assert kwargs["check"]
+
+
 def test_core_submodule_order_matches_install_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.syspath_prepend(str(OSMO_SCRIPTS))
     from lib.local_isaaclab import CORE_ISAACLAB_SUBMODULES as osmo_core

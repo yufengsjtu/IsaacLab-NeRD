@@ -81,6 +81,103 @@ def write_rollouts_to_hdf5(
         _write_body_net_contact_force_body_names(data_group, body_net_contact_force_body_names)
 
 
+def create_virtual_trajectory_dataset(dataset_path: str | Path, sources: Sequence[str | Path]) -> None:
+    """Concatenate bounded trajectory files without copying dense tensors or native contact pairs.
+
+    Sources must be immutable sibling files. Relative virtual links remain portable
+    when the complete bundle is relocated. CSR offsets are rebased in bounded chunks.
+    Replay timelines are intentionally not combined; replay each original recording.
+
+    Args:
+        dataset_path: New output path; existing files are never overwritten.
+        sources: Immutable sibling HDF5 trajectory files, in concatenation order.
+    """
+    target = Path(dataset_path).resolve()
+    paths = [Path(source).resolve() for source in sources]
+    if target.exists():
+        raise FileExistsError(target)
+    if (
+        not paths
+        or len(set(paths)) != len(paths)
+        or any(path.parent != target.parent or path == target for path in paths)
+    ):
+        raise ValueError("Virtual trajectory sources must be distinct sibling files.")
+    groups = ("data", "context/trajectories", "contacts/native_pairs")
+    schemas: dict[str, tuple[tuple[int, ...], np.dtype]] = {}
+    sizes: dict[str, list[int]] = {}
+    attributes: dict[str, dict] = {}
+    frame_counts, pair_counts = [], []
+    for index, path in enumerate(paths):
+        with h5py.File(path, "r") as file:
+            names = set()
+            for group_name in groups:
+                group = file[group_name]
+                if not isinstance(group, h5py.Group):
+                    raise ValueError(f"Expected an HDF5 group at {group_name}.")
+                if index == 0:
+                    attributes[group_name] = dict(group.attrs)
+                for name, data in group.items():
+                    full_name = f"{group_name}/{name}"
+                    if full_name == "contacts/native_pairs/frame_offsets":
+                        continue
+                    if not isinstance(data, h5py.Dataset) or data.ndim == 0:
+                        raise ValueError(f"Expected a leading-dimension dataset at {full_name}.")
+                    signature = (data.shape[1:], data.dtype)
+                    if index == 0:
+                        schemas[full_name] = signature
+                        sizes[full_name] = []
+                    if schemas.get(full_name) != signature:
+                        raise ValueError(f"Incompatible virtual source field: {full_name}.")
+                    names.add(full_name)
+                    sizes[full_name].append(data.shape[0])
+            if names != schemas.keys():
+                raise ValueError("Virtual source fields differ.")
+            states = file["data/states"]
+            offsets = file["contacts/native_pairs/frame_offsets"]
+            world_ids = file["contacts/native_pairs/world_ids"]
+            if not isinstance(states, h5py.Dataset) or states.ndim != 3:
+                raise ValueError("Expected a three-dimensional states dataset.")
+            if not isinstance(offsets, h5py.Dataset) or not isinstance(world_ids, h5py.Dataset):
+                raise ValueError("Expected native CSR offsets and world ID datasets.")
+            frames = states.shape[0] * states.shape[1]
+            pairs = world_ids.shape[0]
+            if (
+                offsets.shape != (frames + 1,)
+                or offsets.dtype != np.dtype("int64")
+                or offsets[0] != 0
+                or offsets[-1] != pairs
+            ):
+                raise ValueError("Invalid native CSR source offsets.")
+            frame_counts.append(frames)
+            pair_counts.append(pairs)
+    with h5py.File(target, "x", libver="latest") as output:
+        for name, attrs in attributes.items():
+            output.require_group(name).attrs.update(attrs)
+        for name, (tail, dtype) in schemas.items():
+            layout = h5py.VirtualLayout(shape=(sum(sizes[name]), *tail), dtype=dtype)
+            start = 0
+            for path, size in zip(paths, sizes[name]):
+                if size:
+                    layout[start : start + size] = h5py.VirtualSource(path.name, name, shape=(size, *tail))
+                start += size
+            output.create_virtual_dataset(name, layout)
+        offsets = output.require_group("contacts/native_pairs").create_dataset(
+            "frame_offsets", shape=(sum(frame_counts) + 1,), dtype="int64", chunks=True
+        )
+        frame_base = pair_base = 0
+        for path, frames, pairs in zip(paths, frame_counts, pair_counts):
+            with h5py.File(path, "r") as source:
+                original = cast(h5py.Dataset, source["contacts/native_pairs/frame_offsets"])
+                for start in range(0, frames, 65536):
+                    stop = min(start + 65536, frames)
+                    offsets[frame_base + start : frame_base + stop] = original[start:stop] + pair_base
+            frame_base += frames
+            pair_base += pairs
+        offsets[-1] = pair_base
+        _update_metadata(cast(h5py.Group, output["data"]))
+        _update_native_metadata(output, True)
+
+
 def append_rollouts_to_hdf5(
     dataset_path: str | Path,
     rollouts: Mapping,
@@ -139,7 +236,7 @@ def append_rollouts_to_hdf5(
         else:
             _validate_body_net_contact_force_body_names(data_group, body_net_contact_force_body_names)
             trajectory_group = (
-                cast(h5py.Group, dataset_file["context"]["trajectories"]) if "context" in dataset_file else None
+                cast(h5py.Group, dataset_file["context/trajectories"]) if "context" in dataset_file else None
             )
             _append_arrays_atomically(
                 data_group,
@@ -374,7 +471,7 @@ def _validate_context_target(
     """Validate global and per-trajectory context before appending."""
     if is_new:
         return
-    if "context" not in dataset_file or "trajectories" not in dataset_file["context"]:
+    if "context/trajectories" not in dataset_file:
         if trajectory_context or terrain_context is not None:
             raise ValueError("Existing dataset has no context groups.")
         return
@@ -484,7 +581,7 @@ def _validate_native_append_target(
     """Validate native-pair schema compatibility before append mutation."""
     if is_new:
         return
-    has_native_group = "contacts" in dataset_file and "native_pairs" in dataset_file["contacts"]
+    has_native_group = "contacts/native_pairs" in dataset_file
     if has_native_group != (native_contacts is not None):
         raise ValueError("Native-contact storage presence does not match the existing dataset.")
     if not has_native_group:
@@ -495,7 +592,7 @@ def _validate_native_append_target(
         "contact_storage_schema": NATIVE_CONTACT_STORAGE_SCHEMA,
         "contact_frame": NATIVE_CONTACT_FRAME,
     }
-    native_group = cast(h5py.Group, dataset_file["contacts"]["native_pairs"])
+    native_group = cast(h5py.Group, dataset_file["contacts/native_pairs"])
     metadata_owners = {
         "/": dataset_file.attrs,
         "/data": data_group.attrs,
@@ -509,7 +606,10 @@ def _validate_native_append_target(
     }
     if mismatched:
         raise ValueError(f"Cannot append native contacts with incompatible metadata: {mismatched}.")
-    expected_frames = int(data_group.attrs["total_transitions"])
+    total_transitions = data_group.attrs["total_transitions"]
+    if not isinstance(total_transitions, (int, np.integer)):
+        raise ValueError("Expected integer total_transitions metadata.")
+    expected_frames = int(total_transitions)
     validate_native_group(native_group, expected_frames)
     assert native_contacts is not None
     _offsets, arrays = native_contacts
@@ -536,7 +636,7 @@ def _update_native_metadata(dataset_file: h5py.File, has_native_contacts: bool) 
     for name, value in attrs.items():
         data_group.attrs[name] = value
         dataset_file.attrs[name] = value
-        cast(h5py.Group, dataset_file["contacts"]["native_pairs"]).attrs[name] = value
+        cast(h5py.Group, dataset_file["contacts/native_pairs"]).attrs[name] = value
 
 
 def _append_arrays_atomically(
@@ -569,7 +669,7 @@ def _append_arrays_atomically(
             dataset[old_count : old_count + append_count] = data
         if native_contacts is not None:
             new_offsets, native_arrays = native_contacts
-            native_group = cast(h5py.Group, dataset_file["contacts"]["native_pairs"])
+            native_group = cast(h5py.Group, dataset_file["contacts/native_pairs"])
             offsets_dataset = cast(h5py.Dataset, native_group["frame_offsets"])
             old_offset_count = offsets_dataset.shape[0]
             old_pair_count = int(offsets_dataset[-1])

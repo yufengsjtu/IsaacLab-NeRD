@@ -93,6 +93,1061 @@ def test_franka_policy_mixed_comparisons_share_training_contracts() -> None:
             assert p["require_finger_object_normal_forces"] and m["require_finger_object_normal_forces"]
 
 
+@pytest.mark.parametrize("cache_mode", ["off", "auto"])
+def test_training_only_cannot_fall_back_to_generation(tmp_path, monkeypatch, cache_mode):
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import run_experiment
+
+    exp = {
+        "training_only": True,
+        "env_name": "test",
+        "data_gen_num_envs": 8,
+        "train_num_envs": 8,
+        "train_cfg": "unused",
+        "dataset_specs": [{"filename": "missing.hdf5", "seed": 42}],
+    }
+    monkeypatch.setattr(run_experiment, "load_preset", lambda *args: {"experiment": exp})
+    monkeypatch.setattr(run_experiment, "generate_all_datasets", lambda *args: pytest.fail("must not generate"))
+    args = Namespace(
+        preset="test",
+        preset_file=None,
+        output_root=str(tmp_path),
+        dataset_dir=str(tmp_path / "cache"),
+        workflow_base_name="test",
+        dataset_subdir="test",
+        dataset_cache_mode=cache_mode,
+        dataset_input_path="",
+    )
+    with pytest.raises(ValueError, match="training-only"):
+        run_experiment.run(args)
+
+
+def test_keyboard_generator_rejects_generic_collector(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from run_experiment import build_dataset_args, parse_dataset_specs
+
+    exp = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique_smoke.yaml")["experiment"]
+    with pytest.raises(ValueError, match="bounded Keyboard dataset profile"):
+        build_dataset_args(exp, parse_dataset_specs(exp)[0], tmp_path)
+
+
+@pytest.mark.parametrize("nucleus", [None, "test-nucleus-override"])
+def test_keyboard_render_is_local_and_gpu_allocation_matches_runtime(tmp_path, monkeypatch, nucleus):
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.preset import render_workflow
+
+    args = Namespace(
+        preset="so101_keyboard_resident_unique_smoke",
+        preset_file=None,
+        run_id="test",
+        workflow_name=None,
+        dataset_subdir=None,
+        num_gpu="4",
+        num_cpu=None,
+        memory=None,
+        storage=None,
+        platform=None,
+        image=None,
+        train_cfg_overrides="algorithm.num_epochs 3",
+        nucleus_credential=nucleus,
+        workflow_file=str(REPOSITORY_ROOT / "osmo_scripts/osmo_workflow.yaml"),
+        output=str(tmp_path / "job.yaml"),
+    )
+    render_workflow(args)
+    workflow = _load_yaml(Path(args.output))["workflow"]
+    assert workflow["resources"]["default"]["gpu"] == 4
+    task = workflow["tasks"][0]
+    assert task["environment"]["NERD_NUM_GPUS"] == "4"
+    assert task["environment"]["DATASET_CACHE_MODE"] == "auto"
+    assert task["environment"]["TRAIN_CFG_OVERRIDES"] == "algorithm.num_epochs 3"
+    assert "WANDB_API_KEY" not in task["environment"]
+    preset = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique_smoke.yaml")
+    expected_nucleus = nucleus or preset["workflow"]["nucleus_credential"]
+    assert task["credentials"][expected_nucleus] == {"OMNI_USER": "omni_user", "OMNI_PASS": "omni_pass"}
+    assert "OMNI_PASS" not in task["environment"]
+    assert all(Path(entry["localpath"]).is_file() for entry in task["files"])
+    with pytest.raises(FileExistsError):
+        render_workflow(args)
+
+
+def test_keyboard_training_command_uses_explicit_process_count(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import run_experiment
+
+    calls = []
+    monkeypatch.setattr(run_experiment.subprocess, "run", lambda command, **kwargs: calls.append(command))
+    exp = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique_smoke.yaml")["experiment"]
+    exp["num_gpus"] = 4
+    run_experiment.run_training(exp, tmp_path, Namespace(enable_wandb=False))
+    command = calls[0]
+    assert command[command.index("--nproc_per_node") + 1] == "4"
+    assert command[command.index("--eval-interval") + 1] == "0"
+    assert "--no-time-stamp" in command and "--skip-check-log-override" not in command
+
+
+def test_keyboard_runtime_config_rebases_files_and_records_window_sampling(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import isaaclab_neural.data.transition_index as transition_index
+    import lib.keyboard_data
+    import run_experiment
+
+    monkeypatch.setattr(lib.keyboard_data, "validate_dataset_scale", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        transition_index,
+        "build_transition_index",
+        lambda path, *, window_sampling="canonical", **kwargs: SimpleNamespace(
+            stats={"window_sampling": window_sampling}
+        ),
+    )
+    exp = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique_smoke.yaml")["experiment"]
+    source = REPOSITORY_ROOT / exp["train_cfg"]
+    original = source.read_bytes()
+    exp["train_cfg"] = str(source)
+    cache = tmp_path / "cache"
+    run_experiment.prepare_training_only_config(exp, cache, tmp_path, "algorithm.num_epochs 3")
+    cfg = _load_yaml(Path(exp["train_cfg"]))
+    assert cfg["algorithm"]["num_epochs"] == 3 and cfg["algorithm"]["num_iters_per_epoch"] == 2
+    assert all(Path(item["path"]).parent == cache for item in cfg["algorithm"]["dataset"]["train_datasets"].values())
+    assert source.read_bytes() == original
+    contract = cfg["dataset_capacity_contract"]
+    assert contract and all(stats["window_sampling"] == "sliding" for stats in contract.values())
+
+
+@pytest.mark.parametrize("tamper", ["data", "receipt"])
+def test_keyboard_bundle_rejects_changed_bytes_before_loading(tmp_path, monkeypatch, tamper):
+    import json
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.keyboard_data import MANIFEST, SCHEMA, file_sha256, validate_bundle
+
+    data = tmp_path / "sample.hdf5"
+    receipt = tmp_path / "sample.hdf5.replay.json"
+    data.write_bytes(b"original")
+    receipt.write_text("{}")
+    manifest = {
+        "schema": SCHEMA,
+        "files": {data.name: {"sha256": file_sha256(data), "replay_sha256": file_sha256(receipt)}},
+    }
+    (tmp_path / MANIFEST).write_text(json.dumps(manifest))
+    (data if tamper == "data" else receipt).write_bytes(b"changed")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        validate_bundle(tmp_path, {"dataset_specs": [{"filename": data.name, "split": "train", "seed": 42}]})
+
+
+def test_keyboard_config_and_presets_are_packaged_without_logs(monkeypatch):
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.package_code import collect_packaged_files
+
+    files = {path.as_posix() for path in collect_packaged_files(REPOSITORY_ROOT)}
+    assert "osmo_scripts/presets/so101_keyboard_resident_unique.yaml" in files
+    assert "osmo_scripts/presets/so101_keyboard_resident_unique_smoke.yaml" in files
+    assert "source/isaaclab_neural/isaaclab_neural/train/cfg/SO101/transformer_keyboard_throughput.yaml" in files
+    assert "osmo_scripts/lib/keyboard_data.py" in files
+    assert not any(path.startswith("logs/") for path in files)
+
+
+def test_keyboard_runtime_version_mismatch_is_not_silently_accepted(monkeypatch):
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib import keyboard_data
+
+    monkeypatch.setattr(keyboard_data, "version", lambda name: "wrong-version")
+    with pytest.raises(RuntimeError, match="matching image"):
+        keyboard_data.validate_runtime({"runtime_versions": {"newton": "1.6.0"}})
+
+
+def test_keyboard_recipe_is_fixed_owner_frame_and_matches_franka_training_scale():
+    preset = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique.yaml")
+    reference = _load_yaml(PRESET_DIR / "franka_lift_mixed.yaml")
+    exp = preset["experiment"]
+    cfg = _load_yaml(REPOSITORY_ROOT / exp["train_cfg"])
+    franka = _load_yaml(REPOSITORY_ROOT / reference["experiment"]["train_cfg"])
+    assert exp["env_name"] == cfg["env"]["env_name"] == "SO101-Keyboard-Fixed"
+    assert exp["train_task"] == "IsaacContrib-Keyboard-SO101-NeRD"
+    assert cfg["env"]["keyboard_variant"] == 0
+    assert cfg["inputs"]["low_dim"] == ["states_embedding", "joint_f", "gravity_dir"]
+    solver = cfg["env"]["neural_solver_cfg"]
+    assert not {"model_context_fields", "include_articulation_context"} & set(solver)
+    assert solver["contact_token_frame"] == exp["contact_token_frame"] == "owner"
+    assert exp["dataset_profile"] == "so101_keyboard" and not exp["training_only"]
+    assert all("variant_ids" not in spec for spec in exp["dataset_specs"])
+    for key in (
+        "num_epochs",
+        "num_iters_per_epoch",
+        "batch_size",
+        "sample_sequence_length",
+        "num_valid_batches",
+        "grad_norm",
+    ):
+        assert cfg["algorithm"][key] == franka["algorithm"][key]
+    for key in ("lr_start", "lr_end"):
+        assert float(cfg["algorithm"]["optimizer"][key]) == float(franka["algorithm"]["optimizer"][key])
+    for key in ("type", "weight_decay", "lr_schedule", "betas"):
+        assert cfg["algorithm"]["optimizer"][key] == franka["algorithm"]["optimizer"][key]
+    assert cfg["network"]["transformer"] == franka["network"]["transformer"]
+    for key in ("encoder_type", "body_latent_dim", "hidden_dim"):
+        assert cfg["inputs"]["contact_set"][key] == franka["inputs"]["contact_set"][key]
+    assert solver["num_states_history"] == cfg["algorithm"]["sample_sequence_length"] == 10
+    assert cfg["env"]["num_envs"] == exp["train_num_envs"] == 8
+    assert cfg["algorithm"]["dataset"]["load_mode"] == "lazy"
+    assert exp["minimum_unique_transitions"] == {"train": 10_000_000, "valid": 3_000_000}
+    for split, minimum in exp["minimum_unique_transitions"].items():
+        specs = [item for item in exp["dataset_specs"] if item["split"] == split]
+        assert sum(item["num_transitions"] for item in specs) == minimum
+
+
+def test_keyboard_model_forward_backward_on_cpu():
+    import copy
+
+    import torch
+    from isaaclab_neural.models.models import ModelMixedInput
+
+    preset = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique.yaml")
+    cfg = _load_yaml(REPOSITORY_ROOT / preset["experiment"]["train_cfg"])
+    network = copy.deepcopy(cfg["network"])
+    network["normalize_input"] = network["normalize_output"] = False
+    sample = {
+        key: torch.zeros(2, 10, width)
+        for key, width in {"states_embedding": 228, "joint_f": 114, "gravity_dir": 3}.items()
+    }
+    sample["contact_tokens"] = torch.zeros(2, 10, 128, 17)
+    model = ModelMixedInput(sample, 228, cfg["inputs"], network, num_bodies=116, device="cpu")
+    output = model(sample, return_aux=True)
+    assert output.state_prediction.shape == (2, 10, 228)
+    assert output.auxiliary_predictions["robot_net_normal_forces_w"].shape == (2, 10, 7, 3)
+    loss = output.state_prediction.square().mean() + sum(
+        value.square().mean() for value in output.auxiliary_predictions.values()
+    )
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert all(torch.isfinite(parameter.grad).all() for parameter in model.parameters() if parameter.grad is not None)
+
+
+def test_keyboard_large_scale_gate_counts_unique_source_frames(tmp_path, monkeypatch):
+    import h5py
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.keyboard_data import unique_transition_count, validate_dataset_scale
+
+    path = tmp_path / "overlapping.hdf5"
+    with h5py.File(path, "w") as file:
+        file.create_dataset("data/states", shape=(4, 64, 228))
+        file.create_dataset("replay/frames/states", shape=(2, 128, 228))
+        file.create_dataset("context/trajectories/source_env_id", data=[0, 0, 0, 1])
+        file.create_dataset("context/trajectories/source_start_frame", data=[0, 32, 64, 0])
+    assert unique_transition_count(path) == 192
+    exp = {
+        "minimum_unique_transitions": {"train": 193},
+        "dataset_specs": [{"filename": path.name, "split": "train", "num_transitions": 0}],
+    }
+    with pytest.raises(ValueError, match="unique"):
+        validate_dataset_scale(tmp_path, exp)
+    exp["minimum_unique_transitions"]["train"] = 192
+    assert validate_dataset_scale(tmp_path, exp) == {"train": 192}
+    with pytest.raises(ValueError, match="unique"):
+        validate_dataset_scale(tmp_path, exp, max_capacity=128)
+    with pytest.raises(ValueError, match="unique"):
+        validate_dataset_scale(tmp_path, exp, source_capacities={path.name: 128})
+    exp["dataset_specs"][0]["num_transitions"] = 193
+    with pytest.raises(ValueError, match="unique"):
+        validate_dataset_scale(tmp_path, exp)
+
+
+def test_keyboard_scale_gate_rejects_wrong_collection_mode(tmp_path, monkeypatch):
+    import json
+
+    import h5py
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.keyboard_data import validate_dataset_scale
+
+    path = tmp_path / "data.hdf5"
+    with h5py.File(path, "w") as file:
+        file.create_dataset("data/states", shape=(1, 64, 228))
+        file.create_dataset("replay/frames/states", shape=(1, 64, 228))
+        file.create_dataset("context/trajectories/source_env_id", data=[0])
+        file.create_dataset("context/trajectories/source_start_frame", data=[0])
+    exp = {
+        "minimum_unique_transitions": {"train": 64},
+        "collection_mode": "policy",
+        "dataset_specs": [{"filename": path.name, "split": "train", "num_transitions": 64}],
+    }
+    for mode in ("script", "policy"):
+        with h5py.File(path, "a") as file:
+            file["data"].attrs["keyboard_contract"] = json.dumps({"collection_mode": mode})
+        if mode == "script":
+            with pytest.raises(ValueError, match="collection"):
+                validate_dataset_scale(tmp_path, exp)
+        else:
+            assert validate_dataset_scale(tmp_path, exp) == {"train": 64}
+
+
+def test_virtual_trajectory_view_preserves_rows_and_csr_offsets(tmp_path):
+    import h5py
+    import numpy as np
+    from isaaclab_neural.data.hdf5 import create_virtual_trajectory_dataset
+
+    sources = []
+    for index in range(2):
+        path = tmp_path / f"part{index}.hdf5"
+        with h5py.File(path, "w") as file:
+            for key in ("states", "next_states", "joint_f"):
+                file.create_dataset("data/" + key, data=np.full((1, 2, 3), index, dtype="float32"))
+            file["data"].attrs.update(mode="trajectory", env="test")
+            file.create_dataset("context/trajectories/source_env_id", data=[index])
+            file.create_dataset("contacts/native_pairs/frame_offsets", data=[0, 1, 1])
+            file.create_dataset("contacts/native_pairs/world_ids", data=[index])
+        sources.append(path)
+    target = tmp_path / "view.hdf5"
+    create_virtual_trajectory_dataset(target, sources)
+    with h5py.File(target, "r") as file:
+        states = file["data/states"]
+        frame_offsets = file["contacts/native_pairs/frame_offsets"]
+        world_ids = file["contacts/native_pairs/world_ids"]
+        assert isinstance(states, h5py.Dataset)
+        assert isinstance(frame_offsets, h5py.Dataset)
+        assert isinstance(world_ids, h5py.Dataset)
+        assert states.is_virtual
+        assert states.shape == (2, 2, 3)
+        assert states[:, 0, 0].tolist() == [0, 1]
+        assert frame_offsets[()].tolist() == [0, 1, 1, 2, 2]
+        assert world_ids[()].tolist() == [0, 1]
+        assert file["data"].attrs["total_transitions"] == 4
+        assert all(Path(link.file_name).name == link.file_name for link in states.virtual_sources())
+    with pytest.raises(FileExistsError):
+        create_virtual_trajectory_dataset(target, sources)
+    import shutil
+
+    relocated = tmp_path / "relocated"
+    relocated.mkdir()
+    for path in [target, *sources]:
+        shutil.copy2(path, relocated / path.name)
+    for path in sources:
+        path.unlink()
+    with h5py.File(relocated / target.name, "r") as file:
+        states = file["data/states"]
+        world_ids = file["contacts/native_pairs/world_ids"]
+        assert isinstance(states, h5py.Dataset)
+        assert isinstance(world_ids, h5py.Dataset)
+        assert states[:, 0, 0].tolist() == [0, 1]
+        assert world_ids[()].tolist() == [0, 1]
+
+
+@pytest.mark.parametrize(
+    "mode,cached,failure",
+    [("auto", False, False), ("auto", True, False), ("require", False, False), ("auto", False, True)],
+)
+def test_keyboard_pipeline_stage_order_and_fail_closed(tmp_path, monkeypatch, mode, cached, failure):
+    import json
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import run_experiment
+    import torch
+    from lib import keyboard_data
+
+    preset = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique_smoke.yaml")
+    calls = []
+    monkeypatch.setattr(keyboard_data, "validate_runtime", lambda exp: {})
+    monkeypatch.setattr(keyboard_data, "collection_plan", lambda exp: {"policy_sha256": "test"})
+    monkeypatch.setattr(keyboard_data, "validate_bundle", lambda *args: {})
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(run_experiment, "dataset_cache_complete", lambda *args: True)
+    local = tmp_path / "data" / preset["experiment"]["env_name"]
+    if cached:
+        local.mkdir(parents=True)
+        (local / keyboard_data.MANIFEST).write_text("{}")
+
+    def generate(*args):
+        calls.append("collect/replay")
+        if failure:
+            raise RuntimeError("replay failed")
+
+    monkeypatch.setattr(run_experiment, "generate_all_datasets", generate)
+    monkeypatch.setattr(run_experiment, "prepare_training_only_config", lambda *args: calls.append("config"))
+    monkeypatch.setattr(run_experiment, "stage_generated_datasets", lambda **kwargs: calls.append("publish"))
+    monkeypatch.setattr(run_experiment, "run_training", lambda *args: calls.append("train"))
+    monkeypatch.setattr(run_experiment, "evaluate_keyboard_checkpoint", lambda *args: calls.append("evaluate"))
+    args = Namespace(
+        output_root=str(tmp_path),
+        dataset_dir=str(tmp_path / "data"),
+        dataset_cache_mode=mode,
+        dataset_input_path="",
+        dataset_subdir="test",
+        storage_backend="nvdataset",
+        swift_data_container="",
+        nvdataset_data_dataset="",
+        nvdataset_data_description="test",
+        no_tensorboard=True,
+    )
+    if failure or mode == "require":
+        with pytest.raises(RuntimeError):
+            run_experiment.run_keyboard_pipeline(args, preset)
+        assert "publish" not in calls and "train" not in calls
+    else:
+        run_experiment.run_keyboard_pipeline(args, preset)
+        assert calls == (
+            ["config", "train", "evaluate"] if cached else ["collect/replay", "config", "publish", "train", "evaluate"]
+        )
+    status = json.loads((tmp_path / "pipeline_status.json").read_text())
+    assert not status["task_fidelity_accepted"]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_keyboard_parallel_collection_isolates_devices_and_gates_manifest(tmp_path, monkeypatch, failure):
+    import json
+    import threading
+    import time
+
+    import h5py
+    import isaaclab_neural.data.hdf5 as hdf5_data
+    import isaaclab_neural.data.keyboard as keyboard_schema
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib import keyboard_data
+
+    checkpoint = tmp_path / "policy.pt"
+    checkpoint.write_bytes(b"policy")
+    exp = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique_smoke.yaml")["experiment"]
+    exp["collection"].update(
+        checkpoint=str(checkpoint), gpu_indices=[0, 1], max_chunks_per_group=8, persistent_workers=False
+    )
+    for spec in exp["dataset_specs"]:
+        spec["num_transitions"] = 3
+    monkeypatch.setattr(
+        keyboard_data,
+        "_collection_device_envs",
+        lambda plan: [{"CUDA_VISIBLE_DEVICES": "GPU-a"}, {"CUDA_VISIBLE_DEVICES": "GPU-b"}],
+    )
+    lock, barrier = threading.Lock(), threading.Barrier(2, timeout=5)
+    busy, calls, peaks = set(), [], []
+
+    def collect(experiment, collection, spec, index, root, diagnostics, env):
+        gpu = env["CUDA_VISIBLE_DEVICES"]
+        with lock:
+            assert gpu not in busy
+            busy.add(gpu)
+            peaks.append(len(busy))
+            calls.append((spec["filename"], index, gpu))
+        try:
+            if index == 0:
+                barrier.wait()
+            if failure and spec["split"] == "valid":
+                raise RuntimeError("replay failed")
+            time.sleep(0.01)
+            part = f"{Path(spec['filename']).stem}.part{index:05d}.hdf5"
+            (root / part).write_bytes(b"verified")
+            record = {
+                "sha256": keyboard_data.file_sha256(root / part),
+                "collect_sha256": "test",
+                "validation_mode": "basic",
+                "replay_performed": False,
+            }
+            return part, record, 1
+        finally:
+            with lock:
+                busy.remove(gpu)
+
+    def create_view(path, parts):
+        with h5py.File(path, "w") as file:
+            file.create_group("data")
+
+    monkeypatch.setattr(keyboard_data, "_collect_part", collect)
+    monkeypatch.setattr(hdf5_data, "create_virtual_trajectory_dataset", create_view)
+    monkeypatch.setattr(keyboard_schema, "read_keyboard_metadata", lambda path: {})
+    monkeypatch.setattr(keyboard_data, "validate_bundle", lambda *args: {})
+    root = tmp_path / "data"
+    if failure:
+        with pytest.raises(RuntimeError, match="replay failed"):
+            keyboard_data.collect_and_validate(exp, root, tmp_path / "output")
+        assert not (root / keyboard_data.MANIFEST).exists()
+    else:
+        keyboard_data.collect_and_validate(exp, root, tmp_path / "output")
+        manifest = json.loads((root / keyboard_data.MANIFEST).read_text())
+        assert set(manifest["groups"]) == {s["filename"] for s in exp["dataset_specs"]}
+        for name, parts in manifest["groups"].items():
+            assert len(parts) >= 3
+            assert parts == [f"{Path(name).stem}.part{i:05d}.hdf5" for i in range(len(parts))]
+    assert max(peaks) == 2 and not busy
+    assert len({(name, index) for name, index, gpu in calls}) == len(calls)
+
+
+@pytest.mark.parametrize("mode", ["full_replay", "basic"])
+@pytest.mark.parametrize("tamper", [None, "data", "receipt", "acceptance", "plan", "path", "mode"])
+def test_keyboard_partial_recovery_is_hash_bound_and_not_training_ready(tmp_path, monkeypatch, tamper, mode):
+    import json
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib import keyboard_data
+
+    exp = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique.yaml")["experiment"]
+    checkpoint = tmp_path / "policy.pt"
+    checkpoint.write_bytes(b"policy")
+    exp["collection"]["checkpoint"] = str(checkpoint)
+    if mode == "full_replay":
+        exp["data_gen_num_envs"] = 8
+        exp["collection"]["persistent_workers"] = False
+    spec = exp["dataset_specs"][0]
+    part = f"{Path(spec['filename']).stem}.part00000.hdf5"
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / part).write_bytes(b"immutable data")
+    exp["collection"]["validation_mode"] = mode
+    exp["require_keyboard_replay"] = mode == "full_replay"
+    collection = keyboard_data.collection_plan(exp)
+    suffix = ".collect.json" if mode == "basic" else ".replay.json"
+    receipt_key = "collect_sha256" if mode == "basic" else "replay_sha256"
+    (source / (part + suffix)).write_text('{"passed": true}')
+    record = {
+        "sha256": keyboard_data.file_sha256(source / part),
+        receipt_key: keyboard_data.file_sha256(source / (part + suffix)),
+        "collection": keyboard_data._part_signature(exp, collection, spec, 0),
+    }
+    (source / (part + ".accepted.json")).write_text(json.dumps(record))
+    (source / part.replace("00000", "00001")).write_bytes(b"unverified in-flight chunk")
+    validated = []
+    monkeypatch.setattr(
+        keyboard_data,
+        "validate_recordings",
+        lambda root, experiment, records, complete: validated.append((set(records), complete)),
+    )
+    export = tmp_path / "export"
+    manifest = keyboard_data.export_collection_resume(source, export, exp)
+    assert set(manifest["files"]) == {part}
+    assert not manifest["training_ready"] and not (export / keyboard_data.MANIFEST).exists()
+    assert not (export / part.replace("00000", "00001")).exists()
+    assert validated and all(not complete for _, complete in validated)
+    exp["collection"].update(gpu_indices=[0, 1], resume_from_input=True)
+    if tamper in {"data", "receipt", "acceptance"}:
+        suffix = {"data": "", "receipt": suffix, "acceptance": ".accepted.json"}[tamper]
+        (export / (part + suffix)).write_bytes(b"tampered")
+    elif tamper == "plan":
+        exp["collection"]["chunk_control_steps"] += 4
+    elif tamper == "path":
+        manifest["files"]["../outside.hdf5"] = manifest["files"].pop(part)
+        (export / keyboard_data.RESUME_MANIFEST).write_text(json.dumps(manifest))
+    elif tamper == "mode":
+        manifest["validation_mode"] = "basic" if mode == "full_replay" else "full_replay"
+        (export / keyboard_data.RESUME_MANIFEST).write_text(json.dumps(manifest))
+    restored = tmp_path / "restored"
+    if tamper:
+        with pytest.raises(ValueError, match="hash|provenance|Undeclared|mode"):
+            keyboard_data.restore_collection_resume(export, restored, exp)
+        assert not restored.exists()
+    else:
+        assert keyboard_data.restore_collection_resume(export, restored, exp) == 1
+        assert (restored / part).read_bytes() == b"immutable data"
+        assert not (restored / keyboard_data.MANIFEST).exists()
+        with pytest.raises(FileExistsError):
+            keyboard_data.restore_collection_resume(export, restored, exp)
+        assert exp["minimum_unique_transitions"] == {"train": 10_000_000, "valid": 3_000_000}
+
+
+@pytest.mark.parametrize("indices", [[], [0, 0], [-1], [True], ["0"]])
+def test_keyboard_parallel_device_plan_rejects_invalid_indices(tmp_path, monkeypatch, indices):
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.keyboard_data import collection_plan
+
+    exp = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique_smoke.yaml")["experiment"]
+    checkpoint = tmp_path / "policy.pt"
+    checkpoint.write_bytes(b"policy")
+    exp["collection"].update(checkpoint=str(checkpoint), gpu_indices=indices)
+    with pytest.raises(ValueError, match="gpu_indices"):
+        collection_plan(exp)
+
+
+def test_keyboard_parallel_devices_use_child_only_uuid_masks(monkeypatch):
+    import os
+    from types import SimpleNamespace
+
+    import torch
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.keyboard_data import _collection_device_envs
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "original-mask")
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda index: SimpleNamespace(uuid=f"uuid-{index}"))
+    envs = _collection_device_envs({"gpu_indices": [1, 0]})
+    assert [env["CUDA_VISIBLE_DEVICES"] for env in envs] == ["GPU-uuid-1", "GPU-uuid-0"]
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "original-mask"
+    with pytest.raises(ValueError, match="visible CUDA"):
+        _collection_device_envs({"gpu_indices": [2]})
+
+
+@pytest.mark.parametrize("cache_mode", ["auto", "off", "require"])
+def test_keyboard_missing_recovery_never_silently_recollects(tmp_path, monkeypatch, cache_mode):
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import run_experiment
+    from lib import keyboard_data
+
+    monkeypatch.setattr(keyboard_data, "validate_runtime", lambda experiment: {})
+    monkeypatch.setattr(keyboard_data, "collection_plan", lambda experiment: {"policy_sha256": "test"})
+    monkeypatch.setattr(run_experiment, "load_dataset_cache_from_input", lambda *args: False)
+    monkeypatch.setattr(run_experiment, "generate_all_datasets", lambda *args: pytest.fail("must not recollect"))
+    preset = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique.yaml")
+    preset["experiment"]["collection"]["resume_from_input"] = True
+    args = Namespace(
+        output_root=str(tmp_path),
+        dataset_dir=str(tmp_path / "data"),
+        dataset_cache_mode=cache_mode,
+        dataset_input_path=str(tmp_path / "input"),
+        dataset_subdir="test",
+    )
+    with pytest.raises((ValueError, RuntimeError, FileNotFoundError)):
+        run_experiment.run_keyboard_pipeline(args, preset)
+
+
+def test_unique_resident_preset_has_global_capacity_and_isolated_cache(monkeypatch):
+    import copy
+
+    from isaaclab_neural.utils.python_utils import handle_cfg_overrides
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.preset import load_preset
+    from run_experiment import validate_training_capacity_config
+
+    preset = load_preset("so101_keyboard_resident_unique")
+    assert preset == _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique.yaml")
+    exp = preset["experiment"]
+    cfg = _load_yaml(REPOSITORY_ROOT / exp["train_cfg"])
+    handle_cfg_overrides(exp.get("train_cfg_overrides", ""), cfg)
+    validate_training_capacity_config(exp, cfg)
+    assert exp["dataset_capacity_unit"] == cfg["algorithm"]["dataset"]["capacity_unit"] == "unique_transition"
+    assert cfg["algorithm"]["dataset"]["max_capacity"] == 10_000_000
+    assert cfg["algorithm"]["dataset"]["valid_max_capacity"] == 3_000_000
+    assert cfg["algorithm"]["dataset"]["window_sampling"] == exp["training_window_sampling"] == "sliding"
+    assert cfg["env"]["neural_solver_cfg"]["contact_token_frame"] == exp["contact_token_frame"] == "owner"
+    assert cfg["env"]["neural_solver_cfg"]["contact_filter"] == exp["contact_filter"] == "solver_active_movable"
+    assert cfg["env"]["neural_solver_cfg"]["max_contact_tokens"] == exp["max_contact_tokens"] == 128
+    assert exp["num_gpus"] == preset["resources"]["num_gpu"] == 8
+    assert exp["data_gen_num_envs"] == 1024 and exp["collection"]["gpu_indices"] == list(range(8))
+    assert exp["collection"]["persistent_workers"] and not exp["require_keyboard_replay"]
+    assert exp["collection"]["validation_mode"] == "basic"
+    assert exp["collection"]["deterministic_physics"] and exp["collection"]["bounded_deterministic_workspace"]
+    bad = copy.deepcopy(cfg)
+    bad["algorithm"]["dataset"]["max_capacity"] = 9_999_999
+    with pytest.raises(ValueError, match="below"):
+        validate_training_capacity_config(exp, bad)
+    bad = copy.deepcopy(cfg)
+    bad["algorithm"]["dataset"]["capacity_unit"] = "stored_frame"
+    with pytest.raises(ValueError, match="units differ"):
+        validate_training_capacity_config(exp, bad)
+    bad = copy.deepcopy(cfg)
+    bad["env"]["neural_solver_cfg"]["contact_filter"] = "none"
+    with pytest.raises(ValueError, match="contact filters"):
+        validate_training_capacity_config(exp, bad)
+    bad = copy.deepcopy(cfg)
+    bad["algorithm"]["sample_sequence_length"] = 65
+    with pytest.raises(ValueError, match="sequence-length"):
+        validate_training_capacity_config(exp, bad)
+
+
+def test_unique_smoke_exercises_distributed_spawned_workers(monkeypatch):
+    from isaaclab_neural.utils.python_utils import handle_cfg_overrides
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.preset import load_preset
+    from run_experiment import validate_training_capacity_config
+
+    preset = load_preset("so101_keyboard_resident_unique_smoke")
+    exp = preset["experiment"]
+    cfg = _load_yaml(REPOSITORY_ROOT / exp["train_cfg"])
+    handle_cfg_overrides(exp["train_cfg_overrides"], cfg)
+    validate_training_capacity_config(exp, cfg)
+    algo = cfg["algorithm"]
+    assert exp["num_gpus"] == preset["resources"]["num_gpu"] == 2
+    assert exp["collection"]["gpu_indices"] == [0, 1]
+    assert algo["dataset"]["num_data_workers"] == 7 and algo["batch_size"] == 512
+    assert algo["num_epochs"] == algo["num_iters_per_epoch"] == 2
+    assert algo["dataset"]["max_capacity"] == exp["minimum_unique_transitions"]["train"] == 16384
+    assert algo["dataset"]["valid_max_capacity"] == exp["minimum_unique_transitions"]["valid"] == 8192
+    assert algo["dataset"]["window_sampling"] == exp["training_window_sampling"] == "sliding"
+    assert cfg["env"]["neural_solver_cfg"]["contact_token_frame"] == "owner"
+    assert cfg["env"]["neural_solver_cfg"]["contact_filter"] == exp["contact_filter"] == "solver_active_movable"
+    assert cfg["env"]["neural_solver_cfg"]["max_contact_tokens"] == exp["max_contact_tokens"] == 128
+    assert exp["require_keyboard_replay"] is False
+
+
+def test_resident_keyboard_worker_reuses_process_and_isolates_device(tmp_path, monkeypatch):
+    import json
+    import subprocess
+    import sys
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib import keyboard_data
+
+    program = (
+        "import json,os,sys; from pathlib import Path\n"
+        "for line in sys.stdin:\n"
+        " r=json.loads(line)\n"
+        " Path(r['response']).write_text(json.dumps({**r,'ok':True,'pid':os.getpid(),'source_num_envs':1024}))\n"
+    )
+    original = subprocess.Popen
+    starts = []
+
+    def launch(command, **kwargs):
+        starts.append((command, kwargs.get("env")))
+        return original([sys.executable, "-u", "-c", program], **kwargs)
+
+    monkeypatch.setattr(keyboard_data.subprocess, "Popen", launch)
+    worker = keyboard_data.ResidentCollector(tmp_path / "worker", {"CUDA_VISIBLE_DEVICES": "GPU-test"}, timeout=10)
+    command = [
+        sys.executable,
+        "-u",
+        "-m",
+        "isaaclab_neural.generate.keyboard_dataset",
+        "collect",
+        "--dataset",
+        str(tmp_path / "first.hdf5"),
+        "--report",
+        str(tmp_path / "first.json"),
+        "--seed",
+        "42",
+        "--num-envs",
+        "1024",
+    ]
+    first = worker.collect(command, tmp_path / "first.log")
+    command[command.index("--seed") + 1] = "43"
+    command[command.index("--dataset") + 1] = str(tmp_path / "second.hdf5")
+    command[command.index("--report") + 1] = str(tmp_path / "second.json")
+    second = worker.collect(command, tmp_path / "second.log")
+    worker.close()
+    assert len(starts) == 1 and "worker" in starts[0][0]
+    assert starts[0][1]["CUDA_VISIBLE_DEVICES"] == "GPU-test"
+    assert first["pid"] == second["pid"]
+    assert (first["seed"], second["seed"]) == (42, 43)
+    assert (first["sequence"], second["sequence"]) == (0, 1)
+    assert first["source_num_envs"] == second["source_num_envs"] == 1024
+    assert json.loads((tmp_path / "second.log").read_text())["pid"] == second["pid"]
+
+
+def test_keyboard_collection_only_stops_before_training(tmp_path, monkeypatch):
+    import json
+
+    import torch
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import run_experiment
+    from lib import keyboard_data
+
+    preset = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique_smoke.yaml")
+    preset["experiment"]["collection_only"] = True
+    calls = []
+    monkeypatch.setattr(keyboard_data, "validate_runtime", lambda exp: {})
+    monkeypatch.setattr(keyboard_data, "collection_plan", lambda exp: {"policy_sha256": "test"})
+    monkeypatch.setattr(keyboard_data, "validate_bundle", lambda *args: {})
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(run_experiment, "dataset_cache_complete", lambda *args: True)
+    monkeypatch.setattr(run_experiment, "generate_all_datasets", lambda *args: calls.append("collect"))
+    monkeypatch.setattr(run_experiment, "prepare_training_only_config", lambda *args: None)
+    monkeypatch.setattr(run_experiment, "stage_generated_datasets", lambda **kwargs: calls.append("publish"))
+    monkeypatch.setattr(run_experiment, "run_training", lambda *args: pytest.fail("probe must not train"))
+    args = Namespace(
+        output_root=str(tmp_path),
+        dataset_dir=str(tmp_path / "data"),
+        dataset_cache_mode="off",
+        dataset_input_path="",
+        dataset_subdir="test",
+        storage_backend="nvdataset",
+        swift_data_container="",
+        nvdataset_data_dataset="",
+        nvdataset_data_description="test",
+        no_tensorboard=True,
+    )
+    run_experiment.run_keyboard_pipeline(args, preset)
+    assert calls == ["collect", "publish"]
+    status = json.loads((tmp_path / "pipeline_status.json").read_text())
+    assert status["data_validation_mode"] == "basic"
+    assert status["stages"]["collection_and_basic_validation"] == "passed"
+    assert "training" not in status["stages"] and "collection_and_replay" not in status["stages"]
+
+
+def test_keyboard_basic_collection_allows_1024_without_weakening_replay_mode(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib import keyboard_data
+
+    exp = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique_smoke.yaml")["experiment"]
+    checkpoint = tmp_path / "policy.pt"
+    checkpoint.write_bytes(b"policy")
+    exp["collection"]["checkpoint"] = str(checkpoint)
+    exp["require_keyboard_replay"] = True
+    exp["collection"].update(
+        validation_mode="full_replay", persistent_workers=False, bounded_deterministic_workspace=False
+    )
+    exp["data_gen_num_envs"] = 1024
+    with pytest.raises(ValueError, match="eight"):
+        keyboard_data.collection_plan(exp)
+    exp["collection"].update(validation_mode="basic", deterministic_physics=False)
+    with pytest.raises(ValueError, match="require_keyboard_replay"):
+        keyboard_data.collection_plan(exp)
+    exp["require_keyboard_replay"] = False
+    assert keyboard_data.collection_plan(exp)["validation_mode"] == "basic"
+    exp["collection"]["bounded_deterministic_workspace"] = True
+    with pytest.raises(ValueError, match="require deterministic physics"):
+        keyboard_data.collection_plan(exp)
+    exp["collection"]["deterministic_physics"] = True
+    assert keyboard_data.collection_plan(exp)["bounded_deterministic_workspace"] is True
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+def test_keyboard_basic_part_does_not_launch_or_claim_replay(tmp_path, monkeypatch, bounded):
+    import json
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib import keyboard_data
+
+    exp = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique_smoke.yaml")["experiment"]
+    checkpoint = tmp_path / "policy.pt"
+    checkpoint.write_bytes(b"policy")
+    exp["require_keyboard_replay"] = False
+    exp["collection"].update(
+        checkpoint=str(checkpoint),
+        validation_mode="basic",
+        deterministic_physics=bounded,
+        bounded_deterministic_workspace=bounded,
+    )
+    collection = keyboard_data.collection_plan(exp)
+    calls = []
+
+    def run(command, log_path, **kwargs):
+        calls.append(command)
+        Path(command[command.index("--dataset") + 1]).write_bytes(b"native states")
+        Path(command[command.index("--report") + 1]).write_text('{"mode":"collect"}')
+
+    monkeypatch.setattr(keyboard_data, "run_logged", run)
+    monkeypatch.setattr(keyboard_data, "validate_recordings", lambda *args, **kwargs: {})
+    monkeypatch.setattr(keyboard_data, "unique_transition_count", lambda path, **kwargs: 64)
+    part, record, count = keyboard_data._collect_part(
+        exp, collection, exp["dataset_specs"][0], 0, tmp_path, tmp_path, None
+    )
+    assert len(calls) == 1 and "collect" in calls[0] and "replay" not in calls[0]
+    assert "--scene" not in calls[0] and "--keyboard-variant-offset" not in calls[0]
+    assert ("--deterministic-physics" if bounded else "--no-deterministic-physics") in calls[0]
+    assert ("--bounded-deterministic-workspace" in calls[0]) is bounded
+    assert record["validation_mode"] == "basic" and record["replay_performed"] is False
+    assert "replay_sha256" not in record and count == 64
+    assert not (tmp_path / (part + ".replay.json")).exists()
+    assert json.loads((tmp_path / (part + ".accepted.json")).read_text()) == record
+
+
+def test_keyboard_collection_seed_schedule_cannot_leak(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.keyboard_data import collection_plan
+
+    exp = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique_smoke.yaml")["experiment"]
+    checkpoint = tmp_path / "policy.pt"
+    checkpoint.write_bytes(b"test-policy")
+    exp["collection"]["checkpoint"] = str(checkpoint)
+    assert collection_plan(exp)["seed_stride"] == 1000
+    exp["collection"]["seed_stride"] = 1
+    with pytest.raises(ValueError, match="overlap"):
+        collection_plan(exp)
+
+
+def test_keyboard_cache_publication_includes_views_parts_receipts_and_manifest(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import run_experiment
+    from lib import keyboard_data, nvdataset_io
+
+    source = tmp_path / "source"
+    source.mkdir()
+    exp = {"require_keyboard_replay": True, "dataset_specs": [{"filename": "view.hdf5"}]}
+    for name in ("view.hdf5", "part.hdf5", "part.hdf5.replay.json"):
+        (source / name).write_text("test")
+    (source / keyboard_data.MANIFEST).write_text(
+        json.dumps({"schema": keyboard_data.CHUNKED_SCHEMA, "groups": {"view.hdf5": ["part.hdf5"]}})
+    )
+    calls = []
+    monkeypatch.setattr(keyboard_data, "validate_bundle", lambda *args: calls.append("validated"))
+
+    def upload(**kwargs):
+        assert calls == ["validated"]
+        uploaded = kwargs["source_dir"] / "bucket" / "env"
+        assert {path.name for path in uploaded.iterdir()} == {
+            "view.hdf5",
+            "part.hdf5",
+            "part.hdf5.replay.json",
+            keyboard_data.MANIFEST,
+        }
+        calls.append("uploaded")
+
+    monkeypatch.setattr(nvdataset_io, "upload_directory", upload)
+    run_experiment.stage_generated_datasets(
+        local_env_dir=source,
+        dataset_subdir="bucket",
+        env_name="env",
+        storage_backend="nvdataset",
+        swift_data_container="",
+        nvdataset_data_dataset="mock-only",
+        nvdataset_data_description="test",
+        experiment=exp,
+    )
+    assert calls == ["validated", "uploaded"]
+    assert (source / "part.hdf5").is_file()
+
+
+@pytest.mark.parametrize("credential_env", ["NGC_API_KEY", "OMNI_PASS", "OMNI_PASSWORD"])
+def test_keyboard_child_failure_reports_diagnostics_without_exposing_credentials(
+    tmp_path, monkeypatch, capsys, credential_env
+):
+    import subprocess
+    import sys
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib import keyboard_data
+
+    secret = "synthetic-test-credential-not-real"
+    monkeypatch.setenv(credential_env, secret)
+    log = tmp_path / "collect.log"
+    command = [
+        sys.executable,
+        "-c",
+        "import os, sys; print(os.environ[sys.argv[1]]); print('collector failure', file=sys.stderr); sys.exit(7)",
+        credential_env,
+    ]
+    with pytest.raises(subprocess.CalledProcessError) as failure:
+        keyboard_data.run_logged(command, log)
+    assert failure.value.returncode == 7
+    assert "collector failure" in log.read_text()
+    stderr = capsys.readouterr().err
+    assert "collector failure" in stderr and "exit=7" in stderr
+    assert secret not in stderr and "[REDACTED]" in stderr
+
+
+def test_keyboard_child_failure_tail_is_bounded(tmp_path, monkeypatch, capsys):
+    import subprocess
+    import sys
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib import keyboard_data
+
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; print('old prefix'); print('x'*100000); print('final error'); sys.exit(1)",
+    ]
+    log = tmp_path / "replay.log"
+    with pytest.raises(subprocess.CalledProcessError):
+        keyboard_data.run_logged(command, log)
+    stderr = capsys.readouterr().err
+    assert "final error" in stderr and "old prefix" not in stderr
+    assert len(stderr) < 17000
+    assert log.stat().st_size > 100000
+
+
+def test_keyboard_success_keeps_log_and_existing_log_is_not_overwritten(tmp_path, monkeypatch, capsys):
+    import sys
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib import keyboard_data
+
+    log = tmp_path / "success.log"
+    keyboard_data.run_logged([sys.executable, "-c", "print('success')"], log)
+    assert log.read_text() == "success\n"
+    assert capsys.readouterr().err == ""
+    with pytest.raises(FileExistsError):
+        keyboard_data.run_logged([sys.executable, "-c", "print('replaced')"], log)
+    assert log.read_text() == "success\n"
+
+
+def test_nucleus_template_attachment_preserves_paths_and_excludes_environment_secrets(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.nucleus_auth import attach_credential
+
+    monkeypatch.setenv("OMNI_PASS", "synthetic-nucleus-secret")
+    template = REPOSITORY_ROOT / "osmo_scripts/osmo_workflow.yaml"
+    output = tmp_path / "attached.yaml"
+    attach_credential(template, output, "test-nucleus")
+    text = output.read_text()
+    assert '"test-nucleus":\n        OMNI_USER: omni_user\n        OMNI_PASS: omni_pass' in text
+    assert "synthetic-nucleus-secret" not in text
+    import re
+
+    defaults = yaml.safe_load(text.split("\ndefault-values:\n", 1)[1])
+    parsed = yaml.safe_load(re.sub(r"{{[^}]+}}", "placeholder", text))
+    assert set(parsed) == {"workflow", "default-values"}
+    assert parsed["default-values"] == defaults
+    for key in ("init_sh_localpath", "entrypoint_localpath", "nvdataset_io_localpath", "swift_io_localpath"):
+        assert Path(defaults[key]).is_absolute() and Path(defaults[key]).is_file()
+    with pytest.raises(FileExistsError):
+        attach_credential(template, output, "test-nucleus")
+    with pytest.raises(ValueError, match="Invalid"):
+        attach_credential(template, tmp_path / "bad.yaml", "bad:\n  injected")
+    with pytest.raises(ValueError, match="distinct"):
+        attach_credential(template, tmp_path / "duplicate.yaml", "nvdataset_cred")
+
+
+@pytest.mark.parametrize("service", ["nucleus", "wandb"])
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_nucleus_registration_uses_private_files_and_does_not_print_payload(
+    tmp_path, monkeypatch, capsys, returncode, service
+):
+    import subprocess
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib import nucleus_auth
+
+    secret = "synthetic-nucleus-secret"
+    monkeypatch.setenv("OMNI_USER", "$omni-api-token")
+    monkeypatch.setenv("OMNI_PASS", secret)
+    monkeypatch.setenv("WANDB_API_KEY", secret)
+    paths = []
+
+    def register(command, **kwargs):
+        assert secret not in " ".join(command)
+        assert "--payload-file" in command and "--payload" not in command
+        for item in command[command.index("--payload-file") + 1 :]:
+            key, name = item.split("=", 1)
+            path = Path(name)
+            paths.append(path)
+            assert path.stat().st_mode & 0o777 == 0o600
+            assert path.parent.stat().st_mode & 0o777 == 0o700
+            assert path.read_text() == (secret if key in ("omni_pass", "api_key") else "$omni-api-token")
+        return subprocess.CompletedProcess(command, returncode, stdout=secret, stderr=secret)
+
+    monkeypatch.setattr(nucleus_auth.subprocess, "run", register)
+    if returncode:
+        with pytest.raises(RuntimeError) as failure:
+            nucleus_auth.register_credential(service)
+        assert secret not in str(failure.value)
+    else:
+        assert nucleus_auth.register_credential(service).startswith(f"so101-{service}-")
+    assert all(not path.exists() for path in paths)
+    assert secret not in str(capsys.readouterr())
+
+
+def test_wandb_uses_only_managed_credential_references(tmp_path, monkeypatch):
+    import re
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.nucleus_auth import attach_credential
+
+    template = REPOSITORY_ROOT / "osmo_scripts/osmo_workflow.yaml"
+    nucleus = attach_credential(template, tmp_path / "nucleus.yaml", "test-nucleus")
+    output = attach_credential(nucleus, tmp_path / "wandb.yaml", "test-wandb", service="wandb")
+    parsed = yaml.safe_load(re.sub(r"{{[^}]+}}", "placeholder", output.read_text()))
+    task = parsed["workflow"]["tasks"][0]
+    assert task["credentials"]["test-wandb"] == {"WANDB_API_KEY": "api_key"}
+    assert "test-nucleus" in task["credentials"]
+    assert "WANDB_API_KEY" not in task["environment"]
+    assert "wandb_api_key" not in parsed["default-values"]
+    script = (REPOSITORY_ROOT / "osmo_scripts/start.sh").read_text()
+    assert '"wandb_api_key=$WANDB_API_KEY"' not in script
+    with pytest.raises(ValueError, match="distinct|already"):
+        attach_credential(nucleus, tmp_path / "conflict.yaml", "test-nucleus", service="wandb")
+
+
+def test_so101_presets_use_validated_image_and_single_gpu_cpu_budget():
+    for path in PRESET_DIR.glob("so101_keyboard_*.yaml"):
+        preset = _load_yaml(path)
+        assert preset["workflow"]["image"] == "docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095"
+        if preset["resources"]["num_gpu"] == 1:
+            assert preset["resources"]["num_cpu"] == 12
+
+
 def test_public_preset_surface_is_intentional() -> None:
     on_disk = {path.name for path in PRESET_DIR.glob("*.yaml")}
     assert set(PUBLIC_PRESETS) <= on_disk
@@ -336,8 +1391,11 @@ def test_franka_mixed_specs_forward_per_spec_generation_flags(tmp_path, monkeypa
     experiment["policy_checkpoint"] = str(tmp_path / "model_999.pt")
     Path(experiment["policy_checkpoint"]).write_bytes(b"stub")
     specs = {spec.filename: spec for spec in parse_dataset_specs(experiment)}
-    args = {name: build_dataset_args(experiment, spec, tmp_path) for name, spec in specs.items()}
-    assert all(value is not None for value in args.values())
+    args: dict[str, list[str]] = {}
+    for name, spec in specs.items():
+        dataset_args = build_dataset_args(experiment, spec, tmp_path)
+        assert dataset_args is not None
+        args[name] = dataset_args
 
     random_args = args["dataset_random_train.hdf5"]
     hold_index = random_args.index("--action-hold-frames")

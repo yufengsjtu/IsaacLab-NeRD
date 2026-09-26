@@ -224,6 +224,87 @@ def test_resume_does_not_silently_disable_requested_finger_head(tmp_path, monkey
         train.load_training_cfg(args)
 
 
+@pytest.mark.parametrize(
+    ("checkpoint_solver_cfg", "overrides", "compatible"),
+    [
+        ({"contact_token_frame": "owner"}, "env.neural_solver_cfg.use_kv_cache True", True),
+        ({"contact_token_frame": "owner"}, "env.neural_solver_cfg.contact_token_frame root", False),
+        ({}, "", False),
+        ({"contact_token_frame": "owner"}, "inputs.contact_set.dim 18", False),
+    ],
+)
+def test_resume_rejects_changed_input_semantics(tmp_path, monkeypatch, checkpoint_solver_cfg, overrides, compatible):
+    import sys
+
+    import yaml
+
+    monkeypatch.setattr(sys, "argv", ["train.py"])
+    from isaaclab_neural.train import train
+
+    cfg = {
+        "env": {
+            "env_name": "SO101-Keyboard-Fixed",
+            "neural_solver_cfg": {"contact_token_frame": "owner", "use_kv_cache": False},
+        },
+        "inputs": {"low_dim": ["states_embedding"], "contact_set": {"dim": 17}},
+        "algorithm": {},
+        "network": {},
+    }
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    checkpoint_cfg = deepcopy(cfg)
+    checkpoint_cfg["env"]["neural_solver_cfg"] = checkpoint_solver_cfg
+    monkeypatch.setattr(train, "load_checkpoint", lambda *args, **kwargs: {"cfg": checkpoint_cfg})
+    args = SimpleNamespace(
+        cfg=str(path),
+        checkpoint="owner.pt",
+        device="cpu",
+        cfg_overrides=overrides,
+        no_time_stamp=True,
+        num_envs=None,
+        render=False,
+        seed=0,
+        update_dataset_statistics=True,
+        test=False,
+    )
+    if compatible:
+        train.load_training_cfg(args)
+    else:
+        with pytest.raises(ValueError, match="input semantics"):
+            train.load_training_cfg(args)
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_contract", "compatible"),
+    [
+        ({"unit": "unique_transition", "window_sampling": "sliding"}, True),
+        ({"unit": "unique_transition", "window_sampling": "canonical"}, False),
+        (None, False),
+    ],
+)
+def test_reused_checkpoint_statistics_require_matching_sampling_contract(checkpoint_contract, compatible):
+    def contract(value):
+        if value is None:
+            return None
+        sliding = value["window_sampling"] == "sliding"
+        return {
+            **value,
+            "scope": "global",
+            "supervision": "sliding_multi_position_v1" if sliding else "canonical_disjoint_blocks_v1",
+            "normalization_sampling": "training_windows" if sliding else "unique_targets",
+            "train": {"train": {"unique_selected": 8}},
+        }
+
+    trainer = _TrainerTestHarness.__new__(_TrainerTestHarness)
+    trainer.cfg = {"dataset_capacity_contract": contract({"unit": "unique_transition", "window_sampling": "sliding"})}
+    trainer._checkpoint = {"cfg": {"dataset_capacity_contract": contract(checkpoint_contract)}}
+    if compatible:
+        trainer._validate_checkpoint_normalization_contract()
+    else:
+        with pytest.raises(ValueError, match="update-dataset-statistics"):
+            trainer._validate_checkpoint_normalization_contract()
+
+
 def test_filtered_force_training_rejects_state_only_datasets():
     trainer = _TrainerTestHarness.__new__(_TrainerTestHarness)
     trainer.force_head_enabled = False

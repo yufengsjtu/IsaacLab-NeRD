@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -171,6 +172,7 @@ class NativeContactProjection:
     capacity: int
     packing_policy: str
     contact_filter: str = "none"
+    fixed_body_slots: tuple[int, ...] | None = None
 
     @property
     def output_keys(self) -> tuple[str, ...]:
@@ -224,6 +226,19 @@ class NativeContactProjection:
         )
 
 
+def read_contact_mobility(data_group: h5py.Group, contact_filter: str) -> tuple[int, ...] | None:
+    """Read the verified recording contract required for movable-only token filtering."""
+    if contact_filter != "solver_active_movable":
+        return None
+    metadata = json.loads(data_group.attrs.get("keyboard_contract", "{}"))
+    values = metadata.get("contact_fixed_body_slots")
+    if not isinstance(values, list) or any(type(value) is not int or value < 0 for value in values):
+        raise ValueError("Movable filtering requires recorded fixed body slots (mobility metadata).")
+    if metadata.get("contact_filter") != contact_filter:
+        raise ValueError("Stored contact filter differs from the requested training projection.")
+    return tuple(values)
+
+
 def resolve_native_projection(
     *,
     has_native_contacts: bool,
@@ -233,6 +248,7 @@ def resolve_native_projection(
     max_contact_tokens: int | None,
     contact_packing_policy: str | None,
     contact_filter: str = "none",
+    fixed_body_slots: tuple[int, ...] | None = None,
 ) -> NativeContactProjection | None:
     """Resolve requested projection settings and require native storage."""
     del native_pair_count
@@ -252,8 +268,11 @@ def resolve_native_projection(
         )
     if contact_representation is None:
         raise ValueError("contact_representation is required when requesting a positive contact capacity.")
-    if contact_filter not in {"none", "solver_active"}:
+    if contact_filter not in {"none", "solver_active", "solver_active_movable"}:
         raise ValueError(f"Unsupported contact_filter: {contact_filter!r}.")
+    if contact_filter == "solver_active_movable":
+        if contact_representation != "contact_tokens" or fixed_body_slots is None:
+            raise ValueError("Movable token projection requires recorded fixed body slots and token representation.")
     if contact_representation == "flat":
         if flat_capacity <= 0:
             raise ValueError("Native flat projection requires a positive num_contacts_per_env.")
@@ -269,7 +288,7 @@ def resolve_native_projection(
             raise ValueError(
                 "Native contact-token projection requires contact_packing_policy='body_round_robin_pair_atomic'."
             )
-        return NativeContactProjection("contact_tokens", token_capacity, policy, contact_filter)
+        return NativeContactProjection("contact_tokens", token_capacity, policy, contact_filter, fixed_body_slots)
     raise ValueError(f"Unsupported contact_representation: {contact_representation!r}.")
 
 
@@ -386,6 +405,7 @@ def _project_native_pairs(
         flat_capacity=projection.capacity if projection.representation == "flat" else None,
         max_contact_tokens=projection.capacity if projection.representation == "contact_tokens" else None,
         contact_filter=projection.contact_filter,
+        fixed_body_slots=projection.fixed_body_slots,
     )
     if not isinstance(projected, Mapping):
         raise TypeError(f"Native-pair projector must return a mapping, got {type(projected).__name__}.")

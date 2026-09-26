@@ -55,7 +55,9 @@ def test_neural_env_adapter_explicit_reset_invalidates_fk_before_forward() -> No
     manager = _FakeManager()
     solver = _FakeSolver()
     manager._solver = solver
-    manager._state_0 = object()
+    from types import SimpleNamespace
+
+    manager.backend = SimpleNamespace(state_0=object())
     manager.sync_neural_solver = lambda *, update_history=True: manager.calls.append("sync")
 
     adapter = NeuralEnvAdapter.__new__(NeuralEnvAdapter)

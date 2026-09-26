@@ -6,14 +6,15 @@
 """Environment adapters for NeRD-backed Isaac Lab environments."""
 
 import gymnasium as gym
-from isaaclab_tasks.core.cartpole import agents as cartpole_agents
-from isaaclab_tasks.core.reach.config.franka import agents as franka_reach_agents
-from isaaclab_tasks.core.lift.config.franka import agents as franka_lift_agents
-from isaaclab_tasks.contrib.velocity.config.anymal_c import agents as anymal_c_agents
 
+from isaaclab_tasks.contrib.velocity.config.anymal_c import agents as anymal_c_agents
+from isaaclab_tasks.core.cartpole import agents as cartpole_agents
+from isaaclab_tasks.core.lift.config.franka import agents as franka_lift_agents
+from isaaclab_tasks.core.reach.config.franka import agents as franka_reach_agents
+
+from .agents import anymal_c_nerd_rsl_rl_ppo_cfg as anymal_c_nerd_agents
 from .anymal_c_dataset_gen_cfg import AnymalCDatasetGenFlatEnvCfg, AnymalCDatasetGenRoughEnvCfg
-from .anymal_nerd_env import NerdAnymalCFlatEnv, NerdAnymalCFlatEnvCfg
-from .anymal_nerd_env import NerdAnymalCRoughEnv, NerdAnymalCRoughEnvCfg
+from .anymal_nerd_env import NerdAnymalCFlatEnv, NerdAnymalCFlatEnvCfg, NerdAnymalCRoughEnv, NerdAnymalCRoughEnvCfg
 from .cartpole_nerd_env import NerdCartpoleEnv, NerdCartpoleEnvCfg
 from .franka_lift_nerd_env import (
     FrankaLiftCubeDatasetGenEnvCfg,
@@ -26,8 +27,8 @@ from .franka_reach_nerd_env import (
     NerdFrankaReachEnv,
     NerdFrankaReachEnvCfg,
 )
+from .keyboard_nerd_env import NerdSO101KeyboardEnv, NerdSO101KeyboardEnvCfg
 from .neural_env_wrapper import NerdManagerBasedRLEnv, NeuralEnvAdapter
-from .agents import anymal_c_nerd_rsl_rl_ppo_cfg as anymal_c_nerd_agents
 
 gym.register(
     id="Isaac-Cartpole-NeRD-v0",
@@ -37,7 +38,10 @@ gym.register(
         "env_cfg_entry_point": f"{NerdCartpoleEnvCfg.__module__}:NerdCartpoleEnvCfg",
         "rl_games_cfg_entry_point": f"{cartpole_agents.__name__}:rl_games_ppo_cfg.yaml",
         "rsl_rl_cfg_entry_point": f"{cartpole_agents.__name__}.rsl_rl_ppo_cfg:CartpolePPORunnerCfg",
-        "rsl_rl_with_symmetry_cfg_entry_point": f"{cartpole_agents.__name__}.rsl_rl_ppo_cfg:CartpolePPORunnerWithSymmetryCfg",
+        "rsl_rl_with_symmetry_cfg_entry_point": (
+            f"{cartpole_agents.__name__}.rsl_rl_ppo_cfg:"
+            "CartpolePPORunnerWithSymmetryCfg"
+        ),
         "skrl_cfg_entry_point": f"{cartpole_agents.__name__}:skrl_ppo_cfg.yaml",
         "sb3_cfg_entry_point": f"{cartpole_agents.__name__}:sb3_ppo_cfg.yaml",
     },
@@ -50,10 +54,11 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{NerdAnymalCFlatEnvCfg.__module__}:NerdAnymalCFlatEnvCfg",
         "rl_games_cfg_entry_point": f"{anymal_c_agents.__name__}:rl_games_flat_ppo_cfg.yaml",
-        "rsl_rl_cfg_entry_point": (
-            f"{anymal_c_nerd_agents.__name__}:AnymalCFlatNeRDPPORunnerCfg"
+        "rsl_rl_cfg_entry_point": (f"{anymal_c_nerd_agents.__name__}:AnymalCFlatNeRDPPORunnerCfg"),
+        "rsl_rl_with_symmetry_cfg_entry_point": (
+            f"{anymal_c_agents.__name__}.rsl_rl_ppo_cfg:"
+            "AnymalCFlatPPORunnerWithSymmetryCfg"
         ),
-        "rsl_rl_with_symmetry_cfg_entry_point": f"{anymal_c_agents.__name__}.rsl_rl_ppo_cfg:AnymalCFlatPPORunnerWithSymmetryCfg",
         "skrl_cfg_entry_point": f"{anymal_c_agents.__name__}:skrl_flat_ppo_cfg.yaml",
     },
 )
@@ -147,7 +152,21 @@ gym.register(
 )
 
 
+gym.register(
+    id="IsaacContrib-Keyboard-SO101-NeRD",
+    entry_point=f"{NerdSO101KeyboardEnv.__module__}:NerdSO101KeyboardEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{NerdSO101KeyboardEnvCfg.__module__}:NerdSO101KeyboardEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.contrib.keyboard.agents.rsl_rl_ppo_cfg:SO101PPORunnerCfg",
+        "default_agent": "rsl_rl",
+    },
+)
+
+
 __all__ = [
+    "NerdSO101KeyboardEnv",
+    "NerdSO101KeyboardEnvCfg",
     "AnymalCDatasetGenFlatEnvCfg",
     "AnymalCDatasetGenRoughEnvCfg",
     "FrankaLiftCubeDatasetGenEnvCfg",

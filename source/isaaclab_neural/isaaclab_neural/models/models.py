@@ -177,6 +177,21 @@ class ModelMixedInput(nn.Module):
                 (self.feature_dim,), 2, finger_head_cfg.get("model", network_cfg["model"]), device=device
             )
 
+        robot_force_cfg = network_cfg.get("robot_net_normal_force_head", {})
+        self.predict_robot_net_normal_forces = bool(robot_force_cfg.get("enabled", False))
+        self.robot_net_normal_force_rms = None
+        if self.predict_robot_net_normal_forces:
+            from isaaclab_neural.contacts.keyboard_normal_force import BODY_NAMES, MODEL_CONTRACT
+
+            self.robot_normal_force_contract = dict(MODEL_CONTRACT)
+            head_cfg = robot_force_cfg.get("model", network_cfg["model"])
+            self.robot_net_normal_force_head = MLPDeterministic(
+                (self.feature_dim,), len(BODY_NAMES) * 3, head_cfg, device=device
+            )
+            self.robot_normal_contact_head = MLPDeterministic(
+                (self.feature_dim,), len(BODY_NAMES), head_cfg, device=device
+            )
+
         self.output_tanh = network_cfg.get("output_tanh", False)
 
     def construct_input_encoders(
@@ -306,6 +321,10 @@ class ModelMixedInput(nn.Module):
         """Set per-finger normal-force normalization statistics [N], shape [2, 3]."""
         self.finger_object_normal_force_rms = force_rms
 
+    def set_robot_net_normal_force_rms(self, force_rms):
+        """Set world-frame SO101 robot normal-force RMS [N], shape [7, 3]."""
+        self.robot_net_normal_force_rms = force_rms
+
     def get_rms_info(self):
         """Return RMS keys and shapes for checkpoint reconstruction."""
         info = {}
@@ -318,6 +337,9 @@ class ModelMixedInput(nn.Module):
         finger_rms = getattr(self, "finger_object_normal_force_rms", None)
         if finger_rms is not None:
             info["finger_object_normal_force_rms"] = tuple(finger_rms.mean.shape)
+        robot_rms = getattr(self, "robot_net_normal_force_rms", None)
+        if robot_rms is not None:
+            info["robot_net_normal_force_rms"] = tuple(robot_rms.mean.shape)
         return info
 
     def extract_input_features(self, input_dict):  # input can be in shape (B, input_dim) or (B, T, input_dim)
@@ -491,6 +513,20 @@ class ModelMixedInput(nn.Module):
                 (contact_logits > 0.0).unsqueeze(-1), force_prediction, torch.zeros_like(force_prediction)
             )
 
+        if getattr(self, "predict_robot_net_normal_forces", False):
+            from isaaclab_neural.contacts.keyboard_normal_force import BODY_NAMES, LABEL_KEY, LOGITS_KEY, RAW_KEY
+
+            force = self.robot_net_normal_force_head(features, deterministic=deterministic)
+            force = force.unflatten(-1, (len(BODY_NAMES), 3))
+            if self.normalize_output:
+                if self.robot_net_normal_force_rms is None:
+                    raise RuntimeError("Robot normal-force output requires its RMS statistics.")
+                force = self.robot_net_normal_force_rms.normalize(force, un_norm=True)
+            logits = self.robot_normal_contact_head(features, deterministic=deterministic)
+            auxiliary_predictions[RAW_KEY] = force
+            auxiliary_predictions[LOGITS_KEY] = logits
+            auxiliary_predictions[LABEL_KEY] = torch.where((logits > 0).unsqueeze(-1), force, torch.zeros_like(force))
+
         if single_step:
             state_prediction = state_prediction[:, -1:, :]
             auxiliary_predictions = {
@@ -651,6 +687,9 @@ class ModelMixedInput(nn.Module):
             "finger_object_normal_force_head",
             "finger_object_contact_head",
             "finger_object_normal_force_rms",
+            "robot_net_normal_force_head",
+            "robot_normal_contact_head",
+            "robot_net_normal_force_rms",
         ):
             module = getattr(self, name, None)
             if module is not None:

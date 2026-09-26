@@ -132,7 +132,7 @@ class NeuralSolver(SolverBase):
         self.contact_mode = normalize_contact_mode(contact_mode)
         self.contact_representation = contact_representation
         self.max_contact_tokens = int(max_contact_tokens)
-        if contact_filter not in {"none", "solver_active"}:
+        if contact_filter not in {"none", "solver_active", "solver_active_movable"}:
             raise ValueError(f"Unsupported contact_filter: {contact_filter!r}.")
         self.contact_filter = contact_filter
         if contact_token_frame not in {"root", "owner"}:
@@ -330,6 +330,13 @@ class NeuralSolver(SolverBase):
             else None
         )
 
+        robot_enabled = getattr(self.neural_model, "predict_robot_net_normal_forces", False)
+        if robot_enabled and (getattr(self, "use_kv_cache", False) or getattr(self, "use_feature_cache", False)):
+            raise ValueError("Robot normal-force prediction requires uncached auxiliary inference.")
+        self.predicted_robot_net_normal_forces_w = (
+            torch.zeros((self.num_envs, 7, 3), device=self.torch_device) if robot_enabled else None
+        )
+
     def train(self):
         self._require_neural_model().train()
 
@@ -354,7 +361,11 @@ class NeuralSolver(SolverBase):
         """
         if world_mask is not None or flags is not None:
             return
-        for name in ("predicted_body_net_contact_forces_b", "predicted_finger_object_normal_forces_b"):
+        for name in (
+            "predicted_body_net_contact_forces_b",
+            "predicted_finger_object_normal_forces_b",
+            "predicted_robot_net_normal_forces_w",
+        ):
             predicted_forces = getattr(self, name, None)
             if predicted_forces is None:
                 continue
@@ -443,7 +454,8 @@ class NeuralSolver(SolverBase):
         """Predict state and update any enabled diagnostic auxiliary caches."""
         neural_model = self._require_neural_model()
         finger_forces = getattr(self, "predicted_finger_object_normal_forces_b", None)
-        if self.predicted_body_net_contact_forces_b is None and finger_forces is None:
+        robot_forces = getattr(self, "predicted_robot_net_normal_forces_w", None)
+        if self.predicted_body_net_contact_forces_b is None and finger_forces is None and robot_forces is None:
             return neural_model.forward(model_inputs, single_step=True)
 
         forward_with_aux = getattr(neural_model, "forward_with_aux", None)
@@ -458,6 +470,11 @@ class NeuralSolver(SolverBase):
             if prediction.shape != finger_forces.shape or not torch.isfinite(prediction).all():
                 raise ValueError("Filtered finger-force prediction must be finite [B, 2, 3].")
             finger_forces.copy_(prediction)
+        if robot_forces is not None:
+            prediction = model_output.auxiliary_predictions["robot_net_normal_forces_w"][:, -1]
+            if prediction.shape != robot_forces.shape or not torch.isfinite(prediction).all():
+                raise ValueError("Robot normal-force prediction must be finite [B, 7, 3].")
+            robot_forces.copy_(prediction)
         return model_output.state_prediction
 
     def _model_forward(self, model_inputs):

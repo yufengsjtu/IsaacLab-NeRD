@@ -19,8 +19,16 @@ from torch.utils.data import Dataset
 from isaaclab_neural.data.native_contacts import (
     NativeContactProjection,
     read_and_project_frames,
+    read_contact_mobility,
     resolve_native_projection,
     validate_native_storage,
+)
+from isaaclab_neural.data.transition_index import (
+    SUPERVISION_MASK,
+    SUPERVISION_SOURCE,
+    SUPERVISION_TARGET_IDS,
+    SUPERVISION_WINDOW,
+    WINDOW_SAMPLING,
 )
 from isaaclab_neural.utils.commons import DATASET_MODES
 
@@ -36,13 +44,15 @@ STRUCTURED_DATASET_KEYS = {
     "contact_tokens",
     "body_net_contact_forces_w",
     "primary_body_q",
+    "articulation_root_pose",
     "finger_object_normal_forces_w",
+    "robot_net_normal_forces_w",
 }
 
 
 def validate_native_only_data_group(data_group: h5py.Group) -> None:
     """Reject fixed-capacity contact arrays persisted in a dataset data group."""
-    baked_fields = sorted(name for name in data_group if name.startswith("contact_"))
+    baked_fields = sorted(name for name in data_group.keys() if isinstance(name, str) and name.startswith("contact_"))
     if baked_fields:
         raise ValueError(
             "Baked flat/contact-token fields are incompatible with native-only datasets; "
@@ -67,8 +77,10 @@ def _resolve_file_native_projection(
     has_native = native_group is not None
     if "body_net_contact_forces_w" in data_group and not has_native:
         raise ValueError("body_net_contact_forces_w labels require compatible /contacts/native_pairs storage.")
+    fixed_slots = read_contact_mobility(data_group, contact_filter)
     return resolve_native_projection(
         has_native_contacts=has_native,
+        fixed_body_slots=fixed_slots,
         contact_representation=contact_representation,
         num_contacts_per_env=num_contacts_per_env,
         max_contact_tokens=max_contact_tokens,
@@ -115,8 +127,10 @@ def _resolve_dataset_path(hdf5_dataset_path: str | Path) -> Path:
 def validate_body_net_contact_force_metadata(data_group: h5py.Group) -> tuple[str, ...] | None:
     """Reject missing or ambiguous contact-force labels."""
     from isaaclab_neural.contacts.finger_object_force import validate_force_metadata
+    from isaaclab_neural.contacts.keyboard_normal_force import validate_force_metadata as validate_robot_normal_metadata
 
     validate_force_metadata(data_group)
+    validate_robot_normal_metadata(data_group)
     force_key = "body_net_contact_forces_w"
     schema = _decode_attr(data_group.attrs.get("body_net_contact_force_schema", ""))
     if force_key not in data_group and not schema:
@@ -228,6 +242,19 @@ def _read_hdf5_metadata(
         return metadata
 
 
+def _trajectory_context_group(dataset_file: h5py.File) -> h5py.Group | None:
+    """Return optional trajectory context, rejecting non-group HDF5 objects."""
+    context = dataset_file.get("context")
+    if context is None:
+        return None
+    if not isinstance(context, h5py.Group):
+        raise ValueError("/context must be an HDF5 group.")
+    trajectories = context.get("trajectories")
+    if trajectories is not None and not isinstance(trajectories, h5py.Group):
+        raise ValueError("/context/trajectories must be an HDF5 group.")
+    return trajectories
+
+
 class _LazyHdf5Accessor:
     """Open one HDF5 file per process for lazy dataset reads."""
 
@@ -248,7 +275,14 @@ class _LazyHdf5Accessor:
     def trajectory_context_dataset(self, key: str) -> h5py.Dataset:
         """Return one per-trajectory context dataset from the open file."""
         self._ensure_open()
-        return cast(h5py.Dataset, cast(h5py.File, self._file)["context"]["trajectories"][key])
+        assert self._file is not None
+        group = _trajectory_context_group(self._file)
+        if group is None:
+            raise ValueError("Dataset has no /context/trajectories group.")
+        dataset = group[key]
+        if not isinstance(dataset, h5py.Dataset):
+            raise ValueError(f"Trajectory context {key!r} must be an HDF5 dataset.")
+        return dataset
 
     def project_native_frames(
         self,
@@ -257,7 +291,7 @@ class _LazyHdf5Accessor:
     ) -> dict[str, np.ndarray]:
         """Project selected native CSR frames from the open file."""
         self._ensure_open()
-        native_group = cast(h5py.Group, cast(h5py.File, self._file)["contacts"]["native_pairs"])
+        native_group = cast(h5py.Group, cast(h5py.File, self._file)["contacts/native_pairs"])
         return read_and_project_frames(native_group, frame_indices, projection)
 
     def close(self) -> None:
@@ -396,7 +430,7 @@ class BatchTransitionDataset:
                     )
             if native_projection is not None:
                 projected = read_and_project_frames(
-                    cast(h5py.Group, dataset_file["contacts"]["native_pairs"]),
+                    cast(h5py.Group, dataset_file["contacts/native_pairs"]),
                     np.arange(usable, dtype=np.int64),
                     native_projection,
                 )
@@ -651,7 +685,7 @@ class TrajectoryDataset(Dataset):
                     + np.arange(num_transitions_per_trajectory, dtype=np.int64)[None, :]
                 ).reshape(-1)
                 projected = read_and_project_frames(
-                    cast(h5py.Group, dataset_file["contacts"]["native_pairs"]),
+                    cast(h5py.Group, dataset_file["contacts/native_pairs"]),
                     frame_indices,
                     native_projection,
                 )
@@ -661,8 +695,8 @@ class TrajectoryDataset(Dataset):
                         num_transitions_per_trajectory,
                         *data.shape[1:],
                     )
-            if "context" in dataset_file and "trajectories" in dataset_file["context"]:
-                trajectory_group = cast(h5py.Group, dataset_file["context"]["trajectories"])
+            trajectory_group = _trajectory_context_group(dataset_file)
+            if trajectory_group is not None:
                 collisions = set(self.dataset).intersection(trajectory_group.keys())
                 if collisions:
                     raise ValueError(f"Data and trajectory context keys overlap: {sorted(collisions)}.")
@@ -768,8 +802,8 @@ class LazyTrajectoryDataset(Dataset):
         self._hdf5 = _LazyHdf5Accessor(self.dataset_path)
         self.trajectory_context_keys: list[str] = []
         with h5py.File(self.dataset_path, "r", swmr=True, libver="latest") as dataset_file:
-            if "context" in dataset_file and "trajectories" in dataset_file["context"]:
-                trajectory_group = cast(h5py.Group, dataset_file["context"]["trajectories"])
+            trajectory_group = _trajectory_context_group(dataset_file)
+            if trajectory_group is not None:
                 collisions = set(self.data_keys).intersection(trajectory_group.keys())
                 if collisions:
                     raise ValueError(f"Data and trajectory context keys overlap: {sorted(collisions)}.")
@@ -842,6 +876,173 @@ class LazyTrajectoryDataset(Dataset):
 
     def __del__(self) -> None:
         self.close()
+
+
+class UniqueTrajectoryDataset(Dataset):
+    """Read globally selected unique targets through eager or lazy masked windows."""
+
+    def __init__(
+        self,
+        hdf5_dataset_path: str | Path,
+        *,
+        load_mode: DatasetLoadMode,
+        max_capacity: int = 100_000_000,
+        sample_sequence_length: int = 10,
+        rank: int = 0,
+        world_size: int = 1,
+        window_sampling: str = "canonical",
+        **projection_args: Any,
+    ):
+        from isaaclab_neural.data.transition_index import build_transition_index
+
+        if load_mode not in ("eager", "lazy") or world_size <= 0 or not 0 <= rank < world_size:
+            raise ValueError("Invalid unique dataset load mode or rank configuration.")
+        self.transition_index = build_transition_index(
+            hdf5_dataset_path,
+            max_capacity=max_capacity,
+            sequence_length=sample_sequence_length,
+            window_sampling=window_sampling,
+        )
+        self.window_sampling = window_sampling
+        self.windows = self.transition_index.windows[rank::world_size]
+        self.window_indices = np.arange(rank, len(self.transition_index.windows), world_size, dtype=np.int64)
+        self.sliding_blocks = np.empty((0, 6), dtype=np.int64)
+        self.sliding_ends = self.sliding_offsets = np.empty(0, dtype=np.int64)
+        if window_sampling == "sliding":
+            blocks, counts = self.transition_index.sliding_blocks, self.transition_index.group_target_counts
+            assert blocks is not None and counts is not None
+            assignment = blocks[:, 5] % world_size == rank
+            self.sliding_blocks = blocks[assignment]
+            self.sliding_ends = np.cumsum(self.sliding_blocks[:, 2])
+            self.sliding_offsets = (np.cumsum(blocks[:, 2]) - blocks[:, 2])[assignment]
+            if any(not np.any(blocks[:, 5] % world_size == r) for r in range(world_size)):
+                raise ValueError("Unique source groups leave at least one training rank empty.")
+            supervised = int((self.sliding_blocks[:, 2] * self.sliding_blocks[:, 3]).sum())
+            unique = int(counts[rank::world_size].sum())
+        else:
+            if len(self.transition_index.windows) < world_size:
+                raise ValueError("Unique capacity leaves at least one training rank empty.")
+            supervised = unique = int((self.windows[:, 3] - self.windows[:, 2]).sum())
+        self.supervision_source_index = 0
+        self.capacity_stats = {
+            **self.transition_index.stats,
+            "rank": rank,
+            "world_size": world_size,
+            "rank_supervised_targets": supervised,
+            "rank_unique_selected": unique,
+        }
+        self.recording_ids = self.transition_index.recording_ids
+        self.sample_sequence_length = sample_sequence_length
+        self.load_mode = load_mode
+        self.is_rank_sharded = world_size > 1
+        metadata = _read_hdf5_metadata(hdf5_dataset_path, max_capacity=np.iinfo(np.int64).max, **projection_args)
+        self.dataset_path = metadata["dataset_path"]
+        self.native_projection = metadata["native_projection"]
+        self.storage_data_keys = metadata["data_keys"]
+        self.num_transitions_per_trajectory = metadata["num_transitions_per_trajectory"]
+        self.body_net_contact_force_body_names = metadata["body_net_contact_force_body_names"]
+        self.data_keys = [
+            *self.storage_data_keys,
+            *(self.native_projection.output_keys if self.native_projection else ()),
+            SUPERVISION_MASK,
+            SUPERVISION_SOURCE,
+            SUPERVISION_WINDOW,
+        ]
+        if window_sampling == "sliding":
+            self.data_keys.append(SUPERVISION_TARGET_IDS)
+        self._hdf5 = _LazyHdf5Accessor(self.dataset_path)
+        self.global_trajectory_indices = np.unique(
+            self.sliding_blocks[:, 0] if window_sampling == "sliding" else self.windows[:, 0]
+        )
+        self.dataset: dict[str, np.ndarray] = {}
+        self.trajectory_context: dict[str, np.ndarray] = {}
+        with h5py.File(self.dataset_path, "r") as file:
+            context = _trajectory_context_group(file)
+            self.trajectory_context_keys = [str(key) for key in context.keys()] if context is not None else []
+            if {SUPERVISION_MASK, SUPERVISION_SOURCE, SUPERVISION_WINDOW, SUPERVISION_TARGET_IDS}.intersection(
+                (*self.storage_data_keys, *self.trajectory_context_keys)
+            ):
+                raise ValueError("Stored data must not override generated supervision masks.")
+            if load_mode == "eager":
+                rows = self.global_trajectory_indices
+                self.dataset = {
+                    key: _read_dataset_array(cast(h5py.Group, file["data"]), key, rows)
+                    for key in self.storage_data_keys
+                }
+                if self.native_projection is not None:
+                    indices = (
+                        rows[:, None] * self.num_transitions_per_trajectory
+                        + np.arange(self.num_transitions_per_trajectory)
+                    ).reshape(-1)
+                    projected = read_and_project_frames(
+                        cast(h5py.Group, file["contacts/native_pairs"]), indices, self.native_projection
+                    )
+                    self.dataset.update(
+                        {
+                            key: value.reshape(len(rows), self.num_transitions_per_trajectory, *value.shape[1:])
+                            for key, value in projected.items()
+                        }
+                    )
+                if context is not None:
+                    self.trajectory_context = {
+                        key: np.asarray(cast(h5py.Dataset, context[key])[rows]) for key in self.trajectory_context_keys
+                    }
+
+    def __len__(self) -> int:
+        return int(self.sliding_ends[-1]) if self.window_sampling == "sliding" else len(self.windows)
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        target_start = None
+        if self.window_sampling == "sliding":
+            block = int(np.searchsorted(self.sliding_ends, index, side="right"))
+            offset = index - (int(self.sliding_ends[block - 1]) if block else 0)
+            row, first, _, end, target, _ = map(int, self.sliding_blocks[block])
+            start, begin = first + offset, 0
+            target_start = target + offset
+            window_index = int(self.sliding_offsets[block]) + offset
+        else:
+            row, start, begin, end = map(int, self.windows[index])
+            window_index = int(self.window_indices[index])
+        selection = slice(start, start + self.sample_sequence_length)
+        if self.load_mode == "eager":
+            local = int(np.searchsorted(self.global_trajectory_indices, row))
+            sample = {key: _torch_tensor(value[local, selection]) for key, value in self.dataset.items()}
+            sample.update({key: _torch_tensor(value[local]) for key, value in self.trajectory_context.items()})
+        else:
+            sample = {}
+            for key in self.storage_data_keys:
+                dtype = bool if key in BOOL_DATASET_KEYS else ("int64" if key in INTEGER_DATASET_KEYS else "float32")
+                sample[key] = _torch_tensor(np.asarray(self._hdf5.dataset(key)[row, selection]).astype(dtype))
+            if self.native_projection is not None:
+                frame = row * self.num_transitions_per_trajectory + start
+                projected = self._hdf5.project_native_frames(
+                    np.arange(frame, frame + self.sample_sequence_length), self.native_projection
+                )
+                sample.update({key: _torch_tensor(value) for key, value in projected.items()})
+            sample.update(
+                {
+                    key: _torch_tensor(np.asarray(self._hdf5.trajectory_context_dataset(key)[row]))
+                    for key in self.trajectory_context_keys
+                }
+            )
+        mask = torch.zeros(self.sample_sequence_length, dtype=torch.bool)
+        mask[begin:end] = True
+        sample[SUPERVISION_MASK] = mask
+        sample[SUPERVISION_SOURCE] = torch.tensor(self.supervision_source_index, dtype=torch.long)
+        sample[SUPERVISION_WINDOW] = torch.tensor(window_index, dtype=torch.long)
+        if target_start is not None:
+            targets = torch.arange(target_start, target_start + self.sample_sequence_length, dtype=torch.long)
+            targets[~mask] = -1
+            sample[SUPERVISION_TARGET_IDS] = targets
+        return sample
+
+    def shuffle(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self._hdf5.close()
 
 
 class WeightedMixedTrajectoryDataset(Dataset):
@@ -993,8 +1194,29 @@ def create_trajectory_dataset(
     max_contact_tokens: int | None = None,
     contact_packing_policy: str | None = None,
     contact_filter: str = "none",
-) -> TrajectoryDataset | LazyTrajectoryDataset:
-    """Create an eager or lazy trajectory-window dataset."""
+    capacity_unit: str = "stored_frame",
+    window_sampling: str = "canonical",
+) -> TrajectoryDataset | LazyTrajectoryDataset | UniqueTrajectoryDataset:
+    """Create an eager or lazy dataset with independent capacity and window-sampling contracts."""
+    if window_sampling not in WINDOW_SAMPLING:
+        raise ValueError(f"Unsupported window sampling: {window_sampling}.")
+    if capacity_unit == "unique_transition":
+        return UniqueTrajectoryDataset(
+            hdf5_dataset_path,
+            window_sampling=window_sampling,
+            load_mode=load_mode,
+            max_capacity=max_capacity,
+            sample_sequence_length=sample_sequence_length,
+            rank=rank,
+            world_size=world_size,
+            contact_representation=contact_representation,
+            num_contacts_per_env=num_contacts_per_env,
+            max_contact_tokens=max_contact_tokens,
+            contact_packing_policy=contact_packing_policy,
+            contact_filter=contact_filter,
+        )
+    if capacity_unit != "stored_frame":
+        raise ValueError(f"Unsupported capacity unit: {capacity_unit!r}.")
     if load_mode == "lazy":
         return LazyTrajectoryDataset(
             hdf5_dataset_path=hdf5_dataset_path,
@@ -1035,8 +1257,15 @@ def create_weighted_trajectory_dataset(
     max_contact_tokens: int | None = None,
     contact_packing_policy: str | None = None,
     contact_filter: str = "none",
+    capacity_unit: str = "stored_frame",
+    window_sampling: str = "canonical",
 ) -> WeightedMixedTrajectoryDataset:
-    """Create a weighted mixture of eager or lazy trajectory datasets."""
+    """Create a weighted mixture, with explicit source budgets under a global unique capacity."""
+    if capacity_unit == "unique_transition":
+        if len(train_datasets) > 1 and any("max_capacity" not in source for source in train_datasets.values()):
+            raise ValueError("Mixed unique datasets require explicit per-source capacity budgets.")
+        if sum(int(source.get("max_capacity", max_capacity)) for source in train_datasets.values()) > max_capacity:
+            raise ValueError("Per-source unique capacities exceed the global training capacity.")
     datasets: dict[str, Dataset] = {}
     weights: dict[str, float] = {}
     for name, source_cfg in train_datasets.items():
@@ -1049,6 +1278,8 @@ def create_weighted_trajectory_dataset(
             hdf5_dataset_path=source_cfg["path"],
             sample_sequence_length=sample_sequence_length,
             max_capacity=int(source_cfg.get("max_capacity", max_capacity)),
+            capacity_unit=capacity_unit,
+            window_sampling=window_sampling,
             rank=rank,
             world_size=world_size,
             contact_representation=contact_representation,
@@ -1058,4 +1289,14 @@ def create_weighted_trajectory_dataset(
             contact_filter=contact_filter,
         )
         weights[name] = float(source_cfg["weight"])
+    if capacity_unit == "unique_transition":
+        seen: set[str] = set()
+        for source_index, dataset in enumerate(datasets.values()):
+            if not isinstance(dataset, UniqueTrajectoryDataset):
+                raise ValueError("Unique capacity requires indexed source datasets.")
+            dataset.supervision_source_index = source_index
+            identities = set(dataset.recording_ids)
+            if seen & identities:
+                raise ValueError("Mixed unique datasets share recording identities.")
+            seen.update(identities)
     return WeightedMixedTrajectoryDataset(datasets, weights)

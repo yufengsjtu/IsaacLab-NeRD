@@ -16,6 +16,7 @@ from isaaclab_neural.contacts.contact_set_encoder import ContactSetEncoder
 from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_FILTER_NONE,
     CONTACT_FILTER_SOLVER_ACTIVE,
+    CONTACT_FILTER_SOLVER_ACTIVE_MOVABLE,
     CONTACT_REPRESENTATION_FLAT,
     CONTACT_REPRESENTATION_TOKENS,
     CONTACT_TOKEN_DIM,
@@ -26,11 +27,45 @@ from isaaclab_neural.contacts.contact_set_schema import (
     NATIVE_CONTACT_VECTOR_FIELDS,
 )
 from isaaclab_neural.contacts.kernels import transform_native_contact_geometry
-from isaaclab_neural.contacts.native_pair_projector import native_pair_solver_active_mask, project_native_pairs
+from isaaclab_neural.contacts.native_pair_projector import native_pair_filter_mask, project_native_pairs
 from isaaclab_neural.contacts.packing import ContactPackingPolicy
 from isaaclab_neural.utils import step_profile, torch_utils
 
 logger = logging.getLogger(__name__)
+
+
+def find_immovable_primary_slots(model: newton.Model, primary_ids: torch.Tensor) -> tuple[int, ...]:
+    """Return immovable primary slots; fixed joints inherit their parent's mobility."""
+    required = (model.joint_parent, model.joint_child, model.joint_qd_start, model.body_flags)
+    if any(value is None for value in required):
+        raise ValueError("Contact mobility classification requires the joint tree and body flags.")
+    parents, children, starts, flags = (value.numpy() for value in required if value is not None)
+    joints = {int(child): index for index, child in enumerate(children) if child >= 0}
+    if len(joints) != int((children >= 0).sum()):
+        raise ValueError("Contact mobility requires an unambiguous body joint tree.")
+    movable = np.full(model.body_count, -1, dtype=np.int8)
+
+    def resolve(body: int) -> bool:
+        if body < 0:
+            return False
+        if movable[body] == -2:
+            raise ValueError("Cyclic body ancestry in contact mobility classification.")
+        if movable[body] >= 0:
+            return bool(movable[body])
+        movable[body] = -2
+        joint = joints.get(body)
+        value = not bool(int(flags[body]) & int(newton.BodyFlags.KINEMATIC)) and (
+            joint is None or starts[joint + 1] > starts[joint] or resolve(int(parents[joint]))
+        )
+        movable[body] = int(value)
+        return value
+
+    for body in range(model.body_count):
+        resolve(body)
+    fixed = movable[primary_ids.detach().cpu().numpy()] == 0
+    if fixed.ndim != 2 or not np.all(fixed == fixed[:1]):
+        raise ValueError("Contact fixed-body slots must be uniform across worlds.")
+    return tuple(int(slot) for slot in np.flatnonzero(fixed[0]))
 
 
 class NewtonContactAdapter:
@@ -63,9 +98,18 @@ class NewtonContactAdapter:
             self.num_contacts_per_env = int(num_contacts_per_env)
         self.num_total_contacts = self.num_envs * self.num_contacts_per_env
         self.packing_policy: ContactPackingPolicy = packing_policy
-        if contact_filter not in {CONTACT_FILTER_NONE, CONTACT_FILTER_SOLVER_ACTIVE}:
+        if contact_filter not in {
+            CONTACT_FILTER_NONE,
+            CONTACT_FILTER_SOLVER_ACTIVE,
+            CONTACT_FILTER_SOLVER_ACTIVE_MOVABLE,
+        }:
             raise ValueError(f"Unsupported contact_filter: {contact_filter!r}.")
         self.contact_filter = contact_filter
+        if (
+            contact_filter == CONTACT_FILTER_SOLVER_ACTIVE_MOVABLE
+            and contact_representation != CONTACT_REPRESENTATION_TOKENS
+        ):
+            raise ValueError("Movable filtering requires contact-token representation.")
 
         if device is None:
             self.device = torch.device(wp.device_to_torch(model.device))
@@ -111,6 +155,11 @@ class NewtonContactAdapter:
                 for world_id in range(self.num_envs)
             ]
         )
+        self.fixed_body_slots = (
+            find_immovable_primary_slots(model, self.primary_body_ids_by_world)
+            if contact_filter == CONTACT_FILTER_SOLVER_ACTIVE_MOVABLE
+            else None
+        )
         body_local_ids = np.empty(int(model.body_count), dtype=np.int64)
         if self.body_world is None:
             body_local_ids[:] = np.arange(int(model.body_count)) % self.bodies_per_env
@@ -136,6 +185,7 @@ class NewtonContactAdapter:
         self._filtered_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
         self._dropped_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
         self._truncated_frames_gpu = torch.zeros((), dtype=torch.long, device=self.device)
+        self._max_required_tokens_gpu = torch.zeros((), dtype=torch.long, device=self.device)
         self._torch_view_cache: dict[int, tuple[object, torch.Tensor]] = {}
         self.use_warp_geometry = self.device.type == "cuda" and os.environ.get("NERD_WARP_CONTACT_GEOMETRY", "1") != "0"
         self._geometry_capacity = 0
@@ -257,8 +307,10 @@ class NewtonContactAdapter:
         self._native_contact_pairs = self._build_native_contact_pairs(raw, state)
         frame_raw = self._native_contact_pairs["world_ids"].shape[0]
         frame_raw_tensor = torch.as_tensor(frame_raw, device=self.device, dtype=torch.long)
-        if self.contact_filter == CONTACT_FILTER_SOLVER_ACTIVE:
-            frame_eligible = native_pair_solver_active_mask(self._native_contact_pairs).sum()
+        if self.contact_filter != CONTACT_FILTER_NONE:
+            frame_eligible = native_pair_filter_mask(
+                self._native_contact_pairs, self.contact_filter, self.fixed_body_slots
+            ).sum()
         else:
             frame_eligible = frame_raw_tensor
         self._filtered_contacts_gpu += frame_raw_tensor - frame_eligible
@@ -273,11 +325,16 @@ class NewtonContactAdapter:
                     packing_policy="body_round_robin_pair_atomic",
                     max_contact_tokens=self.max_contact_tokens,
                     contact_filter=self.contact_filter,
+                    fixed_body_slots=self.fixed_body_slots,
                 )
                 self.contact_tokens.copy_(projected["contact_tokens"])
                 self.contact_token_overflow.copy_(projected["contact_token_overflow"])
                 self.contact_token_body_ids.copy_(projected["contact_token_body_ids"])
-            valid_tokens = (self.contact_tokens[..., 0] > 0.5).sum()
+            packed_per_env = (self.contact_tokens[..., 0] > 0.5).sum(dim=-1)
+            valid_tokens = packed_per_env.sum()
+            self._max_required_tokens_gpu.copy_(
+                torch.maximum(self._max_required_tokens_gpu, (packed_per_env + self.contact_token_overflow).max())
+            )
             overflow_sum = self.contact_token_overflow.sum()
             self._raw_contacts_total += frame_raw
             self._packed_contacts_gpu += valid_tokens.to(dtype=torch.long)
@@ -507,12 +564,13 @@ class NewtonContactAdapter:
             "truncated_frames": truncated,
             "truncated_frame_ratio": truncated / max(self._contact_frames, 1),
         }
-        if self.contact_filter == CONTACT_FILTER_SOLVER_ACTIVE:
+        if self.contact_filter != CONTACT_FILTER_NONE:
             summary["filtered_contacts"] = filtered_gpu
         if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
             summary.update(
                 {
                     "overflow_tokens_total": dropped,
+                    "max_tokens_required_per_env": int(self._max_required_tokens_gpu.item()),
                     "overflow_frames": int((self.contact_token_overflow > 0).sum().item()),
                 }
             )

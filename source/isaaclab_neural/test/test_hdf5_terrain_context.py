@@ -6,6 +6,7 @@
 """Tests for terrain provenance in NeRD HDF5 datasets."""
 
 import h5py
+import numpy as np
 import pytest
 import torch
 from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_DIM
@@ -54,8 +55,28 @@ def test_hdf5_round_trip_preserves_terrain_context(tmp_path):
     assert sample["terrain_type"].item() == 4
     assert torch.equal(sample["env_origin"], torch.tensor([0.0, 1.0, 2.0]))
     with h5py.File(dataset_path, "r") as dataset_file:
-        assert dataset_file["context"]["terrain"].attrs["seed"] == 40
-        assert dataset_file["context"]["trajectories"]["env_origin"].shape == (2, 3)
+        assert dataset_file["context/terrain"].attrs["seed"] == 40
+        origins = dataset_file["context/trajectories/env_origin"]
+        assert isinstance(origins, h5py.Dataset)
+        assert origins.shape == (2, 3)
+
+
+@pytest.mark.parametrize("load_mode", ["eager", "lazy"])
+@pytest.mark.parametrize("path", ["context", "context/trajectories"])
+@pytest.mark.parametrize("object_type", ["dataset", "datatype"])
+def test_trajectory_loader_rejects_non_group_context(tmp_path, load_mode, path, object_type):
+    from isaaclab_neural.data import create_trajectory_dataset
+
+    dataset_path = tmp_path / "malformed.hdf5"
+    write_rollouts_to_hdf5(dataset_path, _rollouts(), "rough", terrain_context=_terrain_context())
+    with h5py.File(dataset_path, "a") as file:
+        del file[path]
+        if object_type == "dataset":
+            file.create_dataset(path, data=[0])
+        else:
+            file[path] = np.dtype("float32")
+    with pytest.raises(ValueError, match="must be an HDF5 group"):
+        create_trajectory_dataset(load_mode=load_mode, hdf5_dataset_path=dataset_path, sample_sequence_length=2)
 
 
 def test_append_rejects_mixed_terrain_context(tmp_path):
@@ -67,8 +88,12 @@ def test_append_rejects_mixed_terrain_context(tmp_path):
 
     append_rollouts_to_hdf5(dataset_path, _rollouts(), "rough", terrain_context=_terrain_context())
     with h5py.File(dataset_path, "r") as dataset_file:
-        assert dataset_file["data"]["states"].shape[0] == 4
-        assert dataset_file["context"]["trajectories"]["terrain_level"].shape[0] == 4
+        states = dataset_file["data/states"]
+        terrain_level = dataset_file["context/trajectories/terrain_level"]
+        assert isinstance(states, h5py.Dataset)
+        assert isinstance(terrain_level, h5py.Dataset)
+        assert states.shape[0] == 4
+        assert terrain_level.shape[0] == 4
 
 
 def test_history_and_rollout_window_stays_within_trajectory(tmp_path):

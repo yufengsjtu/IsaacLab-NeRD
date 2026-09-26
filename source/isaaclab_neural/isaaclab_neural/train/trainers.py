@@ -20,7 +20,7 @@ import torch.distributed as dist
 import yaml
 from torch.nn.parallel import DistributedDataParallel
 from torch.nn.utils.clip_grad import clip_grad_norm_
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
@@ -34,6 +34,15 @@ from isaaclab_neural.data import (
     create_batch_transition_dataset,
     create_trajectory_dataset,
     create_weighted_trajectory_dataset,
+)
+from isaaclab_neural.data.datasets import UniqueTrajectoryDataset, WeightedMixedTrajectoryDataset
+from isaaclab_neural.data.transition_index import (
+    CAPACITY_UNITS,
+    SUPERVISION_MASK,
+    SUPERVISION_SOURCE,
+    SUPERVISION_TARGET_IDS,
+    SUPERVISION_WINDOW,
+    WINDOW_SAMPLING,
 )
 from isaaclab_neural.eval.training_evaluator import TrainingRolloutEvaluator
 from isaaclab_neural.models.models import ModelMixedInput
@@ -52,11 +61,15 @@ BODY_FORCE_TARGET_KEY = "body_net_contact_forces_b"
 DEFAULT_ACTIVE_CONTACT_FORCE_THRESHOLD_N = 1.0
 
 NON_MODEL_DATA_KEYS = {
+    SUPERVISION_TARGET_IDS,
+    SUPERVISION_SOURCE,
+    SUPERVISION_WINDOW,
     "physics_step",
     "contact_token_body_ids",
     "contact_token_world_ids",
     "root_body_qd",
     "source_env_id",
+    "source_start_frame",
     "state_world_id",
     "root_world_id",
     "contact_world_id",
@@ -64,6 +77,24 @@ NON_MODEL_DATA_KEYS = {
     "terrain_type",
     "env_origin",
 }
+
+
+def distributed_supervision_loss(loss: torch.Tensor, local_targets: torch.Tensor) -> torch.Tensor:
+    """Compensate DDP gradient averaging for different supervised target counts."""
+    total = local_targets.to(torch.float64).clone()
+    dist.all_reduce(total)
+    if float(total) <= 0:
+        raise ValueError("Distributed supervision requires a positive global target count.")
+    return loss * (local_targets * dist.get_world_size() / total).to(loss.dtype)
+
+
+def select_supervised_steps(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Select supervised batch/time positions, retaining the trainer's time axis."""
+    if mask.dtype != torch.bool or mask.ndim != 2 or not bool(mask.any()):
+        raise ValueError("Supervision mask must select at least one batch/time target.")
+    if value.ndim < 2 or value.shape[0] != mask.shape[0] or value.shape[1] not in (1, mask.shape[1]):
+        raise ValueError("Supervision mask does not match the batch/time layout.")
+    return value.expand(mask.shape[0], mask.shape[1], *value.shape[2:])[mask].unsqueeze(1)
 
 
 def transform_body_net_contact_forces_to_current_root_frame(
@@ -175,6 +206,36 @@ def _synchronize_running_mean_std(rms: RunningMeanStd, epsilon: float = 1.0e-4) 
     rms.count.copy_(global_count.to(rms.count.dtype))
 
 
+def keyboard_position_loss_weights(
+    weights: torch.Tensor,
+    *,
+    num_q: int,
+    key_q_indices: list[int],
+    scale_m: float,
+    robot_scale_rad: float | None = None,
+) -> torch.Tensor:
+    """Set key position scales [m] and optional robot position scales [rad], retaining velocity weights."""
+    if not np.isfinite(scale_m) or scale_m <= 0:
+        raise ValueError("Keyboard position loss scale must be finite and positive.")
+    if weights.ndim != 1 or weights.numel() != 2 * num_q:
+        raise ValueError("Keyboard loss scaling requires fixed-base scalar joint coordinates.")
+    if (
+        not key_q_indices
+        or len(set(key_q_indices)) != len(key_q_indices)
+        or min(key_q_indices) < 0
+        or max(key_q_indices) >= num_q
+    ):
+        raise ValueError("Keyboard position indices must be unique and inside the position block.")
+    result = weights.clone()
+    result[key_q_indices] = 1.0 / scale_m
+    if robot_scale_rad is not None:
+        if not np.isfinite(robot_scale_rad) or robot_scale_rad <= 0:
+            raise ValueError("Robot position loss scale must be finite and positive.")
+        robot_indices = sorted(set(range(num_q)) - set(key_q_indices))
+        result[robot_indices] = 1.0 / robot_scale_rad
+    return result
+
+
 class TrainingEnvAdapter:
     """Expose the small environment surface needed by NeRD trainers."""
 
@@ -194,7 +255,13 @@ class TrainingEnvAdapter:
     @property
     def frame_dt(self) -> float:
         """Environment frame step [s]."""
-        return float(getattr(self.unwrapped, "step_dt", getattr(self.unwrapped, "physics_dt", 0.0)))
+        return float(
+            getattr(
+                self.unwrapped,
+                "frame_dt",
+                getattr(self.unwrapped, "step_dt", getattr(self.unwrapped, "physics_dt", 0.0)),
+            )
+        )
 
     @property
     def num_envs(self) -> int:
@@ -268,6 +335,17 @@ class VanillaTrainer:
         force_head_cfg = cfg["network"].get("body_net_contact_force_head", {})
         self.force_head_enabled = bool(getattr(self.neural_model, "predict_body_net_contact_forces", False))
         self.finger_force_head_enabled = bool(getattr(self.neural_model, "predict_finger_object_normal_forces", False))
+        self.robot_force_head_enabled = bool(getattr(self.neural_model, "predict_robot_net_normal_forces", False))
+        if (
+            bool(cfg["network"].get("robot_net_normal_force_head", {}).get("enabled", False))
+            != self.robot_force_head_enabled
+        ):
+            raise ValueError("Checkpoint robot normal-force head differs from the requested configuration.")
+        self.robot_force_loss_weight = float(
+            algo_cfg.get("loss", {}).get("robot_net_normal_force", {}).get("weight", 1.0)
+        )
+        if self.robot_force_loss_weight < 0:
+            raise ValueError("Robot normal-force loss weight must be non-negative.")
         requested_finger_head = cfg["network"].get("finger_object_normal_force_head", {}).get("enabled", False)
         if requested_finger_head != self.finger_force_head_enabled:
             raise ValueError("The checkpoint's filtered finger-force head does not match the training configuration.")
@@ -294,6 +372,17 @@ class VanillaTrainer:
         self.num_valid_batches = int(algo_cfg.get("num_valid_batches", 50))
         dataset_cfg = algo_cfg["dataset"]
         self.dataset_max_capacity = dataset_cfg.get("max_capacity", 100_000_000)
+        self.dataset_capacity_unit = dataset_cfg.get("capacity_unit", "stored_frame")
+        self.dataset_window_sampling = dataset_cfg.get("window_sampling", "canonical")
+        if self.dataset_window_sampling not in WINDOW_SAMPLING:
+            raise ValueError(f"Unsupported window sampling: {self.dataset_window_sampling}.")
+        if self.dataset_capacity_unit not in CAPACITY_UNITS:
+            raise ValueError(f"Unsupported dataset capacity unit: {self.dataset_capacity_unit}.")
+        if (
+            self.dataset_capacity_unit == "unique_transition"
+            and dataset_cfg.get("capacity_scope", "global") != "global"
+        ):
+            raise ValueError("Unique-transition capacity must be global, not per rank.")
         self.dataset_load_mode = dataset_cfg.get("load_mode", "eager")
         self.num_data_workers = int(dataset_cfg.get("num_data_workers", 4))
         self.num_valid_data_workers = self.num_data_workers
@@ -355,20 +444,26 @@ class VanillaTrainer:
             self.best_eval_error = np.inf
 
             force_rms_missing = (
-                self.force_head_enabled and getattr(self.neural_model, "body_net_contact_force_rms", None) is None
-            ) or (
-                self.finger_force_head_enabled
-                and getattr(self.neural_model, "finger_object_normal_force_rms", None) is None
+                (self.force_head_enabled and getattr(self.neural_model, "body_net_contact_force_rms", None) is None)
+                or (
+                    self.finger_force_head_enabled
+                    and getattr(self.neural_model, "finger_object_normal_force_rms", None) is None
+                )
+                or (
+                    self.robot_force_head_enabled
+                    and getattr(self.neural_model, "robot_net_normal_force_rms", None) is None
+                )
             )
             checkpoint_loss_weights_missing = self._checkpoint is not None and "loss_weights" not in self._checkpoint
-            if (
+            self.dataset_statistics_recomputed = bool(
                 algo_cfg.get("update_dataset_statistics", True)
                 or self._checkpoint is None
                 or getattr(self.neural_model, "input_rms", None) is None
                 or getattr(self.neural_model, "output_rms", None) is None
                 or force_rms_missing
                 or checkpoint_loss_weights_missing
-            ):
+            )
+            if self.dataset_statistics_recomputed:
                 self.compute_or_sync_dataset_statistics(self.train_dataset)
                 self.neural_model_unwrapped.set_input_rms(self.dataset_rms)
                 self.neural_model_unwrapped.set_output_rms(self.dataset_rms["prediction_target"])
@@ -378,20 +473,42 @@ class VanillaTrainer:
                     self.neural_model_unwrapped.set_finger_object_normal_force_rms(
                         self.dataset_rms["finger_object_normal_forces_b"]
                     )
+                if self.robot_force_head_enabled:
+                    self.neural_model_unwrapped.set_robot_net_normal_force_rms(
+                        self.dataset_rms["robot_net_normal_forces_w"]
+                    )
                 self.loss_weights = (
                     1.0 / torch.sqrt(self.dataset_rms["relative_states"].var + 1e-5)
                     if algo_cfg.get("weighted_loss", True)
                     else 1.0
                 )
             else:
+                assert self._checkpoint is not None
+                self._validate_checkpoint_normalization_contract()
                 print_info("Using dataset statistics from checkpoint...")
-                self.loss_weights = self._checkpoint["loss_weights"].to(self.device)
+                weights = self._checkpoint["loss_weights"]
+                self.loss_weights = weights.to(self.device) if isinstance(weights, torch.Tensor) else weights
 
             self._wrap_distributed_model()
             self._init_optimizer(algo_cfg)
             if self._checkpoint is not None and self._checkpoint.get("version", 1) >= 2:
                 self._restore_training_state()
 
+            key_position_scale = algo_cfg.get("loss", {}).get("keyboard_key_position_scale_m")
+            robot_position_scale = algo_cfg.get("loss", {}).get("keyboard_robot_position_scale_rad")
+            if robot_position_scale is not None and key_position_scale is None:
+                raise ValueError("Keyboard robot position scaling requires an explicit key position scale.")
+            if key_position_scale is not None:
+                if not self.robot_force_head_enabled or not isinstance(self.loss_weights, torch.Tensor):
+                    raise ValueError("Keyboard position scaling requires the keyboard contract and weighted loss.")
+                metadata = self.cfg["keyboard_dataset_contracts"]["train"]
+                self.loss_weights = keyboard_position_loss_weights(
+                    self.loss_weights,
+                    num_q=metadata["num_q"],
+                    key_q_indices=metadata["key_q_indices"],
+                    scale_m=float(key_position_scale),
+                    robot_scale_rad=None if robot_position_scale is None else float(robot_position_scale),
+                )
             self._checkpoint = None
             self.truncate_grad = algo_cfg.get("truncate_grad", False)
             self.grad_norm = algo_cfg.get("grad_norm", 1.0)
@@ -464,6 +581,25 @@ class VanillaTrainer:
             )
             self.dataset_rms[key] = rms
 
+    @staticmethod
+    def _normalization_contract(cfg: dict[str, Any] | None) -> dict[str, Any]:
+        """Return the dataset sampling fields that determine reusable normalization statistics."""
+        contract = (cfg or {}).get("dataset_capacity_contract") or {}
+        if contract.get("unit", "stored_frame") == "stored_frame":
+            return {"unit": "stored_frame"}
+        keys = ("unit", "scope", "supervision", "window_sampling", "normalization_sampling")
+        return {key: contract.get(key) for key in keys}
+
+    def _validate_checkpoint_normalization_contract(self) -> None:
+        """Reject reusing checkpoint statistics computed under a different sampling contract."""
+        expected = self._normalization_contract((self._checkpoint or {}).get("cfg"))
+        actual = self._normalization_contract(self.cfg)
+        if expected != actual:
+            raise ValueError(
+                f"Checkpoint normalization contract {expected} differs from the training dataset contract "
+                f"{actual}. Pass --update-dataset-statistics to recompute statistics."
+            )
+
     def _restore_training_state(self) -> None:
         checkpoint = self._checkpoint
         if checkpoint is None:
@@ -478,9 +614,10 @@ class VanillaTrainer:
             self.best_valid_losses = checkpoint["best_valid_losses"]
         if "best_eval_error" in checkpoint:
             self.best_eval_error = checkpoint["best_eval_error"]
-        if "loss_weights" in checkpoint:
-            self.loss_weights = checkpoint["loss_weights"].to(self.device)
-        if "contact_rms_counts" in checkpoint:
+        if "loss_weights" in checkpoint and not self.dataset_statistics_recomputed:
+            weights = checkpoint["loss_weights"]
+            self.loss_weights = weights.to(self.device) if isinstance(weights, torch.Tensor) else weights
+        if "contact_rms_counts" in checkpoint and not self.dataset_statistics_recomputed:
             self.contact_rms_counts = {
                 key: value.to(self.device) for key, value in checkpoint["contact_rms_counts"].items()
             }
@@ -588,6 +725,10 @@ class VanillaTrainer:
         cli_eval_interval = cli_cfg.get("eval_interval")
         self.eval_interval = eval_cfg.get("interval", 0) if cli_eval_interval is None else cli_eval_interval
         self.evaluator = None
+        if getattr(self, "robot_force_head_enabled", False) and self.eval_interval > 0:
+            raise ValueError(
+                "Keyboard POC requires --eval-interval 0 and world-preserving keyboard checkpoint evaluation."
+            )
         if self.eval_interval <= 0:
             return
 
@@ -660,6 +801,8 @@ class VanillaTrainer:
             self.optimizer = torch.optim.Adam(self.neural_model.parameters(), lr=self.lr_start, betas=self.betas)
 
     def get_datasets(self, train_dataset_path, valid_datasets_cfg, train_datasets_cfg=None) -> None:
+        if self.dataset_capacity_unit != "stored_frame":
+            raise ValueError("Unique-transition capacity requires SequenceModelTrainer.")
         if train_datasets_cfg is not None:
             raise ValueError("Weighted train_datasets are only supported by SequenceModelTrainer.")
         self.train_dataset = create_batch_transition_dataset(
@@ -682,6 +825,44 @@ class VanillaTrainer:
         self.batch_size = 1
         self.collate_fn = collate_fn_BatchTransitionDataset
 
+    def _configure_keyboard_datasets(self) -> None:
+        from isaaclab_neural.data.keyboard import read_keyboard_metadata, validate_keyboard_training_contracts
+
+        dataset_cfg = self.cfg["algorithm"]["dataset"]
+        mixed = dataset_cfg.get("train_datasets")
+        train_paths = (
+            {name: item["path"] for name, item in mixed.items()}
+            if mixed
+            else {"train": dataset_cfg["train_dataset_path"]}
+        )
+        valid_paths = dataset_cfg.get("valid_datasets") or {}
+        if {Path(path).resolve() for path in train_paths.values()} & {
+            Path(path).resolve() for path in valid_paths.values()
+        }:
+            raise ValueError("Keyboard validation requires independently collected files.")
+        train = {name: read_keyboard_metadata(path) for name, path in train_paths.items()}
+        valid = {name: read_keyboard_metadata(path) for name, path in valid_paths.items()}
+        validate_keyboard_training_contracts(train, valid)
+        reference = next(iter(train.values()))
+        if getattr(self.neural_solver, "contact_filter", "none") == "solver_active_movable":
+            fixed_slots = getattr(self.neural_solver.contact_adapter, "fixed_body_slots", None)
+            if (
+                reference.get("contact_filter") != "solver_active_movable"
+                or fixed_slots is None
+                or list(fixed_slots) != reference.get("contact_fixed_body_slots")
+            ):
+                raise ValueError("Training/runtime contact filter and recorded body mobility differ.")
+        if reference["physics_dt"] != self.neural_env.frame_dt:
+            raise ValueError("Keyboard dataset physics_dt differs from the training solver.")
+        if (
+            reference["num_q"] != self.neural_solver.dof_q_per_env
+            or reference["num_qd"] != self.neural_solver.dof_qd_per_env
+        ):
+            raise ValueError("Keyboard dataset state dimensions differ from the training solver.")
+        if reference["keyboard_variant"] != self.cfg["env"].get("keyboard_variant", 0):
+            raise ValueError("Keyboard variant differs from the fixed training environment.")
+        self.cfg["keyboard_dataset_contracts"] = {"train": reference, "train_sources": train, "valid_sources": valid}
+
     def _validate_force_label_datasets(self) -> None:
         """Require force labels in every dataset when the auxiliary head is enabled."""
         if getattr(self, "finger_force_head_enabled", False):
@@ -694,6 +875,13 @@ class VanillaTrainer:
                 raise ValueError(
                     f"Filtered finger-force head requires finger_object_normal_forces_w labels: {missing_finger}."
                 )
+        if getattr(self, "robot_force_head_enabled", False):
+            from isaaclab_neural.contacts.keyboard_normal_force import LABEL_KEY
+
+            datasets = {"train": self.train_dataset, **self.valid_datasets}
+            if any(LABEL_KEY not in dataset.data_keys for dataset in datasets.values() if dataset is not None):
+                raise ValueError("Robot normal-force training requires labels in every dataset.")
+            self._configure_keyboard_datasets()
         if not self.force_head_enabled:
             return
         datasets = {"train": self.train_dataset, **self.valid_datasets}
@@ -756,6 +944,12 @@ class VanillaTrainer:
         return DataLoader(**kwargs)
 
     def compute_dataset_statistics(self, dataset) -> None:
+        if (
+            getattr(self, "dataset_capacity_unit", "stored_frame") == "unique_transition"
+            and getattr(self, "dataset_window_sampling", "canonical") == "canonical"
+            and hasattr(dataset, "datasets")
+        ):
+            dataset = ConcatDataset(list(dataset.datasets.values()))
         dataloader = self._make_dataloader(
             dataset=dataset,
             batch_size=max(512, self.batch_size),
@@ -775,6 +969,9 @@ class VanillaTrainer:
                 dt=self.neural_env.frame_dt,
                 prediction_type="relative",
             )
+            supervision = data.pop(SUPERVISION_MASK, None)
+            if supervision is not None:
+                data = {key: select_supervised_steps(value, supervision) for key, value in data.items()}
             contact_masks = data.get("contact_masks")
             for key, value in data.items():
                 if value is None or key in {"contact_masks", "contact_token_overflow"}:
@@ -860,10 +1057,62 @@ class VanillaTrainer:
             return self.lr_end + 0.5 * (1.0 + np.cos(np.pi * decay_ratio)) * (self.lr_start - self.lr_end)
         raise NotImplementedError(f"Unsupported lr schedule: {self.lr_schedule}")
 
+    def record_unique_training_targets(self, data: dict[str, torch.Tensor]) -> None:
+        """Count visited source targets, not repeated sliding-window or epoch exposures."""
+        if SUPERVISION_MASK not in data:
+            return
+        if SUPERVISION_TARGET_IDS in data:
+            if not hasattr(self, "_seen_training_target_masks"):
+                self._seen_training_target_masks: dict[int, np.ndarray] = {}
+                self.unique_training_targets_seen = 0
+            sources = data[SUPERVISION_SOURCE].cpu().numpy()
+            targets = data[SUPERVISION_TARGET_IDS].cpu().numpy()
+            contracts = list(self.cfg["dataset_capacity_contract"]["train"].values())
+            for source in np.unique(sources):
+                ids = np.unique(targets[sources == source])
+                ids = ids[ids >= 0]
+                source = int(source)
+                if source not in self._seen_training_target_masks:
+                    self._seen_training_target_masks[source] = np.zeros(
+                        contracts[source]["unique_selected"], dtype=bool
+                    )
+                seen = self._seen_training_target_masks[source]
+                self.unique_training_targets_seen += int(np.count_nonzero(~seen[ids]))
+                seen[ids] = True
+            return
+        if not hasattr(self, "_seen_training_windows"):
+            self._seen_training_windows: dict[int, set[int]] = {}
+            self.unique_training_targets_seen = 0
+        counts = data[SUPERVISION_MASK].sum(dim=1).cpu().tolist()
+        for source, window, count in zip(
+            data[SUPERVISION_SOURCE].cpu().tolist(), data[SUPERVISION_WINDOW].cpu().tolist(), counts, strict=True
+        ):
+            seen = self._seen_training_windows.setdefault(source, set())
+            if window not in seen:
+                seen.add(window)
+                self.unique_training_targets_seen += count
+
     @torch.no_grad()
     def preprocess_data_batch(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        supervision = data.pop(SUPERVISION_MASK, None)
         for key in NON_MODEL_DATA_KEYS.intersection(data):
             data.pop(key)
+        if getattr(self, "robot_force_head_enabled", False):
+            allowed = {
+                "states",
+                "next_states",
+                "root_body_q",
+                "primary_body_q",
+                "joint_f",
+                "gravity_dir",
+                "robot_net_normal_forces_w",
+            }
+            data = {key: value for key, value in data.items() if key in allowed or key.startswith("contact_")}
+            forces = data.get("robot_net_normal_forces_w")
+            if forces is None or forces.shape[-2:] != (7, 3) or not torch.isfinite(forces).all():
+                raise ValueError("Robot normal-force training requires finite [B, T, 7, 3] labels.")
+        else:
+            data.pop("robot_net_normal_forces_w", None)
         if not self.force_head_enabled:
             data.pop(BODY_FORCE_LABEL_KEY, None)
         if not getattr(self, "finger_force_head_enabled", False):
@@ -904,24 +1153,55 @@ class VanillaTrainer:
             next_states=data["next_states"],
             dt=self.neural_env.frame_dt,
         )
+        if supervision is not None:
+            supervision = supervision.to(self.device)
+            if (
+                supervision.dtype != torch.bool
+                or supervision.shape != data["states"].shape[:2]
+                or not bool(supervision.any())
+            ):
+                raise ValueError("Invalid unique-transition supervision mask.")
+            data[SUPERVISION_MASK] = supervision
+        elif getattr(self, "dataset_capacity_unit", "stored_frame") == "unique_transition":
+            raise ValueError("Unique-transition dataset did not provide its supervision mask.")
         return data
 
     def compute_loss(self, data: dict[str, torch.Tensor], train: bool):
         if self.neural_model_unwrapped.is_rnn:
-            self.neural_model_unwrapped.init_rnn(self.batch_size)
+            self.neural_model_unwrapped.init_rnn(
+                data["states"].shape[0] if SUPERVISION_MASK in data else self.batch_size
+            )
         prediction_target = data["prediction_target"]
         finger_enabled = getattr(self, "finger_force_head_enabled", False)
-        model_output = self._forward_model(data, train, return_aux=self.force_head_enabled or finger_enabled)
-        if self.force_head_enabled or finger_enabled:
+        robot_enabled = getattr(self, "robot_force_head_enabled", False)
+        model_output = self._forward_model(
+            data, train, return_aux=self.force_head_enabled or finger_enabled or robot_enabled
+        )
+        if self.force_head_enabled or finger_enabled or robot_enabled:
             prediction = model_output.state_prediction
         else:
             prediction = model_output
+        auxiliary_predictions = (
+            model_output.auxiliary_predictions if self.force_head_enabled or finger_enabled or robot_enabled else {}
+        )
+        supervision = data.get(SUPERVISION_MASK)
+        if supervision is not None:
+            prediction = select_supervised_steps(prediction, supervision)
+            prediction_target = select_supervised_steps(prediction_target, supervision)
+            auxiliary_predictions = {
+                key: select_supervised_steps(value, supervision) for key, value in auxiliary_predictions.items()
+            }
+            data = {
+                key: select_supervised_steps(value, supervision)
+                for key, value in data.items()
+                if key != SUPERVISION_MASK
+            }
         loss = self.loss_func(prediction * self.loss_weights, prediction_target * self.loss_weights)
         force_prediction = None
         force_target = None
         force_loss = None
         if self.force_head_enabled:
-            force_prediction = model_output.auxiliary_predictions[BODY_FORCE_TARGET_KEY]
+            force_prediction = auxiliary_predictions[BODY_FORCE_TARGET_KEY]
             force_target = data[BODY_FORCE_TARGET_KEY]
             force_rms = self.neural_model_unwrapped.body_net_contact_force_rms
             if force_rms is None:
@@ -936,13 +1216,13 @@ class VanillaTrainer:
         finger_loss: torch.Tensor | None = None
         contact_loss: torch.Tensor | None = None
         if finger_enabled:
-            finger_prediction = model_output.auxiliary_predictions["finger_object_normal_forces_b"]
+            finger_prediction = auxiliary_predictions["finger_object_normal_forces_b"]
             finger_target = data["finger_object_normal_forces_b"]
             assert finger_target is not None
             finger_rms = self.neural_model_unwrapped.finger_object_normal_force_rms
             if finger_rms is None:
                 raise RuntimeError("Filtered finger-force training requires its RMS statistics.")
-            raw_force_prediction = model_output.auxiliary_predictions["finger_object_normal_forces_raw_b"]
+            raw_force_prediction = auxiliary_predictions["finger_object_normal_forces_raw_b"]
             finger_loss = cast(
                 torch.Tensor,
                 torch.nn.functional.mse_loss(
@@ -952,11 +1232,22 @@ class VanillaTrainer:
             contact_loss = cast(
                 torch.Tensor,
                 torch.nn.functional.binary_cross_entropy_with_logits(
-                    model_output.auxiliary_predictions["finger_object_contact_logits"],
+                    auxiliary_predictions["finger_object_contact_logits"],
                     (finger_target.norm(dim=-1) > 0.01).to(finger_target.dtype),
                 ),
             )
             loss = loss + self.finger_force_loss_weight * (finger_loss + contact_loss)
+
+        robot_metrics = {}
+        if robot_enabled:
+            from isaaclab_neural.contacts.keyboard_normal_force import LABEL_KEY, normal_force_loss
+
+            robot_loss, robot_metrics = normal_force_loss(
+                auxiliary_predictions,
+                data[LABEL_KEY],
+                self.neural_model_unwrapped.robot_net_normal_force_rms,
+            )
+            loss = loss + self.robot_force_loss_weight * robot_loss
 
         with torch.no_grad():
             predicted_next_states = self.neural_solver.convert_prediction_to_next_states(
@@ -986,6 +1277,21 @@ class VanillaTrainer:
                 .cpu()
                 .item(),
             }
+            loss_itemized.update(robot_metrics)
+            if robot_enabled:
+                metadata = self.cfg["keyboard_dataset_contracts"]["train"]
+                keys = metadata["key_q_indices"]
+                nq = metadata["num_q"]
+                robot = sorted(set(range(nq)) - set(keys))
+                state_error = predicted_next_states - data["next_states"]
+                for name, indices in {
+                    "key_q_m": keys,
+                    "robot_q_rad": robot,
+                    "key_qd_m_s": [nq + key for key in keys],
+                    "robot_qd_rad_s": [nq + key for key in robot],
+                }.items():
+                    loss_itemized[name + "_RMSE"] = float(state_error[..., indices].square().mean().sqrt().cpu())
+                    loss_itemized[name + "_max"] = float(state_error[..., indices].abs().max().cpu())
             if force_prediction is not None and force_target is not None and force_loss is not None:
                 loss_itemized["body_force_normalized_MSE"] = float(force_loss.detach().cpu())
                 loss_itemized.update(
@@ -1033,8 +1339,10 @@ class VanillaTrainer:
         distributed_reduce: bool = True,
     ):
         self.neural_model.train(train)
-        sum_loss = torch.tensor(0.0, device=self.device)
+        sum_loss = torch.tensor(0.0, device=self.device, dtype=torch.float64)
+        sum_weight = torch.tensor(0.0, device=self.device, dtype=torch.float64)
         sum_loss_itemized: dict[str, float] = {}
+        maximum_metrics: dict[str, float] = {}
         grad_info = {"grad_norm_before_clip": 0.0} if train else {}
         if train and self.truncate_grad:
             grad_info["grad_norm_after_clip"] = 0.0
@@ -1049,16 +1357,26 @@ class VanillaTrainer:
                             self.train_dataset.shuffle()
                         dataloader_iter = iter(dataloader)
                         data = next(dataloader_iter)
+                    if train:
+                        self.record_unique_training_targets(data)
                     data = self.preprocess_data_batch(data)
 
                 with TimeProfiler(self.time_report, "compute_loss"):
                     if train:
                         self.optimizer.zero_grad()
                     loss, loss_itemized = self.compute_loss(data, train)
+                    weight = (
+                        data[SUPERVISION_MASK].sum().to(torch.float64)
+                        if SUPERVISION_MASK in data
+                        else torch.ones((), device=self.device, dtype=torch.float64)
+                    )
+                    backward_loss = loss
+                    if train and self.is_distributed and SUPERVISION_MASK in data:
+                        backward_loss = distributed_supervision_loss(loss, weight)
 
                 with TimeProfiler(self.time_report, "backward"):
                     if train:
-                        loss.backward()
+                        backward_loss.backward()
                         with torch.no_grad():
                             grad_norm_before_clip = float(grad_norm(self.neural_model.parameters()).detach().cpu())
                             grad_info["grad_norm_before_clip"] += grad_norm_before_clip
@@ -1070,12 +1388,22 @@ class VanillaTrainer:
                         self.optimizer.step()
 
                 with TimeProfiler(self.time_report, "other"):
-                    sum_loss += loss.detach()
+                    sum_loss += loss.detach().to(torch.float64) * weight
+                    sum_weight += weight
                     for key, value in loss_itemized.items():
-                        sum_loss_itemized[key] = sum_loss_itemized.get(key, 0.0) + value
+                        if key.endswith("_max"):
+                            maximum_metrics[key] = max(maximum_metrics.get(key, float("-inf")), value)
+                        else:
+                            sum_loss_itemized[key] = sum_loss_itemized.get(key, 0.0) + value * float(weight.cpu())
 
-        avg_loss = sum_loss.cpu().item() / num_batches
-        avg_loss_itemized = {key: value / num_batches for key, value in sum_loss_itemized.items()}
+        distributed_weights = distributed_reduce and self.is_distributed
+        if distributed_weights:
+            dist.all_reduce(sum_loss)
+            dist.all_reduce(sum_weight)
+        denominator = float(sum_weight.cpu())
+        avg_loss = float(sum_loss.cpu()) / denominator
+        metric_scale = self.world_size if distributed_weights else 1
+        avg_loss_itemized = {key: value * metric_scale / denominator for key, value in sum_loss_itemized.items()}
         if train:
             for key in grad_info:
                 grad_info[key] /= num_batches
@@ -1083,6 +1411,17 @@ class VanillaTrainer:
             avg_loss = self._distributed_mean(avg_loss)
             avg_loss_itemized = self._distributed_mean_dict(avg_loss_itemized)
             grad_info = self._distributed_mean_dict(grad_info)
+        if maximum_metrics:
+            keys = sorted(maximum_metrics)
+            values = torch.tensor([maximum_metrics[key] for key in keys], device=self.device, dtype=torch.float64)
+            if distributed_weights:
+                dist.all_reduce(values, op=dist.ReduceOp.MAX)
+            avg_loss_itemized.update(zip(keys, values.cpu().tolist(), strict=True))
+        if train and hasattr(self, "unique_training_targets_seen"):
+            seen = torch.tensor(self.unique_training_targets_seen, dtype=torch.long, device=self.device)
+            if self.is_distributed:
+                dist.all_reduce(seen)
+            avg_loss_itemized["unique_training_targets_seen"] = float(seen.cpu())
         return avg_loss, avg_loss_itemized, grad_info
 
     def train(self) -> None:
@@ -1104,9 +1443,13 @@ class VanillaTrainer:
             batch_size=self.batch_size,
             shuffle=train_sampler is None,
             sampler=train_sampler,
-            drop_last=True,
+            drop_last=self.dataset_capacity_unit != "unique_transition",
         )
         self.num_train_batches = len(train_loader) if self.num_iters_per_epoch == -1 else self.num_iters_per_epoch
+        if self.dataset_capacity_unit == "unique_transition" and self.is_distributed and self.num_iters_per_epoch == -1:
+            batches = torch.tensor(self.num_train_batches, dtype=torch.long, device=self.device)
+            dist.all_reduce(batches, op=dist.ReduceOp.MAX)
+            self.num_train_batches = int(batches.cpu())
 
         valid_loaders = {}
         valid_loader_iters = {}
@@ -1116,7 +1459,7 @@ class VanillaTrainer:
                     dataset=valid_dataset,
                     batch_size=self.batch_size,
                     shuffle=True,
-                    drop_last=True,
+                    drop_last=self.dataset_capacity_unit != "unique_transition",
                     num_workers=self.num_valid_data_workers,
                 )
                 self.best_valid_losses.setdefault(valid_dataset_name, np.inf)
@@ -1341,8 +1684,12 @@ class SequenceModelTrainer(VanillaTrainer):
         super().__init__(neural_env, cfg, checkpoint, device)
 
     def get_datasets(self, train_dataset_path, valid_datasets_cfg, train_datasets_cfg=None) -> None:
-        self.train_dataset_rank_sharded = self.is_distributed and self.dataset_load_mode == "eager"
+        self.train_dataset_rank_sharded = self.is_distributed and (
+            self.dataset_load_mode == "eager" or self.dataset_capacity_unit == "unique_transition"
+        )
         dataset_kwargs = {
+            "window_sampling": self.dataset_window_sampling,
+            "capacity_unit": self.dataset_capacity_unit,
             "load_mode": self.dataset_load_mode,
             "sample_sequence_length": self.sample_sequence_length,
             "max_capacity": self.dataset_max_capacity,
@@ -1370,6 +1717,40 @@ class SequenceModelTrainer(VanillaTrainer):
                     load_mode=self.dataset_load_mode,
                     sample_sequence_length=self.sample_sequence_length,
                     hdf5_dataset_path=valid_dataset_path,
+                    capacity_unit=self.dataset_capacity_unit,
+                    window_sampling=self.dataset_window_sampling,
+                    max_capacity=self.cfg["algorithm"]["dataset"].get("valid_max_capacity", 100_000_000),
                     **self.dataset_contact_projection,
                 )
+        if self.dataset_capacity_unit == "unique_transition":
+            sources = (
+                self.train_dataset.datasets
+                if isinstance(self.train_dataset, WeightedMixedTrajectoryDataset)
+                else {"train": self.train_dataset}
+            )
+            if any(
+                not isinstance(source, UniqueTrajectoryDataset)
+                for source in (*sources.values(), *self.valid_datasets.values())
+            ):
+                raise ValueError("Unique capacity requires indexed trajectory datasets.")
+            sources = cast(dict[str, UniqueTrajectoryDataset], sources)
+            valid_sources = cast(dict[str, UniqueTrajectoryDataset], self.valid_datasets)
+            train_ids = set().union(*(set(source.recording_ids) for source in sources.values()))
+            if any(train_ids.intersection(source.recording_ids) for source in valid_sources.values()):
+                raise ValueError("Training and validation share source recording identities.")
+            self.cfg["dataset_capacity_contract"] = {
+                "unit": "unique_transition",
+                "scope": "global",
+                "supervision": "sliding_multi_position_v1"
+                if self.dataset_window_sampling == "sliding"
+                else "canonical_disjoint_blocks_v1",
+                "window_sampling": self.dataset_window_sampling,
+                "normalization_sampling": "training_windows"
+                if self.dataset_window_sampling == "sliding"
+                else "unique_targets",
+                "train": {name: source.capacity_stats for name, source in sources.items()},
+                "valid": {name: source.capacity_stats for name, source in valid_sources.items()},
+            }
+            if self.is_main_process:
+                print_info(f"Dataset capacity contract: {self.cfg['dataset_capacity_contract']}")
         self.collate_fn = None
