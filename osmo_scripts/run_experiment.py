@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import warnings
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
@@ -21,6 +24,7 @@ from typing import TextIO, cast
 
 import h5py
 import numpy as np
+from lib.keyboard_data import requires_keyboard_bundle
 from lib.simple_yaml import load_yaml
 
 NATIVE_CONTACT_DATASET_SCHEMA_VERSION = 3
@@ -197,6 +201,14 @@ def dataset_cache_complete(
     required_files: list[str],
     experiment: dict,
 ) -> bool:
+    if requires_keyboard_bundle(experiment):
+        from lib.keyboard_data import validate_bundle
+
+        try:
+            validate_bundle(candidate_dir, experiment)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"Rejected Keyboard bundle: {error}")
+            return False
     specs_by_filename = {spec.filename: spec for spec in parse_dataset_specs(experiment)}
     for filename in required_files:
         dataset_path = candidate_dir / filename
@@ -403,6 +415,20 @@ def load_dataset_cache_from_input(
         if not files:
             continue
 
+        if requires_keyboard_bundle(experiment):
+            from lib.keyboard_data import MANIFEST, file_sha256
+
+            if not dataset_cache_complete(candidate, required_files, experiment):
+                continue
+            if local_env_dir.exists():
+                if dataset_cache_complete(local_env_dir, required_files, experiment) and file_sha256(
+                    local_env_dir / MANIFEST
+                ) == file_sha256(candidate / MANIFEST):
+                    return True
+                raise FileExistsError(f"Refusing to replace existing unqualified cache: {local_env_dir}")
+            local_env_dir.parent.mkdir(parents=True, exist_ok=True)
+            local_env_dir.symlink_to(candidate.resolve(), target_is_directory=True)
+            return dataset_cache_complete(local_env_dir, required_files, experiment)
         if local_env_dir.exists():
             shutil.rmtree(local_env_dir)
         local_env_dir.mkdir(parents=True, exist_ok=True)
@@ -425,7 +451,38 @@ def stage_generated_datasets(
     swift_data_container: str,
     nvdataset_data_dataset: str,
     nvdataset_data_description: str,
+    experiment: dict | None = None,
 ):
+    if experiment and requires_keyboard_bundle(experiment):
+        from lib.keyboard_data import bundle_files, validate_bundle
+
+        validate_bundle(local_env_dir, experiment)
+        if storage_backend == "swift" and swift_data_container:
+            from lib import swift_io
+
+            swift_io.upload_directory(
+                container=swift_data_container,
+                source_dir=local_env_dir,
+                prefix=f"{dataset_subdir}/{env_name}",
+                resume=True,
+            )
+        elif storage_backend == "nvdataset" and nvdataset_data_dataset:
+            from lib import nvdataset_io
+
+            with tempfile.TemporaryDirectory(prefix="keyboard-publish-") as temporary:
+                directory = Path(temporary) / dataset_subdir / env_name
+                directory.mkdir(parents=True)
+                for name in bundle_files(experiment, local_env_dir):
+                    try:
+                        os.link(local_env_dir / name, directory / name)
+                    except OSError:
+                        shutil.copy2(local_env_dir / name, directory / name)
+                nvdataset_io.upload_directory(
+                    name=nvdataset_data_dataset, source_dir=Path(temporary), description=nvdataset_data_description
+                )
+        else:
+            print("Qualified Keyboard cache retained locally; no remote publication target configured.")
+        return
     files = sorted(local_env_dir.glob("*.hdf5"))
     if not files:
         print(f"No generated HDF5 datasets found under {local_env_dir} to stage.")
@@ -494,6 +551,10 @@ def contact_args(experiment: dict) -> list[str]:
 
 
 def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -> list[str] | None:
+    if experiment.get("training_only"):
+        raise ValueError("Keyboard training-only presets cannot use the generic dataset generator.")
+    if experiment.get("dataset_profile") == "so101_keyboard":
+        raise ValueError("Use the bounded Keyboard dataset profile through generate_all_datasets.")
     policy_checkpoint = resolve_spec_policy_checkpoint(experiment, spec)
     if spec.use_policy:
         if not policy_checkpoint or not Path(policy_checkpoint).is_file():
@@ -565,6 +626,13 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
 
 
 def generate_all_datasets(experiment: dict, specs: list[DatasetSpec], dataset_dir: Path):
+    if experiment.get("dataset_profile") == "so101_keyboard":
+        from lib.keyboard_data import collect_and_validate
+
+        collect_and_validate(
+            experiment, dataset_dir / experiment["env_name"], Path(experiment["collection_output_root"])
+        )
+        return
     for spec in specs:
         args = build_dataset_args(experiment, spec, dataset_dir)
         if args is not None:
@@ -582,9 +650,20 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
         "--num-envs",
         str(experiment["train_num_envs"]),
         "--seed",
-        "0",
+        str(experiment.get("train_seed", 0)),
         "--skip-check-log-override",
     ]
+    if requires_keyboard_bundle(experiment):
+        if (output_root / experiment["env_name"]).exists():
+            raise FileExistsError("Refusing to overwrite a previous Keyboard training run.")
+        train_args.remove("--skip-check-log-override")
+    if experiment.get("headless"):
+        train_args += ["--visualizer", "none"]
+    if experiment.get("no_time_stamp"):
+        train_args.append("--no-time-stamp")
+    for key, flag in (("eval_interval", "--eval-interval"), ("save_interval", "--save-interval")):
+        if key in experiment:
+            train_args += [flag, str(experiment[key])]
     if experiment.get("update_dataset_statistics"):
         train_args.append("--update-dataset-statistics")
     if experiment.get("train_preset"):
@@ -701,9 +780,331 @@ def start_tensorboard(output_root: Path, port: int):
     print(f"TensorBoard started on port {port} with logdir {output_root}")
 
 
+def validate_training_capacity_config(experiment: dict, cfg: dict) -> None:
+    """Reject inconsistent capacity units or insufficient source budgets before collection."""
+    data = cfg["algorithm"]["dataset"]
+    if experiment.get("dataset_profile") == "so101_keyboard":
+        solver_cfg = cfg["env"]["neural_solver_cfg"]
+        if solver_cfg.get("contact_filter", "none") != experiment.get("contact_filter", "none"):
+            raise ValueError("Training and collection contact filters differ.")
+        for name in ("num_contacts_per_env", "max_contact_tokens"):
+            if name in experiment and solver_cfg.get(name) != experiment[name]:
+                raise ValueError(f"Training and collection contact capacities differ: {name}.")
+    unit = data.get("capacity_unit", "stored_frame")
+    if unit != experiment.get("dataset_capacity_unit", "stored_frame"):
+        raise ValueError("Training and collection capacity units differ.")
+    if unit == "stored_frame":
+        return
+    if unit != "unique_transition" or data.get("capacity_scope", "global") != "global":
+        raise ValueError("Unique-transition capacity must use the global scope.")
+    sampling = data.get("window_sampling", "canonical")
+    if sampling not in ("canonical", "sliding") or sampling != experiment.get("training_window_sampling", sampling):
+        raise ValueError("Training window sampling differs from the requested preset.")
+    if cfg["algorithm"]["name"] != "SequenceModelTrainer":
+        raise ValueError("Unique-transition capacity requires sequence training.")
+    sequence = int(cfg["algorithm"]["sample_sequence_length"])
+    if sequence != experiment.get("training_sequence_length") or not 0 < sequence <= experiment["trajectory_length"]:
+        raise ValueError("Training and collection sequence-length contracts differ.")
+    sources = data["train_datasets"]
+    if len(sources) > 1 and any("max_capacity" not in source for source in sources.values()):
+        raise ValueError("Mixed unique datasets require explicit source budgets.")
+    budgets = {
+        Path(source["path"]).name: int(source.get("max_capacity", data["max_capacity"])) for source in sources.values()
+    }
+    if len(budgets) != len(sources):
+        raise ValueError("Unique training sources must use distinct cache filenames.")
+    if any(value <= 0 for value in budgets.values()) or sum(budgets.values()) > int(data["max_capacity"]):
+        raise ValueError("Unique source budgets exceed the global capacity or are non-positive.")
+    if sum(budgets.values()) < int(experiment.get("minimum_unique_transitions", {}).get("train", 0)):
+        raise ValueError("Unique source budgets are below the global training data requirement.")
+    for spec in experiment["dataset_specs"]:
+        capacity = (
+            budgets.get(spec["filename"], 0)
+            if spec["split"] == "train"
+            else int(data.get("valid_max_capacity", 100_000_000))
+        )
+        if capacity < int(spec["num_transitions"]):
+            raise ValueError(f"Unique capacity is below the required data target: {spec['filename']}.")
+
+
+def prepare_training_only_config(experiment: dict, dataset_dir: Path, output_root: Path, overrides: str = "") -> None:
+    """Materialize verified cache paths and explicit training overrides without altering source configs."""
+    import yaml
+    from isaaclab_neural.utils.python_utils import handle_cfg_overrides
+
+    cfg = load_yaml(Path(experiment["train_cfg"]))
+    if not isinstance(cfg, dict):
+        raise ValueError("Training configuration must be a mapping.")
+    handle_cfg_overrides(" ".join((experiment.get("train_cfg_overrides", ""), overrides)), cfg)
+    validate_training_capacity_config(experiment, cfg)
+    data = cfg["algorithm"]["dataset"]
+    paths = [(source, "path", "train") for source in data["train_datasets"].values()]
+    paths += [(data["valid_datasets"], key, "valid") for key in data["valid_datasets"]]
+    used: dict[str, set[str]] = {"train": set(), "valid": set()}
+    for owner, key, split in paths:
+        filename = Path(owner[key]).name
+        owner[key] = str((dataset_dir / filename).resolve())
+        used[split].add(filename)
+    for split in used:
+        if used[split] != {item["filename"] for item in experiment["dataset_specs"] if item["split"] == split}:
+            raise ValueError(f"Training configuration does not match the verified {split} bundle files.")
+    if cfg["env"]["env_name"] != experiment["env_name"]:
+        raise ValueError("Training config environment differs from the preset.")
+    if experiment.get("dataset_profile") == "so101_keyboard":
+        solver_cfg = cfg["env"]["neural_solver_cfg"]
+        for name in ("num_contacts_per_env", "max_contact_tokens"):
+            if solver_cfg.get(name) != experiment.get(name):
+                raise ValueError(f"Keyboard training and collection contact capacities differ: {name}.")
+    if experiment.get("minimum_unique_transitions"):
+        from lib.keyboard_data import validate_dataset_scale
+
+        capacities = {
+            Path(source["path"]).name: int(source.get("max_capacity", data["max_capacity"]))
+            for source in data["train_datasets"].values()
+        }
+        if data.get("capacity_unit") == "unique_transition":
+            capacities.update(
+                {
+                    Path(path).name: int(data.get("valid_max_capacity", 100_000_000))
+                    for path in data["valid_datasets"].values()
+                }
+            )
+        validate_dataset_scale(dataset_dir, experiment, source_capacities=capacities)
+        if data.get("capacity_unit") == "unique_transition":
+            from isaaclab_neural.data.transition_index import build_transition_index
+
+            cfg["dataset_capacity_contract"] = {
+                name: build_transition_index(
+                    dataset_dir / name,
+                    max_capacity=capacity,
+                    sequence_length=int(cfg["algorithm"]["sample_sequence_length"]),
+                    window_sampling=data.get("window_sampling", "canonical"),
+                ).stats
+                for name, capacity in capacities.items()
+            }
+    path = output_root / "resolved_train_cfg.yaml"
+    with path.open("x") as stream:
+        yaml.safe_dump(cfg, stream, sort_keys=False)
+    experiment["train_cfg"] = str(path.resolve())
+
+
+def evaluate_keyboard_checkpoint(experiment: dict, dataset_dir: Path, output_root: Path) -> None:
+    """Run held-out synchronized-window diagnostics; execution success is not fidelity acceptance."""
+    options = experiment.get("checkpoint_eval")
+    if not options:
+        return
+    checkpoint = output_root / experiment["env_name"] / "nn/final_model.pt"
+    if not checkpoint.is_file():
+        raise FileNotFoundError(checkpoint)
+    from lib.keyboard_data import MANIFEST
+
+    manifest = json.loads((dataset_dir / MANIFEST).read_text())
+    filenames = []
+    for spec in parse_dataset_specs(experiment):
+        if spec.split == "valid":
+            parts = manifest.get("groups", {}).get(spec.filename, [spec.filename])
+            count = min(len(parts), int(options.get("parts_per_group", 1)))
+            if count <= 0:
+                raise ValueError("Checkpoint evaluation requires positive parts_per_group.")
+            filenames.extend(parts[index] for index in np.linspace(0, len(parts) - 1, count, dtype=int))
+    reports = []
+    for filename in filenames:
+        report = output_root / (filename + ".nerd_eval.json")
+        command = [
+            sys.executable,
+            "-m",
+            "isaaclab_neural.eval.keyboard_checkpoint",
+            "--checkpoint",
+            str(checkpoint),
+            "--dataset",
+            str(dataset_dir / filename),
+            "--report",
+            str(report),
+            "--horizon",
+            str(options.get("horizon", 16)),
+            "--device",
+            "cuda:0",
+            "--visualizer",
+            "none",
+        ]
+        if options.get("max_batches") is not None:
+            command += ["--max-batches", str(options["max_batches"])]
+        subprocess.run(command, check=True)
+        reports.append(str(report))
+    (output_root / "keyboard_run_status.json").write_text(
+        json.dumps(
+            {
+                "training_completed": True,
+                "checkpoint": str(checkpoint),
+                "evaluation_reports": reports,
+                "execution_passed": all(json.loads(Path(path).read_text())["execution_passed"] for path in reports),
+                "task_fidelity_accepted": False,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
+def run_keyboard_pipeline(args: argparse.Namespace, preset: dict) -> None:
+    """Use the common storage/training runner with Keyboard collection and acceptance hooks."""
+    from lib.keyboard_data import MANIFEST, collection_plan, validate_bundle, validate_runtime, validation_mode
+
+    experiment = dict(preset["experiment"])
+    output_root = Path(args.output_root)
+    state = {"stages": {}, "task_fidelity_accepted": False, "data_validation_mode": validation_mode(experiment)}
+    stage = "preflight"
+
+    def record(name, status):
+        state["stages"][name] = status
+        (output_root / "pipeline_status.json").write_text(json.dumps(state, indent=2) + "\n")
+
+    try:
+        validate_runtime(experiment)
+        if experiment.get("dataset_capacity_unit") == "unique_transition":
+            from isaaclab_neural.utils.python_utils import handle_cfg_overrides
+
+            capacity_cfg = load_yaml(Path(experiment["train_cfg"]))
+            if not isinstance(capacity_cfg, dict):
+                raise ValueError("Training configuration must be a mapping.")
+            handle_cfg_overrides(
+                " ".join((experiment.get("train_cfg_overrides", ""), getattr(args, "train_cfg_overrides", ""))),
+                capacity_cfg,
+            )
+            validate_training_capacity_config(experiment, capacity_cfg)
+        plan = collection_plan(experiment)
+        experiment["policy_sha256"] = plan["policy_sha256"]
+        experiment["collection_output_root"] = str(output_root.resolve())
+        if getattr(args, "num_gpus", None) is not None:
+            experiment["num_gpus"] = args.num_gpus
+        if int(experiment["num_gpus"]) <= 0:
+            raise ValueError("Training process count must be positive.")
+        specs = parse_dataset_specs(experiment)
+        dataset_dir = Path(args.dataset_dir or experiment["dataset_dir"])
+        local_env_dir = dataset_dir / experiment["env_name"]
+        required = required_dataset_files(experiment, specs)
+        (output_root / "collection_plan.json").write_text(json.dumps(plan, indent=2) + "\n")
+        record(stage, "passed")
+        stage = "cache_lookup"
+        cached = False
+        if args.dataset_cache_mode != "off":
+            if (local_env_dir / MANIFEST).exists():
+                cached = dataset_cache_complete(local_env_dir, required, experiment)
+                if not cached:
+                    raise ValueError("Existing local Keyboard cache is invalid; it will not be replaced.")
+            elif args.dataset_input_path:
+                cached = load_dataset_cache_from_input(
+                    Path(args.dataset_input_path),
+                    args.dataset_subdir,
+                    experiment["env_name"],
+                    local_env_dir,
+                    required,
+                    experiment,
+                )
+        elif local_env_dir.exists():
+            raise FileExistsError("Cache mode off requires a fresh dataset directory.")
+        record(stage, "hit" if cached else "miss")
+        if not cached and args.dataset_cache_mode == "require":
+            raise RuntimeError("Required replay-qualified Keyboard cache is unavailable.")
+        if not cached and experiment["collection"].get("resume_from_input", False):
+            from lib.keyboard_data import RESUME_MANIFEST, restore_collection_resume, validate_collection_resume
+
+            stage = "collection_resume"
+            if args.dataset_cache_mode != "auto" or not args.dataset_input_path:
+                raise ValueError("Collection recovery requires cache mode auto and an explicit input checkpoint.")
+            input_root = Path(args.dataset_input_path)
+            candidates = (
+                input_root / args.dataset_subdir / experiment["env_name"],
+                input_root / args.dataset_subdir,
+                input_root / experiment["env_name"],
+                input_root,
+            )
+            source = next((path for path in candidates if (path / RESUME_MANIFEST).is_file()), None)
+            if source is None:
+                raise FileNotFoundError("Required collection recovery checkpoint is missing; refusing to recollect.")
+            if getattr(args, "preflight_only", False):
+                count = len(validate_collection_resume(source, experiment)["files"])
+                record(stage, f"validated {count} accepted chunks; not restored in preflight-only mode")
+            else:
+                count = restore_collection_resume(source, local_env_dir, experiment)
+                record(stage, f"restored {count} accepted chunks")
+        if getattr(args, "preflight_only", False):
+            state["would_collect"] = not cached
+            if cached:
+                prepare_training_only_config(
+                    experiment, local_env_dir, output_root, getattr(args, "train_cfg_overrides", "")
+                )
+            record("preflight_only", "complete; no collection, upload, training or submission")
+            return
+        import torch
+
+        if torch.cuda.device_count() < int(experiment["num_gpus"]):
+            raise RuntimeError("Visible CUDA devices are fewer than requested training processes.")
+        if not cached:
+            stage = (
+                "collection_and_basic_validation" if validation_mode(experiment) == "basic" else "collection_and_replay"
+            )
+            record(stage, "running")
+            generate_all_datasets(experiment, specs, dataset_dir)
+            record(stage, "passed")
+        stage = "data_validation"
+        if not dataset_cache_complete(local_env_dir, required, experiment):
+            raise RuntimeError("Keyboard data validation failed; no cache publication or training.")
+        validate_bundle(local_env_dir, experiment)
+        prepare_training_only_config(experiment, local_env_dir, output_root, getattr(args, "train_cfg_overrides", ""))
+        (output_root / "resolved_experiment.json").write_text(json.dumps(experiment, indent=2) + "\n")
+        record(stage, "passed")
+        stage = "cache_publication"
+        if not cached:
+            stage_generated_datasets(
+                local_env_dir=local_env_dir,
+                dataset_subdir=args.dataset_subdir,
+                env_name=experiment["env_name"],
+                storage_backend=args.storage_backend,
+                swift_data_container=args.swift_data_container,
+                nvdataset_data_dataset=args.nvdataset_data_dataset,
+                nvdataset_data_description=args.nvdataset_data_description,
+                experiment=experiment,
+            )
+            record(stage, "published" if args.swift_data_container or args.nvdataset_data_dataset else "local_only")
+        else:
+            record(stage, "reused")
+        if experiment.get("collection_only", False):
+            record("collection_only", "complete; no training or checkpoint evaluation")
+            return
+        stage = "training"
+        record(stage, "running")
+        if not getattr(args, "no_tensorboard", False):
+            start_tensorboard(output_root, args.tensorboard_port)
+        run_training(experiment, output_root, args)
+        record(stage, "passed")
+        stage = "checkpoint_evaluation"
+        evaluate_keyboard_checkpoint(experiment, local_env_dir, output_root)
+        record(stage, "passed; fidelity requires separate review")
+    except Exception as error:
+        state["error"] = str(error)
+        record(stage, "failed")
+        raise
+
+
 def run(args: argparse.Namespace):
     preset = load_preset(args.preset, args.preset_file)
-    experiment = preset["experiment"]
+    if preset["experiment"].get("dataset_profile") == "so101_keyboard":
+        run_keyboard_pipeline(args, preset)
+        return
+    experiment = dict(preset["experiment"])
+    if getattr(args, "preflight_only", False) and not experiment.get("training_only"):
+        raise ValueError("preflight-only is supported only for training-only presets.")
+    if experiment.get("training_only") and args.dataset_cache_mode != "require":
+        raise ValueError("Keyboard training-only presets require --dataset-cache-mode require; generation is disabled.")
+    if getattr(args, "num_gpus", None) is not None:
+        if args.num_gpus <= 0:
+            raise ValueError("num-gpus must be positive.")
+        experiment["num_gpus"] = args.num_gpus
+    if experiment.get("training_only"):
+        from lib.keyboard_data import validate_runtime
+
+        print(f"Validated runtime: {validate_runtime(experiment)}")
     specs = parse_dataset_specs(experiment)
     output_root = Path(args.output_root)
     dataset_dir = Path(args.dataset_dir or experiment.get("dataset_dir", "./data/datasets"))
@@ -728,13 +1129,17 @@ def run(args: argparse.Namespace):
             experiment=experiment,
         )
         if not datasets_available:
-            print(f"Storage input cache unavailable for {experiment['env_name']}; generating datasets locally.")
+            print(f"Storage input cache unavailable for {experiment['env_name']}.")
             if args.dataset_cache_mode == "require":
                 raise RuntimeError("DATASET_CACHE_MODE=require but required datasets were not found in storage input.")
     elif args.dataset_cache_mode == "require":
         raise RuntimeError("DATASET_CACHE_MODE=require but DATASET_INPUT_PATH is empty.")
 
     if not datasets_available:
+        if experiment.get("training_only"):
+            raise RuntimeError(
+                "Keyboard training-only cache is unavailable; refusing to generate or upload replacements."
+            )
         generate_all_datasets(experiment, specs, dataset_dir)
         stage_generated_datasets(
             local_env_dir=local_env_dir,
@@ -750,14 +1155,34 @@ def run(args: argparse.Namespace):
         run_context_diagnostic(experiment, specs, dataset_dir)
         return
 
-    start_tensorboard(output_root, args.tensorboard_port)
+    if experiment.get("training_only"):
+        prepare_training_only_config(experiment, local_env_dir, output_root, getattr(args, "train_cfg_overrides", ""))
+        (output_root / "resolved_experiment.json").write_text(json.dumps(experiment, indent=2) + "\n")
+    if getattr(args, "preflight_only", False):
+        print("Preflight passed; no training, evaluation, upload or submission was performed.")
+        return
+    if experiment.get("training_only"):
+        import torch
+
+        if torch.cuda.device_count() < int(experiment.get("num_gpus", 1)):
+            raise RuntimeError("Allocated visible CUDA devices do not satisfy the requested training process count.")
+    if not getattr(args, "no_tensorboard", False):
+        start_tensorboard(output_root, args.tensorboard_port)
     run_training(experiment, output_root, args)
+    if experiment.get("training_only"):
+        evaluate_keyboard_checkpoint(experiment, local_env_dir, output_root)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preset", required=True)
     parser.add_argument("--preset-file")
+    parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--no-tensorboard", action="store_true")
+    parser.add_argument(
+        "--num-gpus", type=int, default=int(os.environ["NERD_NUM_GPUS"]) if os.environ.get("NERD_NUM_GPUS") else None
+    )
+    parser.add_argument("--train-cfg-overrides", default=os.environ.get("TRAIN_CFG_OVERRIDES", ""))
     parser.add_argument("--workflow-base-name", required=True)
     parser.add_argument("--dataset-subdir", required=True)
     parser.add_argument("--dataset-cache-mode", default="auto", choices=("auto", "require", "off"))

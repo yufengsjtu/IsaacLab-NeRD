@@ -1,0 +1,77 @@
+workflow:
+  base_name: so101-keyboard-fixed-smoke
+  dataset_subdir: so101-keyboard-fixed-smoke-v1
+  image: docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095
+  nucleus_credential: so101-nucleus-8ed03716ea4e49d1833fe66f2e5e2dc2
+resources:
+  num_gpu: 2
+  num_cpu: 20
+  memory: 128Gi
+  storage: 64Gi
+  platform: ovx-l40s
+experiment:
+  training_only: false
+  dataset_profile: so101_keyboard
+  dataset_capacity_unit: unique_transition
+  training_sequence_length: 10
+  training_window_sampling: sliding
+  collection:
+    checkpoint: ./pretrained/control_policy/so101_keyboard/model_14999.pt
+    validation_mode: basic
+    deterministic_physics: true
+    bounded_deterministic_workspace: true
+    persistent_workers: true
+    gpu_indices: [0, 1]
+    chunk_control_steps: 32
+    max_chunks_per_group: 2
+    seed_stride: 1000
+    timeout_seconds: 1200
+    device: cuda:0
+  require_keyboard_replay: false
+  collection_mode: policy
+  env_name: SO101-Keyboard-Fixed
+  robot_name: SO101-Keyboard-Fixed
+  dataset_dir: ./data/datasets/so101-keyboard-fixed-smoke-v1
+  train_task: IsaacContrib-Keyboard-SO101-NeRD
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/SO101/transformer_keyboard_throughput.yaml
+  train_cfg_overrides: algorithm.dataset.max_capacity 16384 algorithm.dataset.valid_max_capacity 8192 algorithm.dataset.num_data_workers 7 algorithm.num_epochs 2 algorithm.num_iters_per_epoch 2 algorithm.num_valid_batches 1
+  train_seed: 42
+  num_gpus: 2
+  train_num_envs: 8
+  data_gen_num_envs: 1024
+  trajectory_length: 64
+  minimum_unique_transitions:
+    train: 16384
+    valid: 8192
+  contact_mode: newton_native
+  contact_representation: contact_tokens
+  contact_token_frame: owner
+  contact_filter: solver_active_movable
+  num_contacts_per_env: 128
+  max_contact_tokens: 128
+  num_primary_bodies: 116
+  contact_packing_policy: body_round_robin_pair_atomic
+  update_dataset_statistics: true
+  eval_interval: 0
+  save_interval: 1
+  headless: true
+  no_time_stamp: true
+  runtime_versions:
+    newton: "1.6.0"
+    mujoco-warp: "3.12.0"
+    warp-lang: "1.17.0"
+    torch: "2.12.0+cu130"
+    rsl-rl-lib: "5.5.1"
+  checkpoint_eval:
+    horizon: 16
+    max_batches: 2
+    parts_per_group: 1
+  dataset_specs:
+    - filename: seed42_variant00.hdf5
+      seed: 42
+      split: train
+      num_transitions: 16384
+    - filename: seed43_variant00.hdf5
+      seed: 43
+      split: valid
+      num_transitions: 8192

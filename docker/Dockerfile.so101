@@ -1,0 +1,23 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+ARG BASE_IMAGE=docker.io/rowany28070/isaac-lab-nerd@sha256:4a0d84c9d83558d90c6c0ee76f88cf51e887edc206fabcdbe437c89c1a68587c
+FROM ${BASE_IMAGE}
+USER root
+WORKDIR /tmp/so101-image-build
+ARG NVDATASET_BUILD_INDEX=https://artifactory.pdx.nvidia.com/artifactory/api/pypi/sw-ngc-data-platform-pypi-local/simple
+COPY lab.txt sdk.txt provenance.json ./
+RUN uv pip install --python /opt/isaaclab-venv/bin/python --no-deps \
+      --index https://download.pytorch.org/whl/cu130 -r lab.txt \
+    && uv venv --python /opt/isaaclab-venv/bin/python /opt/nvdataset-venv \
+    && uv pip install --python /opt/nvdataset-venv/bin/python --no-deps \
+      --index "${NVDATASET_BUILD_INDEX}" -r sdk.txt
+RUN env -u PYTHONPATH -u PYTHONHOME /opt/nvdataset-venv/bin/python -c \
+      'import importlib.metadata as m; import _cffi_backend, nvdataset.cli.cli; assert m.version("nvdataset") == "0.95.0"' \
+    && /opt/isaaclab-venv/bin/python -c \
+      'import importlib.metadata as m; expected={"torch":"2.12.0+cu130","torchvision":"0.27.0+cu130","newton":"1.6.0","mujoco-warp":"3.12.0","warp-lang":"1.17.0","rsl-rl-lib":"5.5.1"}; assert all(m.version(k)==v for k,v in expected.items())'
+ENV NVDATASET_PYTHON=/opt/nvdataset-venv/bin/python
+WORKDIR /workspace/isaaclab
+USER isaaclab

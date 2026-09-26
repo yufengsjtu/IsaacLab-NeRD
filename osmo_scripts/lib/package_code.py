@@ -48,6 +48,7 @@ FORCE_INCLUDED_GLOBS = (
     "pretrained/control_policy/g1_flat_terrain/**/*",
     "pretrained/control_policy/franka_reach/**/*",
     "pretrained/control_policy/franka_reach_menagerie/**/*",
+    "pretrained/control_policy/so101_keyboard/*.pt",
     "pretrained/official/**/*",
 )
 

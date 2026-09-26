@@ -22,7 +22,7 @@ SWIFT_CODE_OBJECT="${SWIFT_CODE_OBJECT:-IsaacLab-NeRD.tar.gz}"
 SWIFT_DATA_CONTAINER="${SWIFT_DATA_CONTAINER:-isaaclab-nerd-datasets}"
 SWIFT_OUTPUT_CONTAINER="${SWIFT_OUTPUT_CONTAINER:-isaaclab-nerd-output}"
 NVDATASET_CREDENTIAL="${NVDATASET_CREDENTIAL:-nvdataset_cred}"
-NVDATASET_CODE_DATASET="${NVDATASET_CODE_DATASET:-IsaacLab-NeRD-Code}"
+NVDATASET_CODE_DATASET="${NVDATASET_CODE_DATASET:-IsaacLab-NeRD-Code-$RUN_ID}"
 NVDATASET_DATA_DATASET="${NVDATASET_DATA_DATASET:-IsaacLab-NeRD-Datasets}"
 NVDATASET_OUTPUT_DATASET="${NVDATASET_OUTPUT_DATASET:-IsaacLab-NeRD-Output}"
 NVDATASET_OUTPUT_DESCRIPTION="${NVDATASET_OUTPUT_DESCRIPTION:-IsaacLab-NeRD OSMO training outputs for $RUN_ID.}"
@@ -30,6 +30,7 @@ NVDATASET_INDEX_URL="${NVDATASET_INDEX_URL:-https://artifactory.pdx.nvidia.com/a
 DATASET_CACHE_MODE="${DATASET_CACHE_MODE:-auto}"
 OSMO_EXPERIMENT_PRESET="${OSMO_EXPERIMENT_PRESET:-anymal_newton_native}"
 PRESET_FILE="${PRESET_FILE:-}"
+TRAIN_CFG_OVERRIDES="${TRAIN_CFG_OVERRIDES:-}"
 
 WORKFLOW_NAME_OVERRIDE=""
 DATASET_SUBDIR_OVERRIDE=""
@@ -41,11 +42,13 @@ OSMO_PLATFORM_OVERRIDE=""
 OSMO_POOL_OVERRIDE=""
 OSMO_PRIORITY_OVERRIDE=""
 OSMO_IMAGE_OVERRIDE=""
+NUCLEUS_CREDENTIAL_OVERRIDE="${NUCLEUS_CREDENTIAL:-}"
 
 NGC_API_KEY="${NGC_API_KEY:-}"
 NVDATASET_TENANTID="${NVDATASET_TENANTID:-}"
 ENABLE_WANDB="${ENABLE_WANDB:-0}"
 WANDB_API_KEY="${WANDB_API_KEY:-}"
+OSMO_WANDB_CREDENTIAL="${OSMO_WANDB_CREDENTIAL:-}"
 WANDB_PROJECT_NAME="${WANDB_PROJECT_NAME:-nerd-newton}"
 WANDB_EXP_NAME="${WANDB_EXP_NAME:-}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
@@ -64,10 +67,11 @@ Common options:
   --code-container NAME      Swift code container (default: isaaclab-nerd-code)
   --data-container NAME      Swift generated data container
   --output-container NAME    Swift output container
-  --code-dataset NAME        NV-Datasets code dataset (default: IsaacLab-NeRD-Code)
+  --code-dataset NAME        New NV-Datasets code dataset (default: IsaacLab-NeRD-Code-<run-id>)
   --data-dataset NAME        NV-Datasets generated data dataset
   --output-dataset NAME      NV-Datasets output dataset
-  --num-gpu N                Override preset OSMO GPU resource
+  --num-gpu N                Override OSMO GPUs and the runtime training process count
+  --train-cfg-overrides TEXT Extra key/value overrides for training-only configuration
   --num-cpu N                Override preset OSMO CPU resource
   --memory SIZE              Override preset OSMO memory resource
   --storage SIZE             Override preset OSMO storage resource
@@ -75,7 +79,9 @@ Common options:
   --pool NAME                OSMO pool passed to validate and submit
   --priority LEVEL           Submit priority: HIGH, NORMAL, or LOW
   --image NAME               Override preset container image
+  --nucleus-credential NAME  Reference a managed Nucleus credential (never a token)
   --enable-wandb             Enable Weights & Biases logging in the OSMO pod
+  --wandb-credential NAME    Reference an existing managed W&B credential (api_key field)
   --wandb-project NAME       W&B project (default: nerd-newton)
   --wandb-exp-name NAME      W&B run name (default: workflow/dataset subdir)
   --wandb-entity NAME        Optional W&B entity or team
@@ -154,6 +160,10 @@ while (($#)); do
             DATASET_CACHE_MODE="${2:?Missing value for --dataset-cache-mode}"
             shift 2
             ;;
+        --train-cfg-overrides)
+            TRAIN_CFG_OVERRIDES="${2:?Missing value for --train-cfg-overrides}"
+            shift 2
+            ;;
         --num-gpu|--num-gpus)
             OSMO_NUM_GPU_OVERRIDE="${2:?Missing value for --num-gpu}"
             shift 2
@@ -184,6 +194,14 @@ while (($#)); do
             ;;
         --image)
             OSMO_IMAGE_OVERRIDE="${2:?Missing value for --image}"
+            shift 2
+            ;;
+        --wandb-credential)
+            OSMO_WANDB_CREDENTIAL="${2:?Missing value for --wandb-credential}"
+            shift 2
+            ;;
+        --nucleus-credential)
+            NUCLEUS_CREDENTIAL_OVERRIDE="${2:?Missing value for --nucleus-credential}"
             shift 2
             ;;
         --enable-wandb)
@@ -268,13 +286,14 @@ case "$STORAGE_BACKEND" in
             echo "[FATAL] Set NVDATASET_TENANTID before using the NV-Datasets storage backend." >&2
             exit 2
         fi
+        python3 "$SCRIPT_DIR/lib/nvdataset_io.py" check
         ;;
     *)
         echo "[FATAL] Unsupported storage backend: $STORAGE_BACKEND (expected nvdataset or swift)." >&2
         exit 2
         ;;
 esac
-if [[ "$ENABLE_WANDB" == "1" && -z "$WANDB_API_KEY" ]]; then
+if [[ "$ENABLE_WANDB" == "1" && -z "$WANDB_API_KEY" && -z "$OSMO_WANDB_CREDENTIAL" ]]; then
     echo "[FATAL] Set WANDB_API_KEY before using --enable-wandb." >&2
     exit 2
 fi
@@ -310,13 +329,48 @@ fi
 if [[ -n "$OSMO_IMAGE_OVERRIDE" ]]; then
     resolve_args+=(--image "$OSMO_IMAGE_OVERRIDE")
 fi
-eval "$(python3 "$SCRIPT_DIR/lib/preset.py" resolve-submit "${resolve_args[@]}")"
+if [[ -n "$NUCLEUS_CREDENTIAL_OVERRIDE" ]]; then
+    resolve_args+=(--nucleus-credential "$NUCLEUS_CREDENTIAL_OVERRIDE")
+fi
+resolved_preset="$(python3 "$SCRIPT_DIR/lib/preset.py" resolve-submit "${resolve_args[@]}")"
+eval "$resolved_preset"
+if [[ "$OSMO_TRAINING_ONLY" == "1" && "$DATASET_CACHE_MODE" != "require" ]]; then
+    echo "[FATAL] Training-only presets require --dataset-cache-mode require; no generation fallback is allowed." >&2
+    exit 2
+fi
 
 TMP_DIR="$(mktemp -d)"
 cleanup() {
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
+
+if [[ -n "${OSMO_NUCLEUS_CREDENTIAL:-}" ]]; then
+    if [[ "$OSMO_NUCLEUS_CREDENTIAL" == "$STORAGE_CREDENTIAL" ]]; then
+        echo "[FATAL] Nucleus and storage credentials must have distinct names." >&2
+        exit 2
+    fi
+    python3 "$SCRIPT_DIR/lib/nucleus_auth.py" attach \
+        --template "$WORKFLOW_FILE" \
+        --output "$TMP_DIR/nucleus-workflow.yaml" \
+        --credential "$OSMO_NUCLEUS_CREDENTIAL"
+    WORKFLOW_FILE="$TMP_DIR/nucleus-workflow.yaml"
+fi
+
+if [[ "$ENABLE_WANDB" == "1" && "$CODE_ONLY" != "1" ]]; then
+    if [[ -z "$OSMO_WANDB_CREDENTIAL" ]]; then
+        export WANDB_API_KEY
+        OSMO_WANDB_CREDENTIAL="$(python3 "$SCRIPT_DIR/lib/nucleus_auth.py" register --service wandb)"
+    fi
+    if [[ "$OSMO_WANDB_CREDENTIAL" == "$STORAGE_CREDENTIAL" || "$OSMO_WANDB_CREDENTIAL" == "${OSMO_NUCLEUS_CREDENTIAL:-}" ]]; then
+        echo "[FATAL] W&B, Nucleus and storage credentials must have distinct names." >&2
+        exit 2
+    fi
+    python3 "$SCRIPT_DIR/lib/nucleus_auth.py" attach \
+        --service wandb --template "$WORKFLOW_FILE" \
+        --output "$TMP_DIR/wandb-workflow.yaml" --credential "$OSMO_WANDB_CREDENTIAL"
+    WORKFLOW_FILE="$TMP_DIR/wandb-workflow.yaml"
+fi
 
 ARCHIVE_PATH="$TMP_DIR/IsaacLab-NeRD.tar.gz"
 
@@ -348,12 +402,8 @@ if [[ "$STORAGE_BACKEND" == "swift" ]]; then
     fi
     echo "=== Swift code upload round-trip verification succeeded. ==="
 else
-    echo "=== Ensuring local nvdataset package ==="
+    echo "=== Using validated local NV-Datasets SDK ==="
     export NVDATASET_TENANTID NGC_API_KEY
-    if ! python3 "$SCRIPT_DIR/lib/nvdataset_io.py" check >/dev/null 2>&1; then
-        python3 -m pip install --quiet -U --extra-index-url "$NVDATASET_INDEX_URL" nvdataset
-        python3 "$SCRIPT_DIR/lib/nvdataset_io.py" check
-    fi
     echo "=== Uploading code archive to NV-Datasets: $NVDATASET_CODE_DATASET ==="
     python3 "$SCRIPT_DIR/lib/nvdataset_io.py" replace-files \
         --dataset "$NVDATASET_CODE_DATASET" \
@@ -444,6 +494,7 @@ SUBMIT_ARGS=(
     "storage_tenant_env=$STORAGE_TENANT_ENV"
     "storage_tenant_key=$STORAGE_TENANT_KEY"
     "osmo_experiment_preset=$OSMO_EXPERIMENT_PRESET"
+    "train_cfg_overrides=$TRAIN_CFG_OVERRIDES"
     "memory=$OSMO_MEMORY"
     "storage=$OSMO_STORAGE"
     "resource_platform=$OSMO_PLATFORM"
@@ -468,7 +519,6 @@ if [[ "$ENABLE_WANDB" == "1" ]]; then
         "wandb_project_name=$WANDB_PROJECT_NAME"
         "wandb_exp_name=$WANDB_EXP_NAME"
         "wandb_entity=$WANDB_ENTITY"
-        "wandb_api_key=$WANDB_API_KEY"
     )
 fi
 OSMO_RESOURCE_ARGS=()

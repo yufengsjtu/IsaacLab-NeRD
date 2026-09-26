@@ -25,6 +25,8 @@ workflow:
       OUTPUT_LOCAL_PATH: /tmp/runs/output
       PROJECT_ROOT: /root/code/IsaacLab-NeRD
       OSMO_EXPERIMENT_PRESET: "{{ osmo_experiment_preset }}"
+      NERD_NUM_GPUS: "{{ num_gpu }}"
+      TRAIN_CFG_OVERRIDES: "{{ train_cfg_overrides }}"
       WORKFLOW_BASE_NAME: "{{ workflow_base_name }}"
       DATASET_SUBDIR: "{{ dataset_subdir }}"
       DATASET_CACHE_MODE: "{{ dataset_cache_mode }}"
@@ -51,7 +53,6 @@ workflow:
       WANDB_PROJECT_NAME: "{{ wandb_project_name }}"
       WANDB_EXP_NAME: "{{ wandb_exp_name }}"
       WANDB_ENTITY: "{{ wandb_entity }}"
-      WANDB_API_KEY: "{{ wandb_api_key }}"
     command:
     - /bin/bash
     args:
@@ -77,6 +78,7 @@ default-values:
   workflow_name: anymal-c-newton-native
   workflow_base_name: anymal-c-newton-native
   osmo_experiment_preset: anymal_newton_native
+  train_cfg_overrides: ""
   image: nvcr.io/nvidia/isaac-lab:3.0.0-beta2
   num_cpu: 15
   num_gpu: 1
@@ -115,7 +117,6 @@ default-values:
   wandb_project_name: nerd-newton
   wandb_exp_name: ""
   wandb_entity: ""
-  wandb_api_key: ""
   init_sh_localpath: ./init.sh
   entrypoint_localpath: ./entrypoint.sh
   nvdataset_io_localpath: ./lib/nvdataset_io.py

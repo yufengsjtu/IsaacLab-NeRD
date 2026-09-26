@@ -8,26 +8,66 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
+from importlib.metadata import version
 from pathlib import Path
+
+
+def _check_sdk_version() -> str:
+    from packaging.version import Version
+
+    installed = version("nvdataset")
+    if Version(installed) < Version("0.95.0"):
+        raise RuntimeError(
+            f"NV-Datasets SDK {installed} is unsupported; "
+            f"install a supported SDK (at least 0.95.0) in {sys.executable}."
+        )
+    return installed
+
+
+def _delegate(arguments: list[str]) -> bool:
+    """Run storage operations in the image's isolated SDK interpreter when configured."""
+    interpreter = os.environ.get("NVDATASET_PYTHON")
+    if not interpreter or os.path.abspath(interpreter) == os.path.abspath(sys.executable):
+        return False
+    if not Path(interpreter).is_file():
+        raise FileNotFoundError(f"Configured NV-Datasets interpreter is unavailable: {interpreter}")
+    environment = dict(os.environ)
+    for key in ("PYTHONPATH", "PYTHONHOME", "LD_LIBRARY_PATH"):
+        environment.pop(key, None)
+    environment["VIRTUAL_ENV"] = str(Path(interpreter).parent.parent)
+    environment["PATH"] = str(Path(interpreter).parent) + os.pathsep + environment.get("PATH", "")
+    subprocess.run([interpreter, str(Path(__file__).resolve()), *arguments], check=True, env=environment)
+    return True
 
 
 def _load_or_create_dataset(client, name: str, description: str = ""):
     try:
         return client.load_dataset(name=name)
-    except Exception as exc:
-        print(f"Could not load dataset {name!r}; creating it. Load error: {exc}")
+    except ValueError as exc:
+        if exc.args != ("Did not find dataset", name):
+            raise
+        print(f"Dataset {name!r} was not found; creating it.")
         return client.create_and_load_dataset(name=name, description=description)
 
 
-def _replace_dataset(client, name: str, description: str = ""):
+def _replace_dataset(client, name: str, description: str = "", *, allow_replace: bool = False):
     try:
         dataset = client.load_dataset(name=name)
-    except Exception as exc:
-        print(f"Could not load dataset {name!r}; creating it. Load error: {exc}")
+    except ValueError as exc:
+        if exc.args != ("Did not find dataset", name):
+            raise
+        print(f"Dataset {name!r} was not found; creating it.")
         return client.create_and_load_dataset(name=name, description=description)
 
+    if not allow_replace:
+        raise FileExistsError(
+            f"Dataset {name!r} already exists. Use a new code dataset name; deletion requires explicit --allow-replace."
+        )
     dataset_id = dataset.id
     print(f"Dataset {name!r} exists; deleting it so this upload replaces its contents.")
     if hasattr(client, "force_delete_dataset"):
@@ -136,6 +176,11 @@ def download_dataset(name: str, output_dir: Path, snapshot: str = "", prefix: st
             f"Requested dataset={name!r}, snapshot={snapshot!r}."
         )
 
+    if _delegate(
+        ["download", "--dataset", name, "--output-dir", str(output_dir), "--snapshot", snapshot, "--prefix", prefix]
+    ):
+        return
+    _check_sdk_version()
     import nvdataset
 
     client = nvdataset.NVDatasetClient()
@@ -145,6 +190,11 @@ def download_dataset(name: str, output_dir: Path, snapshot: str = "", prefix: st
 
 def upload_directory(name: str, source_dir: Path, description: str = ""):
     """Upload a directory into an existing or newly created NV-Datasets dataset."""
+    if _delegate(
+        ["upload-directory", "--dataset", name, "--source-dir", str(source_dir), "--description", description]
+    ):
+        return
+    _check_sdk_version()
     import nvdataset
 
     client = nvdataset.NVDatasetClient()
@@ -152,21 +202,30 @@ def upload_directory(name: str, source_dir: Path, description: str = ""):
     dataset.upload_directory(source_dir=str(source_dir))
 
 
-def replace_dataset_with_files(name: str, files: list[Path], description: str = ""):
-    """Replace an NV-Datasets dataset with the provided file list."""
+def replace_dataset_with_files(name: str, files: list[Path], description: str = "", *, allow_replace: bool = False):
+    """Upload a new code dataset; replacing existing contents requires explicit authorization."""
+    arguments = ["replace-files", "--dataset", name, "--description", description]
+    if allow_replace:
+        arguments.append("--allow-replace")
+    if _delegate([*arguments, "--", *map(str, files)]):
+        return
+    _check_sdk_version()
     import nvdataset
 
     client = nvdataset.NVDatasetClient()
-    dataset = _replace_dataset(client, name, description)
+    dataset = _replace_dataset(client, name, description, allow_replace=allow_replace)
     dataset.upload_files(files=[str(path) for path in files])
 
 
 def _cmd_check(_args: argparse.Namespace):
+    if _delegate(["check"]):
+        return
+    installed = _check_sdk_version()
     import _cffi_backend  # noqa: F401
     import dateutil.parser  # noqa: F401
     import nvdataset.cli.cli  # noqa: F401
 
-    print("Validated nvdataset Python dependencies.")
+    print(f"Validated nvdataset {installed} dependencies in {sys.executable}.")
 
 
 def _cmd_download(args: argparse.Namespace):
@@ -191,6 +250,7 @@ def _cmd_replace_files(args: argparse.Namespace):
         name=args.dataset,
         files=[Path(path) for path in args.files],
         description=args.description,
+        allow_replace=args.allow_replace,
     )
 
 
@@ -217,6 +277,9 @@ def main():
     replace_parser = subparsers.add_parser("replace-files", help="Replace a dataset with files.")
     replace_parser.add_argument("--dataset", required=True)
     replace_parser.add_argument("--description", default="")
+    replace_parser.add_argument(
+        "--allow-replace", action="store_true", help="Explicitly allow deleting an existing dataset before upload."
+    )
     replace_parser.add_argument("files", nargs="+")
     replace_parser.set_defaults(func=_cmd_replace_files)
 

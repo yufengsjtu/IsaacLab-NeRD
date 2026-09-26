@@ -101,9 +101,13 @@ install_storage_deps() {
             python3 /tmp/swift_io.py check
             ;;
         nvdataset)
-            python3 -m pip install --quiet --force-reinstall cffi
-            python3 -m pip install --quiet -U --extra-index-url "$NVDATASET_INDEX_URL" nvdataset
-            python3 /tmp/nvdataset_io.py check
+            if [[ -z "${NVDATASET_PYTHON:-}" && -x /opt/nvdataset-venv/bin/python ]]; then
+                export NVDATASET_PYTHON=/opt/nvdataset-venv/bin/python
+            fi
+            if ! python3 /tmp/nvdataset_io.py check; then
+                echo "[FATAL] Use an image with a supported preinstalled NV-Datasets SDK; no runtime package-index access is attempted." >&2
+                exit 1
+            fi
             ;;
         *)
             echo "[FATAL] Unsupported storage backend: $STORAGE_BACKEND"
