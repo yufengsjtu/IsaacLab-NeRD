@@ -118,6 +118,151 @@ def test_normal_checkpoint_roundtrip_rejects_changed_semantics(tmp_path):
         reconstruct_model_from_checkpoint(checkpoint, solver, device="cpu")
 
 
+KEY_HEAD = {
+    "enabled": True,
+    "key_q_start": 2,
+    "num_keys": 3,
+    "key_body_slot_start": 3,
+    "history_steps": 2,
+    "embed_dim": 4,
+    "summary_dim": 8,
+    "context_dim": 8,
+    "hidden_sizes": [16],
+}
+
+
+def make_key_head_model():
+    """Two robot joints (q 0-1) and three keys (q 2-4); key i owns contact body slot 3 + i of six."""
+    from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_BODY_SLOT_INDEX, CONTACT_TOKEN_VALID_INDEX
+
+    torch.manual_seed(0)
+    tokens = torch.randn(2, 4, 3, 17)
+    tokens[..., CONTACT_TOKEN_VALID_INDEX] = torch.tensor([1.0, 1.0, 0.0])
+    tokens[..., CONTACT_TOKEN_BODY_SLOT_INDEX] = torch.tensor([4.0, 1.0, 0.0])
+    inputs = {
+        "states_embedding": torch.randn(2, 4, 10),
+        "joint_f": torch.randn(2, 4, 5),
+        "gravity_dir": torch.randn(2, 4, 3),
+        "contact_tokens": tokens,
+    }
+    network = {
+        **model_config(),
+        "normalize_input": True,
+        "key_head": dict(KEY_HEAD),
+        "transformer": {"n_layer": 1, "n_head": 2, "n_embd": 16, "block_size": 8, "dropout": 0.0, "bias": False},
+    }
+    input_cfg = {
+        "low_dim": ["states_embedding", "joint_f", "gravity_dir"],
+        "contact_set": {"dim": 17, "encoder_type": "shared_per_body", "body_latent_dim": 4, "hidden_dim": 8},
+    }
+    model = ModelMixedInput(inputs, 10, input_cfg, network, device="cpu", num_bodies=6)
+    rms = {}
+    for name, shape in (
+        ("states_embedding", (10,)),
+        ("joint_f", (5,)),
+        ("gravity_dir", (3,)),
+        ("contact_tokens", (17,)),
+    ):
+        rms[name] = RunningMeanStd(shape=shape, device="cpu")
+        rms[name].update(torch.randn(64, *shape) * torch.rand(shape) + torch.randn(shape), batch_dim=True)
+    model.set_input_rms(rms)
+    output_rms = RunningMeanStd(shape=(10,), device="cpu")
+    output_rms.update(torch.randn(64, 10) * torch.rand(10) + torch.randn(10), batch_dim=True)
+    model.set_output_rms(output_rms)
+    model.set_robot_net_normal_force_rms(RunningMeanStd(shape=(7, 3), device="cpu"))
+    return model, inputs, input_cfg, network
+
+
+def test_key_head_assembles_robot_and_pooled_key_outputs_in_original_order():
+    model, inputs, _, _ = make_key_head_model()
+    output = model({k: v.clone() for k, v in inputs.items()}, return_aux=True)
+    assert output.state_prediction.shape == (2, 4, 10) and bool(torch.isfinite(output.state_prediction).all())
+    output.state_prediction.square().sum().backward()
+    missing = [name for name, parameter in model.named_parameters() if parameter.grad is None]
+    unused_heads = ("robot_net_normal_force_head", "robot_normal_contact_head")
+    assert [name for name in missing if not name.startswith(unused_heads)] == []
+
+    # Zero decoder outputs must map to per-coordinate robot means and pooled key means.
+    with torch.no_grad():
+        for layer in (model.model.output_net, model.key_head.decoder[-1]):
+            layer.weight.zero_()
+            layer.bias.zero_()
+        state = model({k: v.clone() for k, v in inputs.items()})
+    mean = model.output_rms.mean
+    robot = [0, 1, 5, 6]
+    torch.testing.assert_close(state[..., robot], mean[robot].expand_as(state[..., robot]))
+    for keys in ([2, 3, 4], [7, 8, 9]):
+        torch.testing.assert_close(state[..., keys], mean[keys].mean().expand_as(state[..., keys]))
+
+
+def test_key_head_checkpoint_roundtrip_and_cached_inference_rejection(tmp_path):
+    model, inputs, input_cfg, network = make_key_head_model()
+    path = tmp_path / "model.pt"
+    save_checkpoint(path, model, "SO101-Keyboard-Fixed", {"inputs": input_cfg, "network": network})
+    solver = SimpleNamespace(
+        get_neural_model_inputs=lambda: inputs,
+        prediction_dim=10,
+        contact_mode="newton_native",
+        num_contact_bodies_per_env=6,
+    )
+    restored = reconstruct_model_from_checkpoint(
+        torch.load(path, map_location="cpu", weights_only=False), solver, device="cpu"
+    )
+    torch.testing.assert_close(
+        model({k: v.clone() for k, v in inputs.items()}), restored({k: v.clone() for k, v in inputs.items()})
+    )
+    restored.eval()
+    with torch.no_grad(), pytest.raises(RuntimeError, match="key_head"):
+        restored.forward_feature_cached({k: v.clone() for k, v in inputs.items()})
+    bad = {**network, "key_head": {**KEY_HEAD, "num_keys": 5}}
+    with pytest.raises(ValueError, match="Key joints"):
+        ModelMixedInput(inputs, 10, input_cfg, bad, device="cpu", num_bodies=6)
+
+
+def test_pooled_key_velocity_weights_match_concatenated_samples_and_key_layout_is_checked():
+    from isaaclab_neural.train.trainers import keyboard_pooled_key_velocity_weights, validate_keyboard_key_head_layout
+
+    samples = torch.randn(500, 8, dtype=torch.float64) * torch.tensor([1, 2, 3, 4, 0.1, 0.2, 5, 0.3]) + torch.arange(
+        8.0
+    )
+    rms = RunningMeanStd(shape=(8,), device="cpu")
+    rms.update(samples.float(), batch_dim=True)
+    weights = keyboard_pooled_key_velocity_weights(torch.ones(8), rms, num_q=4, key_q_indices=[2, 3])
+    expected = 1.0 / torch.sqrt(samples[:, [6, 7]].reshape(-1).var(unbiased=False) + 1e-5)
+    torch.testing.assert_close(weights[[6, 7]].double(), expected.expand(2), rtol=1e-4, atol=1e-6)
+    torch.testing.assert_close(weights[:6], torch.ones(6))
+
+    model, _, _, _ = make_key_head_model()
+    metadata = {
+        "asset_order": ["robot", "keyboard"],
+        "num_q": 5,
+        "key_q_indices": [2, 3, 4],
+        "joint_names": {"keyboard": ["key_0_joint", "key_1_joint", "key_2_joint"], "robot": ["a", "b"]},
+        "body_names": {"keyboard": ["base", "key_0", "key_1", "key_2"], "robot": ["base", "link"]},
+    }
+    validate_keyboard_key_head_layout(model.key_head, metadata)
+    metadata["body_names"]["keyboard"] = ["base", "key_0", "key_2", "key_1"]
+    with pytest.raises(ValueError, match="different keys"):
+        validate_keyboard_key_head_layout(model.key_head, metadata)
+
+
+def test_key_event_weights_select_changing_keys_from_targets_only():
+    from isaaclab_neural.train.trainers import keyboard_key_event_weights
+
+    target = torch.zeros(3, 8)
+    target[0, 2] = 2.0e-5  # key 2 position change
+    target[1, 7] = -0.05  # key 3 velocity change
+    target[2, [0, 4]] = 1.0  # robot-only changes
+    weights = keyboard_key_event_weights(target, num_q=4, key_q_indices=[2, 3], weight=5.0)
+    expected = torch.ones(3, 8)
+    expected[0, [2, 6]] = 5.0
+    expected[1, [3, 7]] = 5.0
+    torch.testing.assert_close(weights, expected)
+    for bad in ({"weight": 0.5}, {"weight": 2.0, "position_threshold_m": 0.0}, {"weight": float("nan")}):
+        with pytest.raises(ValueError, match="event weighting"):
+            keyboard_key_event_weights(target, num_q=4, key_q_indices=[2, 3], **bad)
+
+
 def test_robot_force_cache_reset_is_selective_and_cached_inference_is_rejected():
     from isaaclab_neural.solvers.neural_solver import NeuralSolver
 
@@ -203,6 +348,70 @@ def test_keyboard_position_loss_scale_changes_only_key_position_coordinates():
             )
     with pytest.raises(ValueError, match="indices"):
         keyboard_position_loss_weights(weights, num_q=4, key_q_indices=[4], scale_m=0.0001)
+
+
+def test_keyboard_state_group_scale_matches_group_mean_reference():
+    from isaaclab_neural.train.trainers import keyboard_state_group_loss_scale
+
+    errors = torch.rand(5, 8, dtype=torch.float64)
+    robot, keys = [0, 1, 4, 5], [2, 3, 6, 7]
+    for robot_weight, key_weight in ((0.5, 0.5), (1.0, 0.0), (0.2, 3.0)):
+        scale = keyboard_state_group_loss_scale(
+            num_q=4, key_q_indices=[2, 3], robot_weight=robot_weight, key_weight=key_weight
+        ).double()
+        expected = robot_weight * errors[:, robot].mean() + key_weight * errors[:, keys].mean()
+        torch.testing.assert_close((errors * scale).mean(), expected)
+    for weights in ((0.0, 0.0), (-1.0, 1.0), (float("nan"), 1.0), (float("inf"), 1.0)):
+        with pytest.raises(ValueError, match="weights"):
+            keyboard_state_group_loss_scale(
+                num_q=4, key_q_indices=[2, 3], robot_weight=weights[0], key_weight=weights[1]
+            )
+    for indices in ([4], [2, 2], [0, 1, 2, 3]):
+        with pytest.raises(ValueError, match="indices"):
+            keyboard_state_group_loss_scale(num_q=4, key_q_indices=indices, robot_weight=1.0, key_weight=1.0)
+
+
+def test_keyboard_state_group_loss_excludes_zero_weight_group_and_logs_group_errors():
+    from isaaclab_neural.train.trainers import VanillaTrainer, keyboard_state_group_loss_scale
+
+    torch.manual_seed(0)
+    inputs = {"states_embedding": torch.randn(2, 3, 4)}
+    model = ModelMixedInput(inputs, 4, {"low_dim": ["states_embedding"]}, model_config(), device="cpu", num_bodies=116)
+    model.set_output_rms(RunningMeanStd(shape=(4,), device="cpu"))
+    model.set_robot_net_normal_force_rms(RunningMeanStd(shape=(7, 3), device="cpu"))
+    trainer = VanillaTrainer.__new__(VanillaTrainer)
+    trainer.neural_model = model
+    trainer.force_head_enabled = False
+    trainer.robot_force_head_enabled = True
+    trainer.robot_force_loss_weight = 1.0
+    trainer.loss_weights = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    trainer.loss_func = torch.nn.MSELoss()
+    trainer.neural_env = SimpleNamespace(frame_dt=0.01)
+    trainer.neural_solver = SimpleNamespace(
+        dof_q_per_env=2, convert_prediction_to_next_states=lambda **kwargs: kwargs["prediction"], wrap2PI=lambda _: None
+    )
+    trainer.cfg = {"keyboard_dataset_contracts": {"train": {"num_q": 2, "key_q_indices": [1]}}}
+    data = {
+        **inputs,
+        "states": torch.zeros(2, 3, 4),
+        "next_states": torch.zeros(2, 3, 4),
+        "prediction_target": torch.randn(2, 3, 4),
+        LABEL_KEY: torch.zeros(2, 3, 7, 3),
+    }
+    changed = {key: value.clone() for key, value in data.items()}
+    changed["prediction_target"][..., [1, 3]] += 5.0
+
+    baseline, metrics = trainer.compute_loss(data, train=False)
+    baseline_changed, _ = trainer.compute_loss(changed, train=False)
+    assert not torch.isclose(baseline, baseline_changed)
+    assert {f"{group}_weighted_state_MSE" for group in ("robot_q", "robot_qd", "key_q", "key_qd")} <= metrics.keys()
+
+    trainer.state_loss_group_scale = keyboard_state_group_loss_scale(
+        num_q=2, key_q_indices=[1], robot_weight=1.0, key_weight=0.0
+    )
+    robot_only, _ = trainer.compute_loss(data, train=False)
+    robot_only_changed, _ = trainer.compute_loss(changed, train=False)
+    torch.testing.assert_close(robot_only, robot_only_changed)
 
 
 def test_training_adapter_honors_physics_frame_override_without_changing_legacy_default():

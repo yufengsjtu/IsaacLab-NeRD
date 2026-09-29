@@ -38,6 +38,8 @@ algorithm:
     beta: 0.0
     keyboard_key_position_scale_m: null
     keyboard_robot_position_scale_rad: null
+    keyboard_state_group_weights: null
+    keyboard_key_velocity_weighting: per_coordinate
     robot_net_normal_force:
       weight: 1.0
   optimizer:

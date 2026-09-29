@@ -21,6 +21,7 @@ from isaaclab_neural.contacts.tensor_utils import (
 )
 from isaaclab_neural.models.base_models import CNNBase, GRUBase, LSTMBase, MLPBase
 from isaaclab_neural.models.contact_set_model import ContactSetEncoderBlock
+from isaaclab_neural.models.keyboard_key_head import REQUIRED_LOW_DIM_INPUTS, KeyboardKeyHead
 from isaaclab_neural.models.model_kan import KAN
 from isaaclab_neural.models.model_transformer import GPT, GPTConfig
 from isaaclab_neural.models.shared_per_body_contact_encoder import SharedPerBodyContactEncoder
@@ -93,6 +94,34 @@ class ModelMixedInput(nn.Module):
             transformer_cfg=network_cfg.get("transformer"),
             num_bodies=num_bodies,
         )
+
+        self.key_head = None
+        key_head_cfg = network_cfg.get("key_head") or {}
+        if key_head_cfg.get("enabled", False):
+            encoder = getattr(self, "contact_set_encoder", None)
+            if not isinstance(encoder, SharedPerBodyContactEncoder):
+                raise ValueError("network.key_head requires the shared_per_body contact encoder.")
+            if "transformer" not in network_cfg or "rnn" in network_cfg or "kan" in network_cfg:
+                raise ValueError("network.key_head requires a Transformer trunk without RNN or KAN decoders.")
+            if (
+                tuple(self.low_dim_input_names) != REQUIRED_LOW_DIM_INPUTS
+                or network_cfg["encoder"]["low_dim"]["layer_sizes"]
+            ):
+                raise ValueError(f"network.key_head requires identity low_dim inputs {REQUIRED_LOW_DIM_INPUTS}.")
+            if not self.normalize_output or len(self.encoders) != 2:
+                raise ValueError("network.key_head requires output normalization and no additional input encoders.")
+            if input_sample["states_embedding"].shape[-1] != output_dim:
+                raise ValueError("network.key_head requires identity state embeddings matching the prediction layout.")
+            self.key_head = KeyboardKeyHead(
+                key_head_cfg,
+                output_dim=output_dim,
+                num_bodies=encoder.num_bodies,
+                body_latent_dim=encoder.body_latent_dim,
+                trunk_dim=int(network_cfg["transformer"]["n_embd"]),
+                device=device,
+            )
+            self.feature_dim = self.key_head.trunk_input_dim
+            output_dim = self.key_head.robot_state_dim
 
         if "rnn" in network_cfg:
             self.is_rnn = True
@@ -416,10 +445,27 @@ class ModelMixedInput(nn.Module):
             output = output_rms.normalize(output, un_norm=True)
         return output
 
+    def _key_head_inputs(self, input_dict):
+        """Return trunk inputs and per-key features for the factorized keyboard model."""
+        key_head = cast(KeyboardKeyHead, self.key_head)
+        latents = self.encoders["contact_set"](input_dict["contact_tokens"])
+        states_rms = None
+        if self.normalize_input and self.input_rms is not None:
+            states_rms = cast(RunningMeanStd, self.input_rms["states_embedding"])
+        key_features = key_head.key_features(input_dict["states_embedding"], latents, states_rms)
+        return key_head.trunk_input(input_dict, latents, key_features), key_features
+
     def _extract_trunk_features(self, input_dict, inject_noise=False):
-        """Preprocess inputs and run the shared encoder and temporal trunk."""
+        """Preprocess inputs and run the shared encoder and temporal trunk.
+
+        Returns trunk features and, for the factorized keyboard model, per-key features (otherwise ``None``).
+        """
         input_dict = self._prepare_inputs(input_dict, inject_noise)
-        features = self.extract_input_features(input_dict)  # (B, T, feature_dim)
+        key_features = None
+        if getattr(self, "key_head", None) is not None:
+            features, key_features = self._key_head_inputs(input_dict)
+        else:
+            features = self.extract_input_features(input_dict)  # (B, T, feature_dim)
 
         if self.is_rnn:
             if self.rnn is None:
@@ -431,14 +477,19 @@ class ModelMixedInput(nn.Module):
                 raise RuntimeError("Transformer inference requires an initialized transformer module.")
             features = self.transformer_model(features)  # (B, T, transform_embed_dim)
 
-        return features
+        return features, key_features
 
-    def _decode_state(self, features, deterministic=False):
+    def _decode_state(self, features, deterministic=False, key_features=None):
         """Decode the state prediction from shared trunk features."""
         if self.model is None:
             raise RuntimeError("State prediction requires an initialized decoder.")
         output = self.model(features, deterministic=deterministic)
-        return self._process_output(output)
+        if getattr(self, "key_head", None) is None:
+            return self._process_output(output)
+        if key_features is None or self.output_rms is None:
+            raise RuntimeError("The keyboard key head requires per-key features and output RMS statistics.")
+        key_head = cast(KeyboardKeyHead, self.key_head)
+        return key_head.assemble(output, key_head.decode(features, key_features), self.output_rms)
 
     def forward(
         self,
@@ -471,8 +522,8 @@ class ModelMixedInput(nn.Module):
                 inject_noise=inject_noise,
             )
 
-        features = self._extract_trunk_features(input_dict, inject_noise=inject_noise)
-        output = self._decode_state(features, deterministic=deterministic)
+        features, key_features = self._extract_trunk_features(input_dict, inject_noise=inject_noise)
+        output = self._decode_state(features, deterministic=deterministic, key_features=key_features)
 
         if single_step:
             output = output[:, -1:, :]
@@ -481,8 +532,8 @@ class ModelMixedInput(nn.Module):
 
     def forward_with_aux(self, input_dict, single_step=False, deterministic=False, inject_noise=False):
         """Return state and enabled auxiliary predictions from one trunk pass."""
-        features = self._extract_trunk_features(input_dict, inject_noise=inject_noise)
-        state_prediction = self._decode_state(features, deterministic=deterministic)
+        features, key_features = self._extract_trunk_features(input_dict, inject_noise=inject_noise)
+        state_prediction = self._decode_state(features, deterministic=deterministic, key_features=key_features)
         auxiliary_predictions = {}
         if self.predict_body_net_contact_forces:
             force_prediction = self.body_net_contact_force_head(
@@ -566,6 +617,8 @@ class ModelMixedInput(nn.Module):
         transformer = self.transformer_model
         if not self.is_transformer or transformer is None or self.is_rnn:
             raise RuntimeError("forward_feature_cached() requires a Transformer model without an RNN.")
+        if getattr(self, "key_head", None) is not None:
+            raise RuntimeError("forward_feature_cached() is not supported with network.key_head; use full windows.")
         if self.training or torch.is_grad_enabled():
             raise RuntimeError(
                 "forward_feature_cached() requires eval mode and torch.inference_mode() or torch.no_grad()."
@@ -636,6 +689,8 @@ class ModelMixedInput(nn.Module):
         transformer = self.transformer_model
         if not self.is_transformer or transformer is None or self.is_rnn:
             raise RuntimeError("forward_cached() requires a Transformer model without an RNN.")
+        if getattr(self, "key_head", None) is not None:
+            raise RuntimeError("forward_cached() is not supported with network.key_head; use full windows.")
 
         input_dict = self._prepare_inputs(dict(input_dict), inject_noise=False)
         features = self.extract_input_features(input_dict)
@@ -690,6 +745,7 @@ class ModelMixedInput(nn.Module):
             "robot_net_normal_force_head",
             "robot_normal_contact_head",
             "robot_net_normal_force_rms",
+            "key_head",
         ):
             module = getattr(self, name, None)
             if module is not None:
