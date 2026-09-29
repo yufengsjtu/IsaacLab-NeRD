@@ -383,6 +383,110 @@ def test_shared_per_body_encoder_preserves_contact_count_information():
     assert not torch.allclose(encoder(one_contact), encoder(two_contacts))
 
 
+@pytest.mark.parametrize("active", [0, 2, 8])
+@pytest.mark.parametrize(
+    "device",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"))],
+)
+def test_shared_encoder_compacts_valid_tokens_with_equivalent_gradients(active, device):
+    from copy import deepcopy
+
+    torch.manual_seed(7)
+    encoder = SharedPerBodyContactEncoder(num_bodies=3, body_latent_dim=8, hidden_dim=16, device=device).double()
+    reference = deepcopy(encoder)
+    tokens = torch.randn(2, 3, 8, CONTACT_TOKEN_DIM, dtype=torch.float64, device=device)
+    tokens[..., 0] = 0
+    tokens[..., :active, 0] = 1
+    tokens[..., 1] = torch.arange(8, device=device) % 5 - 1
+    tokens[..., 2] = torch.arange(8, device=device) % 3 - 1
+    tokens.requires_grad_()
+    expected_tokens = tokens.detach().clone().requires_grad_()
+    valid = (expected_tokens[..., 0] > 0.5) & (expected_tokens[..., 1] >= 0) & (expected_tokens[..., 1] < 3)
+    features = reference._encode_contacts(expected_tokens)
+    bodies = []
+    for body in range(3):
+        weights = (valid & (expected_tokens[..., 1] == body)).unsqueeze(-1).to(features.dtype)
+        count = weights.sum(-2)
+        latent = (features * weights).sum(-2) / count.clamp_min(1) + reference.count_proj(torch.log1p(count))
+        bodies.append(torch.where(count > 0, latent, torch.zeros_like(latent)))
+    expected = torch.stack(bodies, dim=-2)
+    seen = []
+    hook = encoder.contact_encoder.register_forward_pre_hook(
+        lambda module, inputs: seen.append(inputs[0].numel() // 13)
+    )
+    actual = encoder(tokens)
+    hook.remove()
+    assert seen == [int(valid.sum())]
+    torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-12)
+    actual.square().sum().backward()
+    expected.square().sum().backward()
+    torch.testing.assert_close(tokens.grad, expected_tokens.grad, rtol=1e-10, atol=1e-12)
+    for a, b in zip(encoder.parameters(), reference.parameters(), strict=True):
+        assert a.grad is not None and b.grad is not None
+        torch.testing.assert_close(a.grad, b.grad, rtol=1e-10, atol=1e-12)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_shared_encoder_keeps_static_cuda_graph_path():
+    encoder = SharedPerBodyContactEncoder(num_bodies=3, device="cuda")
+    tokens = torch.zeros(2, 8, CONTACT_TOKEN_DIM, device="cuda")
+    tokens[0, 0] = _token(1).cuda()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            encoder(tokens)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = encoder(tokens)
+    for active in (False, True):
+        tokens[..., 0] = float(active)
+        graph.replay()
+        torch.testing.assert_close(output, encoder(tokens))
+
+
+def test_shared_encoder_compiles_without_dynamic_output_shapes():
+    encoder = SharedPerBodyContactEncoder(num_bodies=3)
+    tokens = torch.zeros(2, 8, CONTACT_TOKEN_DIM)
+    compiled = torch.compile(encoder, backend="eager", fullgraph=True)
+    for active in (False, True):
+        tokens[..., 0] = float(active)
+        torch.testing.assert_close(compiled(tokens), encoder(tokens))
+
+
+def _sparse_encoder_ddp_worker(rank, rendezvous):
+    from datetime import timedelta
+
+    import torch.distributed as dist
+    from torch.nn.parallel import DistributedDataParallel
+
+    torch.set_num_threads(1)
+    dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2, timeout=timedelta(seconds=60))
+    try:
+        torch.manual_seed(11)
+        model = DistributedDataParallel(SharedPerBodyContactEncoder(num_bodies=3))
+        for active_rank in (0, 1):
+            model.zero_grad(set_to_none=True)
+            tokens = torch.zeros(2, 8, CONTACT_TOKEN_DIM)
+            if rank == active_rank:
+                tokens[0, 0] = _token(1)
+            model(tokens).square().sum().backward()
+            assert all(parameter.grad is not None for parameter in model.parameters())
+            gradients = torch.cat([parameter.grad.flatten() for parameter in model.parameters()])
+            gathered = [torch.empty_like(gradients) for _ in range(2)]
+            dist.all_gather(gathered, gradients)
+            torch.testing.assert_close(gathered[0], gathered[1], rtol=0, atol=0)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_sparse_encoder_ddp_handles_rank_without_contacts(tmp_path):
+    torch.multiprocessing.spawn(
+        _sparse_encoder_ddp_worker, args=(f"file://{tmp_path / 'rendezvous'}",), nprocs=2, join=True
+    )
+
+
 def test_shared_per_body_encoder_has_finite_forward_and_backward():
     torch.manual_seed(0)
     encoder = SharedPerBodyContactEncoder(num_bodies=2, body_latent_dim=8, hidden_dim=16)

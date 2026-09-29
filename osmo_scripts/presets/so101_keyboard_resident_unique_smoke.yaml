@@ -1,6 +1,11 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 workflow:
   base_name: so101-keyboard-fixed-smoke
-  dataset_subdir: so101-keyboard-fixed-smoke-v1
+  dataset_subdir: so101-keyboard-fixed-smoke-v2
   image: docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095
   nucleus_credential: so101-nucleus-8ed03716ea4e49d1833fe66f2e5e2dc2
 resources:
@@ -31,7 +36,7 @@ experiment:
   collection_mode: policy
   env_name: SO101-Keyboard-Fixed
   robot_name: SO101-Keyboard-Fixed
-  dataset_dir: ./data/datasets/so101-keyboard-fixed-smoke-v1
+  dataset_dir: ./data/datasets/so101-keyboard-fixed-smoke-v2
   train_task: IsaacContrib-Keyboard-SO101-NeRD
   train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/SO101/transformer_keyboard_throughput.yaml
   train_cfg_overrides: algorithm.dataset.max_capacity 16384 algorithm.dataset.valid_max_capacity 8192 algorithm.dataset.num_data_workers 7 algorithm.num_epochs 2 algorithm.num_iters_per_epoch 2 algorithm.num_valid_batches 1

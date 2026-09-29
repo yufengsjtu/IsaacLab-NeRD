@@ -293,7 +293,7 @@ def resolve_native_projection(
 
 
 def read_and_project_frames(
-    group: h5py.Group,
+    group: h5py.Group | Mapping[str, h5py.Dataset],
     frame_indices: np.ndarray,
     projection: NativeContactProjection,
 ) -> dict[str, np.ndarray]:
@@ -313,6 +313,12 @@ def read_and_project_frames(
         raise IndexError(f"Native-contact frame indices must be in [0, {frame_count}), got {indices}.")
     order = np.argsort(indices, kind="stable")
     sorted_indices = indices[order]
+    if projection.packing_policy == "body_round_robin_pair_atomic" and np.any(
+        sorted_indices[1:] == sorted_indices[:-1]
+    ):
+        unique, inverse = np.unique(indices, return_inverse=True)
+        projected = read_and_project_frames(group, unique, projection)
+        return {key: value[inverse] for key, value in projected.items()}
     frames: list[dict[str, np.ndarray] | None] = [None] * indices.size
     run_start = 0
     while run_start < sorted_indices.size:
@@ -325,6 +331,7 @@ def read_and_project_frames(
             int(run_indices[0]),
             int(run_indices[-1]) + 1,
             projection.input_keys,
+            projection,
         )
         for sorted_position, frame in enumerate(run_frames, start=run_start):
             frames[int(order[sorted_position])] = frame
@@ -336,16 +343,40 @@ def read_and_project_frames(
 
 
 def _read_contiguous_frames(
-    group: h5py.Group,
+    group: h5py.Group | Mapping[str, h5py.Dataset],
     frame_start: int,
     frame_end: int,
     field_names: tuple[str, ...],
+    projection: NativeContactProjection | None = None,
 ) -> list[dict[str, np.ndarray]]:
-    """Read one contiguous frame range with one HDF5 slice per pair field."""
+    """Read contiguous pairs, skipping geometry when no pair survives the configured filter."""
     offsets_dataset = cast(h5py.Dataset, group["frame_offsets"])
     offsets = np.asarray(offsets_dataset[frame_start : frame_end + 1], dtype=np.int64)
-    value_start = int(offsets[0])
-    values = {name: np.asarray(cast(h5py.Dataset, group[name])[value_start : int(offsets[-1])]) for name in field_names}
+    value_start, value_end = int(offsets[0]), int(offsets[-1])
+    if value_start == value_end:
+        return [_empty_native_arrays(field_names) for _ in range(frame_end - frame_start)]
+    values = {}
+    if projection is not None and projection.contact_filter != "none":
+        from isaaclab_neural.contacts.native_pair_projector import native_pair_filter_mask
+
+        filter_fields = ("separation",)
+        if projection.contact_filter == "solver_active_movable":
+            filter_fields += ("body_ids_0", "body_ids_1", "body_slots_0", "body_slots_1")
+        values = {name: np.asarray(cast(h5py.Dataset, group[name])[value_start:value_end]) for name in filter_fields}
+        keep = native_pair_filter_mask(
+            {name: torch.from_numpy(value) for name, value in values.items()},
+            projection.contact_filter,
+            projection.fixed_body_slots,
+        )
+        if not bool(keep.any()):
+            return [_empty_native_arrays(field_names) for _ in range(frame_end - frame_start)]
+    values.update(
+        {
+            name: np.asarray(cast(h5py.Dataset, group[name])[value_start:value_end])
+            for name in field_names
+            if name not in values
+        }
+    )
     relative_offsets = offsets - value_start
     return [
         {name: value[int(relative_offsets[index]) : int(relative_offsets[index + 1])] for name, value in values.items()}

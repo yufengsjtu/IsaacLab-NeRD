@@ -88,6 +88,50 @@ def test_native_contacts_are_compact_and_appendable(tmp_path) -> None:
         assert "contact_masks" not in data_group
 
 
+@pytest.mark.parametrize(
+    "contact_filter,has_contacts",
+    [("solver_active", False), ("solver_active_movable", False), ("solver_active_movable", True)],
+)
+def test_filtered_empty_ranges_skip_geometry_reads(tmp_path, monkeypatch, contact_filter, has_contacts):
+    from isaaclab_neural.data.native_contacts import NativeContactProjection, read_and_project_frames
+
+    path = tmp_path / "native.hdf5"
+    rollouts = _native_rollouts()
+    pairs = rollouts["native_contacts"]
+    if contact_filter == "solver_active":
+        pairs["separation"].fill_(0.1)
+    fixed = (0,) if has_contacts else (0, 1)
+    write_rollouts_to_hdf5(path, rollouts, env_name="Test-Env")
+    expected = project_native_pairs(
+        {key: value for key, value in pairs.items() if key != "frame_counts"},
+        num_frames=2,
+        frame_ids=torch.zeros(2, dtype=torch.long),
+        representation="contact_tokens",
+        max_contact_tokens=4,
+        packing_policy="body_round_robin_pair_atomic",
+        contact_filter=contact_filter,
+        fixed_body_slots=fixed,
+    )
+    geometry_reads = []
+    original = h5py.Dataset.__getitem__
+
+    def read(dataset, *args, **kwargs):
+        if dataset.name.rsplit("/", 1)[-1] in NATIVE_CONTACT_VECTOR_FIELDS:
+            geometry_reads.append(dataset.name)
+        return original(dataset, *args, **kwargs)
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", read)
+    with h5py.File(path, "r") as file:
+        actual = read_and_project_frames(
+            file["contacts/native_pairs"],
+            np.array([0, 1, 0], dtype=np.int64),
+            NativeContactProjection("contact_tokens", 4, "body_round_robin_pair_atomic", contact_filter, fixed),
+        )
+    for name in actual:
+        np.testing.assert_array_equal(actual[name], expected[name][[0, 1, 0]].numpy())
+    assert bool(geometry_reads) == has_contacts
+
+
 def test_one_native_dataset_projects_to_flat_and_tokens(tmp_path) -> None:
     path = tmp_path / "native.hdf5"
     write_rollouts_to_hdf5(path, _native_rollouts(), env_name="Test-Env")

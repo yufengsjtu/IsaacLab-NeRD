@@ -17,8 +17,11 @@ import subprocess
 import sys
 import time
 from collections import deque
+from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack, contextmanager, suppress
+from contextvars import ContextVar
+from copy import deepcopy
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -434,8 +437,53 @@ def validate_recordings(root: Path, experiment: dict[str, Any], records: dict, *
     return records
 
 
+_BundleStamp = tuple[tuple[str, str, int, int, int, int, int], ...]
+_BUNDLE_VALIDATIONS: ContextVar[dict[tuple[str, str, str], tuple[_BundleStamp, dict[str, Any]]] | None] = ContextVar(
+    "keyboard_bundle_validations", default=None
+)
+
+
+@contextmanager
+def bundle_validation_session() -> Iterator[None]:
+    """Reuse full verification only within one pipeline and while every input remains unchanged."""
+    token = _BUNDLE_VALIDATIONS.set({})
+    try:
+        yield
+    finally:
+        _BUNDLE_VALIDATIONS.reset(token)
+
+
+def _bundle_stamp(root: Path, experiment: dict[str, Any]) -> _BundleStamp:
+    stamps = []
+    for name in sorted(bundle_files(experiment, root)):
+        path = (root / name).resolve(strict=True)
+        info = path.stat()
+        stamps.append((name, str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+    return tuple(stamps)
+
+
 def validate_bundle(root: Path, experiment: dict[str, Any]) -> dict[str, Any]:
     """Verify legacy bundles or portable chunked bundles, including their virtual training views."""
+    cache = _BUNDLE_VALIDATIONS.get()
+    if cache is None:
+        return _validate_bundle(root, experiment)
+    key = (
+        str(root.resolve()),
+        json.dumps({name: value for name, value in experiment.items() if name != "train_cfg"}, sort_keys=True),
+        file_sha256(root / MANIFEST),
+    )
+    before = _bundle_stamp(root, experiment)
+    if key in cache and cache[key][0] == before:
+        return deepcopy(cache[key][1])
+    manifest = _validate_bundle(root, experiment)
+    if before != _bundle_stamp(root, experiment):
+        raise ValueError("Keyboard bundle changed during validation; refusing to reuse its acceptance.")
+    cache[key] = (before, deepcopy(manifest))
+    return manifest
+
+
+def _validate_bundle(root: Path, experiment: dict[str, Any]) -> dict[str, Any]:
+    """Perform all integrity, provenance, physical-domain and capacity checks."""
     from isaaclab_neural.data.keyboard import read_keyboard_metadata
 
     manifest = json.loads((root / MANIFEST).read_text())

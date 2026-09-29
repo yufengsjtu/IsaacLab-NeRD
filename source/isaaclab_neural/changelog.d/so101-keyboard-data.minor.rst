@@ -80,6 +80,33 @@ Added
 Changed
 ^^^^^^^
 
+* Recorded pipeline stage durations, per-rank dataset initialization/eager preload/RMS
+  timings, and separate training/validation epoch timers without changing optimization
+  or sampling. Declared loader defaults so eager, pin-memory and preload overrides could
+  be resolved through the strict submission configuration parser.
+
+* Streamed deterministic unique-dataset eager preloading into preallocated rank-local
+  arrays using ``algorithm.dataset.eager_preload_frames`` (default 4096 frames, with a
+  minimum of one trajectory). Reduced temporary native-contact decoding memory without
+  changing source files, selected windows, masks or normalization semantics. Random
+  contact packing retained its original whole-pool RNG behavior. Eager loading remained
+  opt-in; existing lazy recipes required no migration.
+
+* Coalesced overlapping dense training windows while retaining direct reads for scattered
+  samples, and skipped geometric contact reads for ranges rejected by the existing filter.
+  Preserved original sample order, masks, data contracts and overflow checks.
+* Encoded only valid contacts during sparse eager execution, retaining static dense paths
+  for compilation, CUDA graph capture and fully occupied inputs. Kept parameter layouts
+  compatible with existing checkpoints and retained gradients on empty-contact batches.
+
+* Reduced unique Keyboard training reads to model-required fields and batched deterministic
+  contact projection across windows. Reused worker-local HDF5 handles, retaining sample
+  order, capacity masks, window-weighted normalization and existing checkpoint semantics.
+  Existing fixed-v2 data and checkpoints required no migration or recollection.
+* Reused complete bundle verification within one Keyboard pipeline while manifest hashes,
+  input file identities, sizes, modification/change times and validation settings remained
+  unchanged. Standalone verification and subsequent pipeline runs still performed full checks.
+
 * Added opt-in ``solver_active_movable`` token filtering using recorded/live body
   mobility, retaining movable key-ground contacts while excluding immovable pairs
   and nonnegative-separation candidates. Raw native pairs and physics were unchanged.
@@ -107,6 +134,16 @@ Changed
 
 Fixed
 ^^^^^
+
+* Validated requested checkpoint input/network semantics before merging checkpoint
+  configuration, and checked training-pool fingerprints before reusing normalization.
+* **Breaking:** Upgraded fixed keyboard recordings to ``so101_keyboard_fixed_v2``
+  with authored root poses, zero-reset checks, recorded-pose validation and live
+  physical-parameter matching. Used isolated fixed-v2 caches; recollect old fixed-v1
+  data and train a fresh model instead of relabeling files or checkpoints.
+* Corrected global RMSE and contact precision/recall aggregation, including active
+  sample denominators and distributed reductions. Corrected unequal sliding DDP
+  shard contributions with window-population importance weights.
 
 * Recorded the configured ``window_sampling`` in resolved unique-capacity training
   configs instead of always recording the canonical index schema.

@@ -96,12 +96,22 @@ class SharedPerBodyContactEncoder(nn.Module):
         body_slots = flat_tokens[..., CONTACT_TOKEN_BODY_SLOT_INDEX].long()
         valid = flat_tokens[..., CONTACT_TOKEN_VALID_INDEX] > 0.5
         valid = valid & (body_slots >= 0) & (body_slots < self.num_bodies)
-        contact_features = self._encode_contacts(flat_tokens)
-
-        weights = valid.unsqueeze(-1).to(contact_features.dtype)
         safe_body_slots = body_slots.clamp(min=0, max=self.num_bodies - 1)
         set_offsets = torch.arange(num_sets, device=contact_tokens.device).unsqueeze(-1) * self.num_bodies
         segment_ids = set_offsets + safe_body_slots
+        static_shape = torch.compiler.is_compiling() or (
+            contact_tokens.is_cuda and torch.cuda.is_current_stream_capturing()
+        )
+        indices = None if static_shape else valid.reshape(-1).nonzero().flatten()
+        if indices is None or indices.numel() == valid.numel():
+            contact_features = self._encode_contacts(flat_tokens)
+            weights = valid.unsqueeze(-1).to(contact_features.dtype)
+        else:
+            contact_features = self._encode_contacts(
+                flat_tokens.reshape(-1, CONTACT_TOKEN_DIM).index_select(0, indices)
+            )
+            segment_ids = segment_ids.reshape(-1).index_select(0, indices)
+            weights = contact_features.new_ones((indices.shape[0], 1))
 
         pooled_sums = contact_features.new_zeros((num_sets * self.num_bodies, self.body_latent_dim))
         pooled_sums.index_add_(

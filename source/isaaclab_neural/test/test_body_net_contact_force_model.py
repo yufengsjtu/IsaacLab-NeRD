@@ -231,6 +231,7 @@ def test_resume_does_not_silently_disable_requested_finger_head(tmp_path, monkey
         ({"contact_token_frame": "owner"}, "env.neural_solver_cfg.contact_token_frame root", False),
         ({}, "", False),
         ({"contact_token_frame": "owner"}, "inputs.contact_set.dim 18", False),
+        ({"contact_token_frame": "root"}, "", False),
     ],
 )
 def test_resume_rejects_changed_input_semantics(tmp_path, monkeypatch, checkpoint_solver_cfg, overrides, compatible):

@@ -326,6 +326,8 @@ trap upload_storage_output EXIT
 
 mkdir -p /tmp/nvdatasets /tmp/swift
 download_code
+data_download_started=$SECONDS
 download_data
+echo "[Data download] seconds=$((SECONDS - data_download_started)) cache_mode=$DATASET_CACHE_MODE"
 extract_code
 run_experiment

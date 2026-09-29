@@ -10,6 +10,7 @@ from __future__ import annotations
 import inspect
 import os
 import shutil
+import time
 import traceback
 from pathlib import Path
 from typing import Any, cast
@@ -59,6 +60,16 @@ BODY_FORCE_TARGET_KEY = "body_net_contact_forces_b"
 # A body is considered in active contact when its target net-force magnitude
 # exceeds this value [N]. Recipes may override it under algorithm.loss.
 DEFAULT_ACTIVE_CONTACT_FORCE_THRESHOLD_N = 1.0
+
+ROBOT_TRAINING_READ_KEYS = (
+    "states",
+    "next_states",
+    "root_body_q",
+    "primary_body_q",
+    "joint_f",
+    "gravity_dir",
+    "robot_net_normal_forces_w",
+)
 
 NON_MODEL_DATA_KEYS = {
     SUPERVISION_TARGET_IDS,
@@ -429,12 +440,19 @@ class VanillaTrainer:
             "contact_filter": solver_cfg.get("contact_filter", "none"),
         }
         dataset_cfg = algo_cfg["dataset"]
+        dataset_started = time.perf_counter()
+        print(f"[Stage timing] rank={self.rank} stage=dataset_initialization event=start", flush=True)
         self.get_datasets(
             dataset_cfg.get("train_dataset_path"),
             dataset_cfg.get("valid_datasets"),
             dataset_cfg.get("train_datasets"),
         )
         self._validate_force_label_datasets()
+        print(
+            f"[Stage timing] rank={self.rank} stage=dataset_initialization event=end "
+            f"seconds={time.perf_counter() - dataset_started:.3f}",
+            flush=True,
+        )
 
         if cli_cfg["train"]:
             self.num_epochs = int(algo_cfg["num_epochs"])
@@ -464,7 +482,14 @@ class VanillaTrainer:
                 or checkpoint_loss_weights_missing
             )
             if self.dataset_statistics_recomputed:
+                statistics_started = time.perf_counter()
+                print(f"[Stage timing] rank={self.rank} stage=rms event=start", flush=True)
                 self.compute_or_sync_dataset_statistics(self.train_dataset)
+                print(
+                    f"[Stage timing] rank={self.rank} stage=rms event=end "
+                    f"seconds={time.perf_counter() - statistics_started:.3f}",
+                    flush=True,
+                )
                 self.neural_model_unwrapped.set_input_rms(self.dataset_rms)
                 self.neural_model_unwrapped.set_output_rms(self.dataset_rms["prediction_target"])
                 if self.force_head_enabled:
@@ -588,7 +613,13 @@ class VanillaTrainer:
         if contract.get("unit", "stored_frame") == "stored_frame":
             return {"unit": "stored_frame"}
         keys = ("unit", "scope", "supervision", "window_sampling", "normalization_sampling")
-        return {key: contract.get(key) for key in keys}
+        return {
+            **{key: contract.get(key) for key in keys},
+            "train_selection": {
+                name: (source.get("selection_sha256"), source.get("unique_selected"))
+                for name, source in contract.get("train", {}).items()
+            },
+        }
 
     def _validate_checkpoint_normalization_contract(self) -> None:
         """Reject reusing checkpoint statistics computed under a different sampling contract."""
@@ -826,7 +857,11 @@ class VanillaTrainer:
         self.collate_fn = collate_fn_BatchTransitionDataset
 
     def _configure_keyboard_datasets(self) -> None:
-        from isaaclab_neural.data.keyboard import read_keyboard_metadata, validate_keyboard_training_contracts
+        from isaaclab_neural.data.keyboard import (
+            read_keyboard_metadata,
+            validate_keyboard_runtime,
+            validate_keyboard_training_contracts,
+        )
 
         dataset_cfg = self.cfg["algorithm"]["dataset"]
         mixed = dataset_cfg.get("train_datasets")
@@ -844,6 +879,13 @@ class VanillaTrainer:
         valid = {name: read_keyboard_metadata(path) for name, path in valid_paths.items()}
         validate_keyboard_training_contracts(train, valid)
         reference = next(iter(train.values()))
+        scene = self.neural_env.neural_adapter.isaaclab_env.scene
+        validate_keyboard_runtime(reference, scene, self.neural_solver.model)
+        if self._checkpoint is not None:
+            previous = self._checkpoint.get("cfg", {}).get("keyboard_dataset_contracts", {}).get("train")
+            if previous is None:
+                raise ValueError("Checkpoint lacks a verified fixed scene contract; start a fresh model.")
+            validate_keyboard_runtime(previous, scene, self.neural_solver.model)
         if getattr(self.neural_solver, "contact_filter", "none") == "solver_active_movable":
             fixed_slots = getattr(self.neural_solver.contact_adapter, "fixed_body_slots", None)
             if (
@@ -1098,16 +1140,11 @@ class VanillaTrainer:
         for key in NON_MODEL_DATA_KEYS.intersection(data):
             data.pop(key)
         if getattr(self, "robot_force_head_enabled", False):
-            allowed = {
-                "states",
-                "next_states",
-                "root_body_q",
-                "primary_body_q",
-                "joint_f",
-                "gravity_dir",
-                "robot_net_normal_forces_w",
+            data = {
+                key: value
+                for key, value in data.items()
+                if key in ROBOT_TRAINING_READ_KEYS or key.startswith("contact_")
             }
-            data = {key: value for key, value in data.items() if key in allowed or key.startswith("contact_")}
             forces = data.get("robot_net_normal_forces_w")
             if forces is None or forces.shape[-2:] != (7, 3) or not torch.isfinite(forces).all():
                 raise ValueError("Robot normal-force training requires finite [B, T, 7, 3] labels.")
@@ -1167,6 +1204,7 @@ class VanillaTrainer:
         return data
 
     def compute_loss(self, data: dict[str, torch.Tensor], train: bool):
+        self._metric_statistics: dict[str, tuple[float, float]] = {}
         if self.neural_model_unwrapped.is_rnn:
             self.neural_model_unwrapped.init_rnn(
                 data["states"].shape[0] if SUPERVISION_MASK in data else self.batch_size
@@ -1311,6 +1349,19 @@ class VanillaTrainer:
                 active = finger_target.norm(dim=-1) > 0.01
                 predicted_active = finger_prediction.norm(dim=-1) > 0.01
                 true_positive = (active & predicted_active).sum()
+                self._metric_statistics.update(
+                    {
+                        "finger_normal_force_active_RMSE_N": (
+                            float(error_sq[active].sum().cpu()),
+                            float(active.sum().cpu()),
+                        ),
+                        "finger_normal_contact_precision": (
+                            float(true_positive.cpu()),
+                            float(predicted_active.sum().cpu()),
+                        ),
+                        "finger_normal_contact_recall": (float(true_positive.cpu()), float(active.sum().cpu())),
+                    }
+                )
                 loss_itemized.update(
                     {
                         "finger_normal_force_normalized_MSE": float(finger_loss.detach().cpu()),
@@ -1329,6 +1380,18 @@ class VanillaTrainer:
                 )
         return loss, loss_itemized
 
+    def _batch_sampling_scale(self, data: dict[str, torch.Tensor], train: bool) -> float:
+        """Correct uniform-per-rank draws to the global population of sliding windows."""
+        if (
+            train
+            and self.is_distributed
+            and getattr(self, "train_dataset_rank_sharded", False)
+            and getattr(self, "dataset_capacity_unit", "stored_frame") == "unique_transition"
+            and getattr(self, "dataset_window_sampling", "canonical") == "sliding"
+        ):
+            return len(cast(Any, self.train_dataset)) / data[SUPERVISION_MASK].shape[0]
+        return 1.0
+
     def one_epoch(
         self,
         train: bool,
@@ -1343,6 +1406,7 @@ class VanillaTrainer:
         sum_weight = torch.tensor(0.0, device=self.device, dtype=torch.float64)
         sum_loss_itemized: dict[str, float] = {}
         maximum_metrics: dict[str, float] = {}
+        ratio_totals: dict[str, list[float]] = {}
         grad_info = {"grad_norm_before_clip": 0.0} if train else {}
         if train and self.truncate_grad:
             grad_info["grad_norm_after_clip"] = 0.0
@@ -1364,12 +1428,15 @@ class VanillaTrainer:
                 with TimeProfiler(self.time_report, "compute_loss"):
                     if train:
                         self.optimizer.zero_grad()
+                    self._metric_statistics = {}
                     loss, loss_itemized = self.compute_loss(data, train)
+                    sampling_scale = self._batch_sampling_scale(data, train)
                     weight = (
                         data[SUPERVISION_MASK].sum().to(torch.float64)
                         if SUPERVISION_MASK in data
                         else torch.ones((), device=self.device, dtype=torch.float64)
                     )
+                    weight = weight * sampling_scale
                     backward_loss = loss
                     if train and self.is_distributed and SUPERVISION_MASK in data:
                         backward_loss = distributed_supervision_loss(loss, weight)
@@ -1394,7 +1461,12 @@ class VanillaTrainer:
                         if key.endswith("_max"):
                             maximum_metrics[key] = max(maximum_metrics.get(key, float("-inf")), value)
                         else:
+                            value = value * value if "RMSE" in key else value
                             sum_loss_itemized[key] = sum_loss_itemized.get(key, 0.0) + value * float(weight.cpu())
+                    for key, (numerator, count) in self._metric_statistics.items():
+                        totals = ratio_totals.setdefault(key, [0.0, 0.0])
+                        totals[0] += numerator * sampling_scale
+                        totals[1] += count * sampling_scale
 
         distributed_weights = distributed_reduce and self.is_distributed
         if distributed_weights:
@@ -1411,6 +1483,24 @@ class VanillaTrainer:
             avg_loss = self._distributed_mean(avg_loss)
             avg_loss_itemized = self._distributed_mean_dict(avg_loss_itemized)
             grad_info = self._distributed_mean_dict(grad_info)
+        if ratio_totals:
+            keys = sorted(ratio_totals)
+            values = torch.tensor([ratio_totals[key] for key in keys], device=self.device, dtype=torch.float64)
+            if distributed_weights:
+                dist.all_reduce(values)
+            avg_loss_itemized.update(
+                {
+                    key: numerator / count if count > 0 else 0.0
+                    for key, (numerator, count) in zip(keys, values.cpu().tolist(), strict=True)
+                }
+            )
+        for key in avg_loss_itemized:
+            if "RMSE" in key:
+                avg_loss_itemized[key] = max(0.0, avg_loss_itemized[key]) ** 0.5
+        per_body = [value for key, value in avg_loss_itemized.items() if key.startswith("body_force_RMSE_body_")]
+        if per_body:
+            avg_loss_itemized["body_force_per_body_RMSE_mean_N"] = float(np.mean(per_body))
+            avg_loss_itemized["body_force_per_body_RMSE_max_N"] = max(per_body)
         if maximum_metrics:
             keys = sorted(maximum_metrics)
             values = torch.tensor([maximum_metrics[key] for key in keys], device=self.device, dtype=torch.float64)
@@ -1465,7 +1555,9 @@ class VanillaTrainer:
                 self.best_valid_losses.setdefault(valid_dataset_name, np.inf)
 
         self.time_report = TimeReport(cuda_synchronize=False)
-        self.time_report.add_timers(["epoch", "other", "dataloader", "compute_loss", "backward", "eval"])
+        self.time_report.add_timers(
+            ["epoch", "other", "dataloader", "compute_loss", "backward", "eval", "train_batches", "validation_batches"]
+        )
         for epoch in range(self.start_epoch, self.num_epochs):
             self.current_epoch = epoch
             if train_sampler is not None:
@@ -1478,29 +1570,33 @@ class VanillaTrainer:
                     param_group["lr"] = self.lr
                 self.logger.init_epoch(epoch)
 
-                avg_train_loss, avg_train_loss_itemized, grad_info = self.one_epoch(
-                    train=True,
-                    dataloader=train_loader,
-                    dataloader_iter=train_loader_iter,
-                    num_batches=self.num_train_batches,
-                    shuffle=True,
-                )
+                with TimeProfiler(self.time_report, "train_batches"):
+                    avg_train_loss, avg_train_loss_itemized, grad_info = self.one_epoch(
+                        train=True,
+                        dataloader=train_loader,
+                        dataloader_iter=train_loader_iter,
+                        num_batches=self.num_train_batches,
+                        shuffle=True,
+                    )
                 avg_valid_losses, avg_valid_losses_itemized = {}, {}
                 main_process_exception = None
                 main_process_traceback = None
                 if self.is_main_process:
                     try:
-                        valid_loader_iters = _reset_validation_iterators(valid_loaders)
-                        for valid_dataset_name in self.valid_datasets:
-                            avg_valid_losses[valid_dataset_name], avg_valid_losses_itemized[valid_dataset_name], _ = (
-                                self.one_epoch(
+                        with TimeProfiler(self.time_report, "validation_batches"):
+                            valid_loader_iters = _reset_validation_iterators(valid_loaders)
+                            for valid_dataset_name in self.valid_datasets:
+                                (
+                                    avg_valid_losses[valid_dataset_name],
+                                    avg_valid_losses_itemized[valid_dataset_name],
+                                    _,
+                                ) = self.one_epoch(
                                     train=False,
                                     dataloader=valid_loaders[valid_dataset_name],
                                     dataloader_iter=valid_loader_iters[valid_dataset_name],
                                     num_batches=min(self.num_valid_batches, len(valid_loaders[valid_dataset_name])),
                                     distributed_reduce=False,
                                 )
-                            )
                         with TimeProfiler(self.time_report, "eval"):
                             if self.eval_interval > 0 and (epoch + 1) % self.eval_interval == 0:
                                 self.eval(epoch)
@@ -1687,7 +1783,15 @@ class SequenceModelTrainer(VanillaTrainer):
         self.train_dataset_rank_sharded = self.is_distributed and (
             self.dataset_load_mode == "eager" or self.dataset_capacity_unit == "unique_transition"
         )
+        read_keys = (
+            ROBOT_TRAINING_READ_KEYS
+            if getattr(self, "robot_force_head_enabled", False) and self.dataset_capacity_unit == "unique_transition"
+            else None
+        )
+        eager_preload_frames = self.cfg["algorithm"]["dataset"].get("eager_preload_frames", 4096)
         dataset_kwargs = {
+            "read_keys": read_keys,
+            "eager_preload_frames": eager_preload_frames,
             "window_sampling": self.dataset_window_sampling,
             "capacity_unit": self.dataset_capacity_unit,
             "load_mode": self.dataset_load_mode,
@@ -1719,6 +1823,8 @@ class SequenceModelTrainer(VanillaTrainer):
                     hdf5_dataset_path=valid_dataset_path,
                     capacity_unit=self.dataset_capacity_unit,
                     window_sampling=self.dataset_window_sampling,
+                    read_keys=read_keys,
+                    eager_preload_frames=eager_preload_frames,
                     max_capacity=self.cfg["algorithm"]["dataset"].get("valid_max_capacity", 100_000_000),
                     **self.dataset_contact_projection,
                 )
@@ -1745,6 +1851,9 @@ class SequenceModelTrainer(VanillaTrainer):
                 if self.dataset_window_sampling == "sliding"
                 else "canonical_disjoint_blocks_v1",
                 "window_sampling": self.dataset_window_sampling,
+                "ddp_objective": "global_window_population_v1"
+                if self.dataset_window_sampling == "sliding"
+                else "sampled_targets",
                 "normalization_sampling": "training_windows"
                 if self.dataset_window_sampling == "sliding"
                 else "unique_targets",

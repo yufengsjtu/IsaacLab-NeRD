@@ -5,7 +5,7 @@
 
 workflow:
   base_name: so101-keyboard-fixed
-  dataset_subdir: so101-keyboard-fixed-v1
+  dataset_subdir: so101-keyboard-fixed-v2
   image: docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095
   nucleus_credential: so101-nucleus-8ed03716ea4e49d1833fe66f2e5e2dc2
 resources:
@@ -36,7 +36,7 @@ experiment:
   collection_mode: policy
   env_name: SO101-Keyboard-Fixed
   robot_name: SO101-Keyboard-Fixed
-  dataset_dir: ./data/datasets/so101-keyboard-fixed-v1
+  dataset_dir: ./data/datasets/so101-keyboard-fixed-v2
   train_task: IsaacContrib-Keyboard-SO101-NeRD
   train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/SO101/transformer_keyboard_throughput.yaml
   train_seed: 42

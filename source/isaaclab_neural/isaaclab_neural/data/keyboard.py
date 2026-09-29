@@ -19,10 +19,51 @@ import torch
 
 from .hdf5 import write_rollouts_to_hdf5
 
-KEYBOARD_SCHEMA = "so101_keyboard_fixed_v1"
+KEYBOARD_SCHEMA = "so101_keyboard_fixed_v2"
 KEYBOARD_TASK = "IsaacContrib-Keyboard-SO101"
 KEYBOARD_REPLAY_LAYOUT = "synchronous_world_timeline_v1"
 KEYBOARD_MJW_MODEL_FIELDS = ("actuator_acc0", "body_invweight0", "dof_invweight0", "jnt_solref", "stat.meaninertia")
+
+
+def fixed_root_poses_from_scene(scene: Any) -> dict[str, list[float]]:
+    """Return authored fixed root poses relative to the environment origin [m, xyzw]."""
+    return {name: [*scene[name].cfg.init_state.pos, *scene[name].cfg.init_state.rot] for name in ("robot", "keyboard")}
+
+
+def validate_fixed_root_poses(poses: torch.Tensor, metadata: Mapping[str, Any]) -> None:
+    """Require every recorded root pose [m, xyzw] to match the fixed domain within 1e-5."""
+    poses = poses.to(torch.float64)
+    expected = torch.tensor(
+        [metadata["fixed_root_poses"][name] for name in metadata["asset_order"]], dtype=poses.dtype, device=poses.device
+    )
+    if poses.shape[-2:] != expected.shape or not torch.isfinite(poses).all():
+        raise ValueError("Invalid fixed root pose layout or nonfinite poses.")
+    position = (poses[..., :3] - expected[..., :3]).abs().amax()
+    rotation = torch.minimum(
+        (poses[..., 3:] - expected[..., 3:]).abs().amax(-1), (poses[..., 3:] + expected[..., 3:]).abs().amax(-1)
+    ).amax()
+    if float(position) > 1e-5 or float(rotation) > 1e-5:
+        raise ValueError("Recorded root poses differ from the fixed scene contract.")
+
+
+def validate_keyboard_runtime(metadata: Mapping[str, Any], scene: Any, model: Any) -> None:
+    """Bind recorded fixed poses and physical parameters to the live runtime model."""
+    validate_keyboard_metadata(metadata)
+    live = fixed_root_poses_from_scene(scene)
+    validate_fixed_root_poses(torch.tensor([live[name] for name in metadata["asset_order"]]), metadata)
+    for name, expected in metadata["physics_parameters"].items():
+        field = getattr(model, name, None)
+        if field is None:
+            raise ValueError(f"Runtime lacks recorded physics parameter: {name}.")
+        values = torch.as_tensor(field.numpy())
+        reference = torch.as_tensor(expected, dtype=values.dtype)
+        if values.numel() != scene.num_envs * reference.numel() or not torch.allclose(
+            values.reshape(scene.num_envs, *reference.shape),
+            reference.expand(scene.num_envs, *reference.shape),
+            rtol=1e-6,
+            atol=1e-7,
+        ):
+            raise ValueError(f"Runtime physics differs from the fixed recording: {name}.")
 
 
 def keyboard_clip_indices(done: torch.Tensor, *, horizon: int, decimation: int) -> list[tuple[int, int]]:
@@ -90,6 +131,30 @@ def validate_keyboard_metadata(metadata: Mapping[str, Any]) -> None:
     """Reject incompatible timing, task, coordinate, and force-label conventions."""
     if metadata.get("schema") != KEYBOARD_SCHEMA:
         raise ValueError("Incompatible keyboard dataset schema.")
+    if metadata.get("scene") != "fixed" or metadata.get("keyboard_variant") != 0:
+        raise ValueError("Fixed keyboard data requires matching variants: scene=fixed and variant 0.")
+    if set(metadata.get("fixed_root_poses", {})) != {"robot", "keyboard"} or metadata.get("asset_order") != [
+        "robot",
+        "keyboard",
+    ]:
+        raise ValueError("Fixed scene requires recorded robot and keyboard root poses.")
+    poses = torch.tensor([metadata["fixed_root_poses"][name] for name in metadata["asset_order"]], dtype=torch.float64)
+    if (
+        poses.shape != (2, 7)
+        or not torch.isfinite(poses).all()
+        or not torch.allclose(poses[:, 3:].norm(dim=-1), torch.ones(2, dtype=poses.dtype), atol=1e-5)
+    ):
+        raise ValueError("Invalid fixed root pose contract.")
+    reset_terms = (metadata.get("keyboard_reset"), (metadata.get("typing_reset") or {}).get("pre_solve_reset"))
+    for term in reset_terms:
+        params = (term or {}).get("params", {})
+        if not params.get("pose_range") or any(
+            float(value) != 0.0
+            for field in ("pose_range", "velocity_range")
+            for bounds in params.get(field, {}).values()
+            for value in bounds
+        ):
+            raise ValueError("Fixed keyboard reset pose/velocity offsets must be zero in both reset paths.")
     contact_filter = metadata.get("contact_filter", "none")
     if contact_filter not in ("none", "solver_active", "solver_active_movable"):
         raise ValueError("Unsupported recorded contact filter.")
@@ -132,6 +197,9 @@ def validate_keyboard_replay(
     decimation = int(metadata["decimation"])
     if worlds != metadata["source_num_envs"] or length <= 0 or length % decimation:
         raise ValueError("Invalid synchronous replay timeline dimensions.")
+    if "articulation_root_pose" not in frames:
+        raise ValueError("Fixed replay requires articulation root poses.")
+    validate_fixed_root_poses(frames["articulation_root_pose"], metadata)
     required_context = {
         "reset_state",
         "episode_length",
@@ -209,15 +277,18 @@ def write_keyboard_dataset(
         "truncated",
         "native_contacts",
         "trajectory_context",
+        "articulation_root_pose",
     }
     if missing := required - rollouts.keys():
         raise ValueError(f"Missing keyboard rollout fields: {sorted(missing)}.")
+    validate_fixed_root_poses(rollouts["articulation_root_pose"], metadata)
     states = rollouts["states"]
     if states.ndim != 3 or states.shape[0] == 0 or states.shape[-1] != metadata["num_q"] + metadata["num_qd"]:
         raise ValueError("Keyboard state dimensions do not match metadata.")
     prefix = states.shape[:2]
     expected_shapes = {
         "next_states": states.shape,
+        "articulation_root_pose": (*prefix, len(metadata["asset_order"]), 7),
         "joint_f": (*prefix, metadata["num_qd"]),
         "actions": (*prefix, 6),
         "robot_net_normal_forces_w": (*prefix, len(metadata["force_body_names"]), 3),
@@ -276,6 +347,12 @@ def validate_keyboard_training_contracts(
         raise ValueError("Keyboard validation requires independently collected seeds.")
     for metadata in (*train.values(), *valid.values()):
         validate_keyboard_metadata(metadata)
+        validate_fixed_root_poses(
+            torch.tensor([metadata["fixed_root_poses"][name] for name in metadata["asset_order"]]), reference
+        )
+        for field in ("robot_asset", "robot_actuators"):
+            if metadata.get(field) != reference.get(field):
+                raise ValueError(f"Keyboard dataset fixed domain differs: {field}.")
         if metadata.get("contact_filter", "none") != reference.get("contact_filter", "none") or metadata.get(
             "contact_fixed_body_slots"
         ) != reference.get("contact_fixed_body_slots"):
@@ -315,9 +392,22 @@ def read_keyboard_metadata(path: str | Path) -> dict[str, Any]:
         if not isinstance(encoded, (str, bytes, bytearray)):
             raise ValueError("Keyboard replay contract must be a JSON string.")
         metadata = json.loads(encoded)
-    if not isinstance(metadata, dict):
-        raise ValueError("Keyboard replay contract must be a JSON object.")
-    validate_keyboard_metadata(metadata)
+        if not isinstance(metadata, dict):
+            raise ValueError("Keyboard replay contract must be a JSON object.")
+        validate_keyboard_metadata(metadata)
+        for group_name in ("data", "replay/frames"):
+            if group_name not in file:
+                continue
+            poses = file.get(group_name + "/articulation_root_pose")
+            states = file.get(group_name + "/states")
+            if (
+                not isinstance(poses, h5py.Dataset)
+                or not isinstance(states, h5py.Dataset)
+                or poses.shape != (*states.shape[:2], len(metadata["asset_order"]), 7)
+            ):
+                raise ValueError("Fixed recordings require correctly shaped articulation root pose tensors.")
+            for start in range(0, poses.shape[0], 128):
+                validate_fixed_root_poses(torch.from_numpy(poses[start : start + 128]), metadata)
     if metadata.get("training_parts"):
         for name in metadata["training_parts"]:
             if Path(name).name != name or not (Path(path).expanduser().parent / name).is_file():

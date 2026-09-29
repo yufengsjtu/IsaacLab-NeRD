@@ -230,7 +230,7 @@ Two presets remain:
 
 - `so101_keyboard_resident_unique`: eight resident 1024-world collectors, then
   eight-rank training with the Franka-Lift-scale recipe
-  (`SO101/transformer_keyboard_throughput.yaml`). Cache prefix: `so101-keyboard-fixed-v1`.
+  (`SO101/transformer_keyboard_throughput.yaml`). Cache prefix: `so101-keyboard-fixed-v2`.
 - `so101_keyboard_resident_unique_smoke`: the same model and entry point on two
   GPUs, with 16,384/8,192 unique train/validation targets and two epochs of two
   updates. Qualify it before launching the full recipe.
@@ -334,11 +334,24 @@ distinct source IDs. Sliding DDP assigns each recording/world timeline to one ra
 Resolved configs and checkpoints record the sampling schema, normalization convention,
 selected counts and selection fingerprint.
 
-Resuming rejects checkpoints whose effective solver input/target fields (for example
-`contact_token_frame`, `contact_filter` or token capacity, with omitted keys resolved
-to `NerdSolverCfg` defaults) or `inputs` differ after CLI overrides. Reusing checkpoint
-statistics without `--update-dataset-statistics` additionally requires the same
-capacity unit, supervision and window-sampling contract.
+The fixed-v2 recording contract stores authored robot/keyboard root poses and rejects
+nonzero reset offsets in either reset path. Recorded pose tensors are checked against
+that contract, and training/evaluation bind the poses and physical parameters to the
+live model. Fixed-v1 and randomized-scene data/checkpoints require recollection rather
+than silent relabeling. Raw native-pair storage and physical collision solving are unchanged.
+
+Resuming compares the requested YAML plus CLI overrides with the checkpoint before
+merging it. Different solver input/target semantics, input fields, model architecture
+or environment are rejected rather than silently overwritten. Reusing normalization
+also requires matching training-pool fingerprints, capacity and sampling contracts;
+otherwise pass `--update-dataset-statistics`.
+
+Sliding DDP still keeps source timelines on one rank. Each batch uses population
+importance weights (`rank_window_count / local_batch_windows`) so unequal rank pools
+do not change the global window objective. This aligns objective weights, not the
+order or variance of global IID sampling. RMSE is reduced from squared errors; active
+RMSE and contact precision/recall use summed numerators and their own denominators
+across batches/ranks. Maximum metrics retain MAX reduction.
 
 The `solver_active_movable` filter keeps negative recorded separation and rejects only
 pairs whose two sides are immovable, using joint-tree mobility saved in the recording

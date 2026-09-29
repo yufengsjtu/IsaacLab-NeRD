@@ -209,6 +209,202 @@ def test_lazy_trajectory_preserves_tokens_with_persistent_workers(tmp_path) -> N
         dataset.close()
 
 
+@pytest.mark.parametrize("sampling", ["canonical", "sliding"])
+@pytest.mark.parametrize("rank,world_size", [(0, 1), (1, 2)])
+def test_unique_batch_reads_preserve_order_duplicates_masks_and_fields(tmp_path, sampling, rank, world_size):
+    from isaaclab_neural.data.datasets import create_trajectory_dataset
+
+    path = tmp_path / "tokens.hdf5"
+    _write_token_dataset(path, trajectory_length=8)
+    with h5py.File(path, "a") as file:
+        file["data"].attrs["recording_id"] = "batched-token-fixture"
+        file.create_dataset("data/terminated", data=np.zeros((5, 8), dtype=bool))
+        file.create_dataset("data/truncated", data=np.zeros((5, 8), dtype=bool))
+        file.create_dataset("context/trajectories/source_env_id", data=np.arange(5, dtype=np.int64))
+        file.create_dataset("context/trajectories/source_start_frame", data=np.zeros(5, dtype=np.int64))
+    kwargs = dict(
+        load_mode="lazy",
+        hdf5_dataset_path=path,
+        sample_sequence_length=3,
+        max_capacity=29,
+        capacity_unit="unique_transition",
+        window_sampling=sampling,
+        rank=rank,
+        world_size=world_size,
+        contact_representation="contact_tokens",
+        max_contact_tokens=3,
+    )
+    full = create_trajectory_dataset(**kwargs)
+    selected = create_trajectory_dataset(**kwargs, read_keys=("states", "next_states"))
+    try:
+        indices = [2, 0, 1, 1, len(full) - 1, 0] * 13
+        expected = [full[i] for i in indices]
+        batched = selected.__getitems__(indices)
+        for actual, reference in zip(batched, expected, strict=True):
+            assert not {"joint_f", "state_world_id", "source_env_id"} & actual.keys()
+            for name in actual:
+                torch.testing.assert_close(actual[name], reference[name], rtol=0, atol=0)
+        from isaaclab_neural.data.datasets import WeightedMixedTrajectoryDataset
+
+        second = create_trajectory_dataset(**kwargs, read_keys=("states", "next_states"))
+        second.supervision_source_index = 1
+        mixed = WeightedMixedTrajectoryDataset({"first": selected, "second": second}, {"first": 2.0, "second": 1.0})
+        try:
+            mixed_indices = [len(mixed) - 1, 0, int(mixed.source_boundaries[0]), 2, 0]
+            for actual, reference in zip(
+                mixed.__getitems__(mixed_indices), [mixed[i] for i in mixed_indices], strict=True
+            ):
+                for name in reference:
+                    torch.testing.assert_close(actual[name], reference[name], rtol=0, atol=0)
+        finally:
+            second.close()
+        assert selected.__getitems__([]) == []
+        with pytest.raises(IndexError):
+            selected.__getitems__([len(selected)])
+        loader = DataLoader(selected, batch_size=3, num_workers=1, multiprocessing_context="spawn")
+        first = next(iter(loader))
+        torch.testing.assert_close(first["states"], torch.stack([selected[i]["states"] for i in range(3)]))
+        with pytest.raises(ValueError, match="read keys"):
+            create_trajectory_dataset(**kwargs, read_keys=("missing",))
+    finally:
+        full.close()
+        selected.close()
+
+
+@pytest.mark.parametrize("sampling", ["canonical", "sliding"])
+@pytest.mark.parametrize("rank,world_size", [(0, 1), (1, 2)])
+def test_eager_preload_is_bounded_and_matches_lazy(tmp_path, monkeypatch, sampling, rank, world_size):
+    from isaaclab_neural.data import datasets
+
+    path = tmp_path / "bounded.hdf5"
+    _write_token_dataset(path, trajectory_length=8)
+    with h5py.File(path, "a") as file:
+        file["data"].attrs["recording_id"] = "bounded-eager-fixture"
+        file.create_dataset("data/terminated", data=np.zeros((5, 8), dtype=bool))
+        file.create_dataset("data/truncated", data=np.zeros((5, 8), dtype=bool))
+        file.create_dataset("context/trajectories/source_env_id", data=np.arange(5, dtype=np.int64))
+        file.create_dataset("context/trajectories/source_start_frame", data=np.zeros(5, dtype=np.int64))
+    kwargs = dict(
+        hdf5_dataset_path=path,
+        sample_sequence_length=3,
+        max_capacity=29,
+        capacity_unit="unique_transition",
+        window_sampling=sampling,
+        rank=rank,
+        world_size=world_size,
+        contact_representation="contact_tokens",
+        max_contact_tokens=3,
+        read_keys=("states", "next_states", "source_env_id"),
+    )
+    lazy = datasets.create_trajectory_dataset(load_mode="lazy", **kwargs)
+    original = datasets.read_and_project_frames
+    projected_frames = []
+
+    def project(group, indices, projection):
+        projected_frames.append(indices.copy())
+        return original(group, indices, projection)
+
+    monkeypatch.setattr(datasets, "read_and_project_frames", project)
+    eager = datasets.create_trajectory_dataset(load_mode="eager", eager_preload_frames=8, **kwargs)
+    try:
+        assert projected_frames and max(len(indices) for indices in projected_frames) <= 8
+        np.testing.assert_array_equal(
+            np.concatenate(projected_frames), (eager.global_trajectory_indices[:, None] * 8 + np.arange(8)).reshape(-1)
+        )
+        assert eager.capacity_stats == lazy.capacity_stats
+        for i in range(len(eager)):
+            expected, actual = lazy[i], eager[i]
+            assert expected.keys() == actual.keys()
+            for key in expected:
+                torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
+        with pytest.raises(ValueError, match="eager_preload_frames"):
+            datasets.create_trajectory_dataset(load_mode="eager", eager_preload_frames=0, **kwargs)
+    finally:
+        lazy.close()
+        eager.close()
+
+
+def test_eager_random_projection_preserves_whole_pool_rng(tmp_path):
+    from isaaclab_neural.data.datasets import create_trajectory_dataset
+
+    path = tmp_path / "random.hdf5"
+    _write_token_dataset(path, trajectory_length=8)
+    with h5py.File(path, "a") as file:
+        file["data"].attrs["recording_id"] = "random-eager-fixture"
+        file.create_dataset("data/terminated", data=np.zeros((5, 8), dtype=bool))
+        file.create_dataset("data/truncated", data=np.zeros((5, 8), dtype=bool))
+        file.create_dataset("context/trajectories/source_env_id", data=np.arange(5, dtype=np.int64))
+        file.create_dataset("context/trajectories/source_start_frame", data=np.zeros(5, dtype=np.int64))
+    kwargs = dict(
+        load_mode="eager",
+        hdf5_dataset_path=path,
+        sample_sequence_length=3,
+        max_capacity=29,
+        capacity_unit="unique_transition",
+        window_sampling="sliding",
+        contact_representation="flat",
+        num_contacts_per_env=2,
+        contact_packing_policy="random",
+    )
+    torch.manual_seed(17)
+    reference = create_trajectory_dataset(eager_preload_frames=4096, **kwargs)
+    rng = torch.get_rng_state()
+    torch.manual_seed(17)
+    actual = create_trajectory_dataset(eager_preload_frames=8, **kwargs)
+    try:
+        torch.testing.assert_close(torch.get_rng_state(), rng, rtol=0, atol=0)
+        for key in reference.dataset:
+            np.testing.assert_array_equal(actual.dataset[key], reference.dataset[key])
+    finally:
+        reference.close()
+        actual.close()
+
+
+def test_hyperslab_window_reads_preserve_overlaps_order_and_shapes(tmp_path):
+    from isaaclab_neural.data.datasets import _LazyHdf5Accessor
+
+    path = tmp_path / "windows.hdf5"
+    _write_token_dataset(path, trajectory_length=8)
+    with h5py.File(path, "a") as file:
+        file.create_dataset("data/primary_body_q", data=np.arange(5 * 8 * 3 * 7, dtype=np.float32).reshape(5, 8, 3, 7))
+        file.create_dataset("data/reward", data=np.arange(40, dtype=np.float64).reshape(5, 8) / 3)
+    accessor = _LazyHdf5Accessor(path)
+    windows = [(3, 2), (1, 1), (1, 0), (1, 1), (3, 5)]
+    keys = ["states", "primary_body_q", "reward"]
+    try:
+        actual = accessor.read_windows(keys, windows, 3)
+        for sample, (row, start) in zip(actual, windows, strict=True):
+            for key in keys:
+                expected = np.asarray(accessor.dataset(key)[row, start : start + 3]).astype(np.float32)
+                np.testing.assert_array_equal(sample[key], expected)
+        assert accessor.read_windows(keys, [], 3) == []
+        with pytest.raises(IndexError):
+            accessor.read_windows(keys, [(0, 7)], 3)
+    finally:
+        accessor.close()
+
+
+def test_lazy_accessor_caches_handles_and_drops_them_on_pickle(tmp_path):
+    import pickle
+
+    from isaaclab_neural.data.datasets import _LazyHdf5Accessor
+
+    path = tmp_path / "tokens.hdf5"
+    _write_token_dataset(path)
+    accessor = _LazyHdf5Accessor(path)
+    original = accessor.dataset("states")
+    assert accessor.dataset("states") is original
+    restored = pickle.loads(pickle.dumps(accessor))
+    try:
+        np.testing.assert_array_equal(restored.dataset("states")[:], original[:])
+        accessor.close()
+        assert not original.id.valid
+        np.testing.assert_array_equal(restored.dataset("states")[:], accessor.dataset("states")[:])
+    finally:
+        accessor.close()
+        restored.close()
+
+
 def _write_overlapping_dataset(path, world_count=2):
     worlds = torch.arange(world_count).repeat_interleave(2)
     starts = torch.tensor([0, 32]).repeat(world_count)
@@ -684,6 +880,56 @@ def test_sliding_ddp_window_statistics_and_unique_seen(tmp_path):
     mp.spawn(_sliding_statistics_worker, args=(str(path), f"file://{tmp_path / 'rendezvous'}"), nprocs=2, join=True)
 
 
+def _population_weighted_gradient_worker(rank, rendezvous):
+    from isaaclab_neural.train.trainers import distributed_supervision_loss
+    from torch.nn.parallel import DistributedDataParallel
+
+    torch.set_num_threads(1)
+    dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2)
+    try:
+        model = torch.nn.Linear(1, 1, bias=False)
+        model.weight.data.fill_(1.0)
+        model = DistributedDataParallel(model)
+        trainer = VanillaTrainer.__new__(VanillaTrainer)
+        trainer.is_distributed = trainer.train_dataset_rank_sharded = True
+        trainer.dataset_capacity_unit = "unique_transition"
+        trainer.dataset_window_sampling = "sliding"
+        trainer.train_dataset = [None] * (1 if rank == 0 else 3)
+        data = {"supervision_mask": torch.ones(1, 1, dtype=torch.bool)}
+        scale = trainer._batch_sampling_scale(data, True)
+        loss = model(torch.tensor([[1.0 if rank == 0 else 3.0]])).square().mean()
+        distributed_supervision_loss(loss, data["supervision_mask"].sum() * scale).backward()
+        assert model.module.weight.grad.item() == pytest.approx(14.0)
+        metrics_trainer = _metric_trainer()
+        metrics_trainer.is_distributed = True
+        metrics_trainer.world_size = 2
+
+        def metric_loss(data, train):
+            metrics_trainer._metric_statistics = {
+                "robot_normal_contact_precision": (float(rank), 1.0 if rank == 0 else 99.0),
+                "robot_normal_active_RMSE_N": (100.0 * rank, float(rank)),
+            }
+            return torch.tensor(1.0), {
+                "robot_normal_RMSE_N": 10.0 * rank,
+                "robot_normal_contact_precision": 0.0,
+                "robot_normal_active_RMSE_N": 10.0 * rank,
+            }
+
+        metrics_trainer.compute_loss = metric_loss
+        _, metrics, _ = metrics_trainer.one_epoch(False, [data], iter([data]), 1)
+        assert metrics["robot_normal_RMSE_N"] == pytest.approx(50.0**0.5)
+        assert metrics["robot_normal_contact_precision"] == pytest.approx(0.01)
+        assert metrics["robot_normal_active_RMSE_N"] == pytest.approx(10.0)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_ddp_unequal_populations_match_global_window_objective(tmp_path):
+    import torch.multiprocessing as mp
+
+    mp.spawn(_population_weighted_gradient_worker, args=(f"file://{tmp_path / 'population'}",), nprocs=2, join=True)
+
+
 def test_training_worker_import_has_no_distributed_side_effects(monkeypatch):
     import runpy
     import sys
@@ -744,6 +990,29 @@ def test_epoch_maximum_is_not_averaged_over_supervised_targets():
     loss, metrics, _ = trainer.one_epoch(False, batches, iter(batches), 2)
     assert loss == pytest.approx(0.001)
     assert metrics["key_q_m_max"] == pytest.approx(0.01)
+
+
+def test_epoch_rmse_and_contact_ratios_use_global_sufficient_statistics():
+    trainer = _metric_trainer()
+    batches = [{"supervision_mask": torch.ones(1, 1, dtype=torch.bool), "index": index} for index in range(2)]
+
+    def loss(data, train):
+        index = data["index"]
+        trainer._metric_statistics = {
+            "robot_normal_contact_precision": (1.0, 1.0 if index == 0 else 100.0),
+            "robot_normal_active_RMSE_N": (0.0 if index == 0 else 100.0, float(index)),
+        }
+        return torch.tensor(1.0), {
+            "robot_normal_RMSE_N": 10.0 * index,
+            "robot_normal_contact_precision": 1.0 if index == 0 else 0.01,
+            "robot_normal_active_RMSE_N": 10.0 * index,
+        }
+
+    trainer.compute_loss = loss
+    _, metrics, _ = trainer.one_epoch(False, batches, iter(batches), 2)
+    assert metrics["robot_normal_RMSE_N"] == pytest.approx(50.0**0.5)
+    assert metrics["robot_normal_contact_precision"] == pytest.approx(2.0 / 101.0)
+    assert metrics["robot_normal_active_RMSE_N"] == pytest.approx(10.0)
 
 
 class _DataLoaderTrainerHarness(VanillaTrainer):

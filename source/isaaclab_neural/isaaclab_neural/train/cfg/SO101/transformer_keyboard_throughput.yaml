@@ -50,16 +50,19 @@ algorithm:
   dataset:
     train_datasets:
       policy:
-        path: ./data/datasets/so101-keyboard-fixed-v1/SO101-Keyboard-Fixed/seed42_variant00.hdf5
+        path: ./data/datasets/so101-keyboard-fixed-v2/SO101-Keyboard-Fixed/seed42_variant00.hdf5
         weight: 1.0
     valid_datasets:
-      policy: ./data/datasets/so101-keyboard-fixed-v1/SO101-Keyboard-Fixed/seed43_variant00.hdf5
+      policy: ./data/datasets/so101-keyboard-fixed-v2/SO101-Keyboard-Fixed/seed43_variant00.hdf5
     max_capacity: 10000000
     capacity_unit: unique_transition
     capacity_scope: global
     window_sampling: sliding
     valid_max_capacity: 3000000
     load_mode: lazy
+    eager_preload_frames: 4096
+    pin_memory: auto
+    non_blocking: auto
     num_data_workers: 8
     max_total_workers: 64
   eval:

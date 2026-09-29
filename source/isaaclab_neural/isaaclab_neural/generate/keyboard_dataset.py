@@ -33,6 +33,7 @@ from isaaclab_neural.data.keyboard import (
     KEYBOARD_REPLAY_LAYOUT,
     KEYBOARD_SCHEMA,
     KEYBOARD_TASK,
+    fixed_root_poses_from_scene,
     keyboard_clip_indices,
     keyboard_replay_batches,
     read_keyboard_metadata,
@@ -276,6 +277,7 @@ def runtime_metadata(env: Any, adapter: DataGenerationAdapter, variant: int) -> 
         "source_num_envs": env.num_envs,
         "source_seed": env.cfg.seed,
         "scene": "fixed",
+        "fixed_root_poses": fixed_root_poses_from_scene(env.scene),
         "versions": {name: version(name) for name in ("newton", "mujoco-warp", "torch", "rsl-rl-lib")},
         "robot_asset": env.cfg.scene.robot.spawn.to_dict(),
         "robot_actuators": {name: cfg.to_dict() for name, cfg in env.cfg.scene.robot.actuators.items()},
@@ -703,6 +705,13 @@ def _run_replay(
         "body_names",
         "asset_order",
         "solver_cfg",
+        "scene",
+        "fixed_root_poses",
+        "robot_asset",
+        "robot_actuators",
+        "keyboard_reset",
+        "typing_reset",
+        "versions",
     ]
     fields += [
         name
@@ -1095,7 +1104,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--deterministic-physics", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--bounded-deterministic-workspace", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--keyboard-variant", type=int, default=None)
+    parser.add_argument("--keyboard-variant", type=int, choices=(0,), default=None)
     parser.add_argument("--control-steps", type=int, default=140)
     parser.add_argument("--horizon", type=int, default=64)
     parser.add_argument("--max-contact-tokens", type=int, default=None)

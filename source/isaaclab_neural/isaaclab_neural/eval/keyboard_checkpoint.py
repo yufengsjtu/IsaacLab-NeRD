@@ -24,6 +24,7 @@ from isaaclab_neural.data.keyboard import (
     KEYBOARD_REPLAY_LAYOUT,
     keyboard_replay_batches,
     read_keyboard_metadata,
+    validate_keyboard_runtime,
     validate_keyboard_training_contracts,
 )
 from isaaclab_neural.generate.keyboard_dataset import restore_keyboard_initial_state
@@ -43,6 +44,7 @@ def rollout_batch(
     adapter = env.neural_adapter
     adapter.sync(update_history=False)
     adapter.reset_history()
+    validate_keyboard_runtime(metadata, env.scene, adapter.model)
     if adapter.solver.contact_filter == "solver_active_movable":
         fixed_slots = getattr(adapter.solver.contact_adapter, "fixed_body_slots", None)
         if (

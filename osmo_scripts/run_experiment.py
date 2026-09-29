@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import warnings
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
@@ -948,18 +949,39 @@ def evaluate_keyboard_checkpoint(experiment: dict, dataset_dir: Path, output_roo
 
 def run_keyboard_pipeline(args: argparse.Namespace, preset: dict) -> None:
     """Use the common storage/training runner with Keyboard collection and acceptance hooks."""
+    from lib.keyboard_data import bundle_validation_session
+
+    with bundle_validation_session():
+        _run_keyboard_pipeline(args, preset)
+
+
+def _run_keyboard_pipeline(args: argparse.Namespace, preset: dict) -> None:
+    """Execute one pipeline without retaining verified-file identities across runs."""
     from lib.keyboard_data import MANIFEST, collection_plan, validate_bundle, validate_runtime, validation_mode
 
     experiment = dict(preset["experiment"])
     output_root = Path(args.output_root)
     state = {"stages": {}, "task_fidelity_accepted": False, "data_validation_mode": validation_mode(experiment)}
     stage = "preflight"
+    pipeline_started = time.perf_counter()
+    stage_started = {}
+    events = []
+    state["stage_events"] = events
 
     def record(name, status):
+        now = time.perf_counter()
+        event = {"stage": name, "status": status, "unix_time": time.time(), "elapsed_seconds": now - pipeline_started}
+        if status == "running":
+            stage_started[name] = now
+        elif name in stage_started:
+            event["duration_seconds"] = now - stage_started.pop(name)
+        events.append(event)
         state["stages"][name] = status
         (output_root / "pipeline_status.json").write_text(json.dumps(state, indent=2) + "\n")
+        print("[Pipeline stage] " + json.dumps(event), flush=True)
 
     try:
+        record(stage, "running")
         validate_runtime(experiment)
         if experiment.get("dataset_capacity_unit") == "unique_transition":
             from isaaclab_neural.utils.python_utils import handle_cfg_overrides
@@ -986,6 +1008,7 @@ def run_keyboard_pipeline(args: argparse.Namespace, preset: dict) -> None:
         (output_root / "collection_plan.json").write_text(json.dumps(plan, indent=2) + "\n")
         record(stage, "passed")
         stage = "cache_lookup"
+        record(stage, "running")
         cached = False
         if args.dataset_cache_mode != "off":
             if (local_env_dir / MANIFEST).exists():
@@ -1048,6 +1071,7 @@ def run_keyboard_pipeline(args: argparse.Namespace, preset: dict) -> None:
             generate_all_datasets(experiment, specs, dataset_dir)
             record(stage, "passed")
         stage = "data_validation"
+        record(stage, "running")
         if not dataset_cache_complete(local_env_dir, required, experiment):
             raise RuntimeError("Keyboard data validation failed; no cache publication or training.")
         validate_bundle(local_env_dir, experiment)
@@ -1055,6 +1079,7 @@ def run_keyboard_pipeline(args: argparse.Namespace, preset: dict) -> None:
         (output_root / "resolved_experiment.json").write_text(json.dumps(experiment, indent=2) + "\n")
         record(stage, "passed")
         stage = "cache_publication"
+        record(stage, "running")
         if not cached:
             stage_generated_datasets(
                 local_env_dir=local_env_dir,
@@ -1079,6 +1104,7 @@ def run_keyboard_pipeline(args: argparse.Namespace, preset: dict) -> None:
         run_training(experiment, output_root, args)
         record(stage, "passed")
         stage = "checkpoint_evaluation"
+        record(stage, "running")
         evaluate_keyboard_checkpoint(experiment, local_env_dir, output_root)
         record(stage, "passed; fidelity requires separate review")
     except Exception as error:

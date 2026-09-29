@@ -526,6 +526,23 @@ def sample():
         "num_qd": 114,
         "key_q_indices": list(range(6, 114)),
     }
+    metadata.update(
+        scene="fixed",
+        asset_order=["robot", "keyboard"],
+        fixed_root_poses={
+            "robot": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            "keyboard": [0.285, 0.0, 0.01, 0.0, 0.0, 0.0, 1.0],
+        },
+        keyboard_reset={"params": {"pose_range": {"z": [0.0, 0.0]}, "velocity_range": {"z": [0.0, 0.0]}}},
+        typing_reset={
+            "pre_solve_reset": {"params": {"pose_range": {"z": [0.0, 0.0]}, "velocity_range": {"z": [0.0, 0.0]}}}
+        },
+    )
+    rollout["articulation_root_pose"] = (
+        torch.tensor([metadata["fixed_root_poses"][name] for name in metadata["asset_order"]])
+        .expand(1, 8, 2, 7)
+        .clone()
+    )
     return rollout, metadata
 
 
@@ -550,12 +567,14 @@ def test_basic_keyboard_validation_keeps_data_checks_without_replay(tmp_path, mo
     rollout["trajectory_context"].update(
         source_env_id=torch.zeros(1, dtype=torch.long), source_start_frame=torch.zeros(1, dtype=torch.long)
     )
-    if fault == "variant":
-        metadata["keyboard_variant"] = 1
     path = tmp_path / "part.hdf5"
     write_keyboard_dataset(path, rollout, metadata)
     with h5py.File(path, "a") as file:
         file.create_dataset("replay/frames/states", data=rollout["states"].numpy())
+        file.create_dataset("replay/frames/articulation_root_pose", data=rollout["articulation_root_pose"].numpy())
+        if fault == "variant":
+            metadata["keyboard_variant"] = 1
+            file["data"].attrs["keyboard_contract"] = json.dumps(metadata)
         if fault == "nonfinite":
             file["data/next_states"][0, 0, 0] = float("nan")
         elif fault == "reset":
@@ -724,6 +743,60 @@ def test_training_contract_requires_one_fixed_keyboard_and_independent_seeds():
     original["schema"] = "so101_keyboard_original_v1"
     with pytest.raises(ValueError, match="schema"):
         validate_keyboard_training_contracts({"a": original}, {"valid": valid})
+
+
+@pytest.mark.parametrize("fault", ["reset", "pre_solve", "pose_tensor", "declared_pose", "legacy"])
+def test_fixed_domain_rejects_pose_drift_and_old_contracts(tmp_path, fault):
+    rollout, metadata = sample()
+    if fault == "reset":
+        metadata["keyboard_reset"]["params"]["pose_range"]["z"] = [0.01, 0.02]
+    elif fault == "pre_solve":
+        metadata["typing_reset"]["pre_solve_reset"]["params"]["pose_range"]["roll"] = [0.0, 0.5]
+    elif fault == "pose_tensor":
+        rollout["articulation_root_pose"][0, 4, 1, 2] += 0.01
+    elif fault == "declared_pose":
+        metadata["fixed_root_poses"]["keyboard"][2] += 0.01
+    else:
+        metadata["schema"] = "so101_keyboard_fixed_v1"
+    with pytest.raises(ValueError, match="fixed|Fixed|schema"):
+        write_keyboard_dataset(tmp_path / "invalid.hdf5", rollout, metadata)
+
+
+def test_fixed_reader_rejects_changed_pose_tensor(tmp_path):
+    rollout, metadata = sample()
+    path = tmp_path / "fixed.hdf5"
+    write_keyboard_dataset(path, rollout, metadata)
+    with h5py.File(path, "a") as file:
+        file["data/articulation_root_pose"][0, 3, 1, 2] += 0.01
+    with pytest.raises(ValueError, match="root poses"):
+        read_keyboard_metadata(path)
+
+
+def test_fixed_runtime_checks_authored_pose_and_physics():
+    from types import SimpleNamespace
+
+    from isaaclab_neural.data.keyboard import validate_keyboard_runtime
+
+    _, metadata = sample()
+    metadata["physics_parameters"] = {"body_mass": [1.0]}
+
+    class Scene(dict):
+        num_envs = 1
+
+    scene = Scene(
+        {
+            name: SimpleNamespace(cfg=SimpleNamespace(init_state=SimpleNamespace(pos=pose[:3], rot=pose[3:])))
+            for name, pose in metadata["fixed_root_poses"].items()
+        }
+    )
+    model = SimpleNamespace(body_mass=torch.tensor([1.0]))
+    validate_keyboard_runtime(metadata, scene, model)
+    model.body_mass = torch.tensor([2.0])
+    with pytest.raises(ValueError, match="physics differs"):
+        validate_keyboard_runtime(metadata, scene, model)
+    scene["keyboard"].cfg.init_state.pos = [1.0, 0.0, 0.0]
+    with pytest.raises(ValueError, match="root poses"):
+        validate_keyboard_runtime(metadata, scene, model)
 
 
 def test_keyboard_hdf5_roundtrip_and_exclusive_output(tmp_path):

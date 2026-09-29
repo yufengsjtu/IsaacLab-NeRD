@@ -24,7 +24,7 @@ from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg, NewtonNerdMana
 from isaaclab_neural.train import SequenceModelTrainer, VanillaTrainer
 from isaaclab_neural.train.arguments import get_parser
 from isaaclab_neural.utils.checkpoint import get_cfg_from_checkpoint, load_checkpoint
-from isaaclab_neural.utils.python_utils import get_time_stamp, handle_cfg_overrides, print_warning, set_random_seed
+from isaaclab_neural.utils.python_utils import get_time_stamp, handle_cfg_overrides, set_random_seed
 
 ALGORITHMS = {
     "VanillaTrainer": VanillaTrainer,
@@ -146,6 +146,8 @@ def validate_checkpoint_input_semantics(checkpoint_cfg: dict, cfg: dict) -> None
     changed = {key: (expected[key], actual[key]) for key in expected if expected[key] != actual[key]}
     if cfg["inputs"] != checkpoint_cfg["inputs"]:
         changed["inputs"] = (checkpoint_cfg["inputs"], cfg["inputs"])
+    if cfg.get("network") != checkpoint_cfg.get("network"):
+        changed["network"] = (checkpoint_cfg.get("network"), cfg.get("network"))
     if changed:
         raise ValueError(
             "Checkpoint input semantics differ from the training configuration (checkpoint, requested): "
@@ -158,6 +160,8 @@ def load_training_cfg(args):
     with open(Path(args.cfg).expanduser()) as cfg_file:
         cfg = yaml.load(cfg_file, Loader=yaml.SafeLoader)
 
+    requested_cfg = copy.deepcopy(cfg)
+    handle_cfg_overrides(args.cfg_overrides, requested_cfg)
     checkpoint = checkpoint_cfg = None
     if args.checkpoint is not None:
         checkpoint = load_checkpoint(args.checkpoint, device=args.device)
@@ -170,11 +174,9 @@ def load_training_cfg(args):
             checkpoint_cfg["network"].get("robot_net_normal_force_head", {}).get("enabled", False)
         ):
             raise ValueError("Cannot resume robot normal-force training from a checkpoint without that head.")
-        if cfg["env"]["env_name"] != checkpoint_cfg["env"]["env_name"]:
-            print_warning(
-                f"Environment name in cfg {cfg['env']['env_name']} is not equal to "
-                f"the environment name in checkpoint {checkpoint_cfg['env']['env_name']}"
-            )
+        if requested_cfg["env"]["env_name"] != checkpoint_cfg["env"]["env_name"]:
+            raise ValueError("Checkpoint environment differs from the requested training environment.")
+        validate_checkpoint_input_semantics(checkpoint_cfg, requested_cfg)
         cfg["env"]["neural_solver_cfg"].update(checkpoint_cfg["env"]["neural_solver_cfg"])
         cfg["env"]["neural_solver_cfg"].pop("use_cuda_graph", None)
         cfg["inputs"] = copy.deepcopy(checkpoint_cfg["inputs"])

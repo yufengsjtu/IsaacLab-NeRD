@@ -491,6 +491,11 @@ def test_keyboard_pipeline_stage_order_and_fail_closed(tmp_path, monkeypatch, mo
         )
     status = json.loads((tmp_path / "pipeline_status.json").read_text())
     assert not status["task_fidelity_accepted"]
+    events = status["stage_events"]
+    assert events[0]["stage"] == "preflight" and events[0]["status"] == "running"
+    assert [event["elapsed_seconds"] for event in events] == sorted(event["elapsed_seconds"] for event in events)
+    assert all(event["unix_time"] > 0 for event in events)
+    assert all(event["duration_seconds"] >= 0 for event in events if "duration_seconds" in event)
 
 
 @pytest.mark.parametrize("failure", [False, True])
@@ -570,6 +575,65 @@ def test_keyboard_parallel_collection_isolates_devices_and_gates_manifest(tmp_pa
             assert parts == [f"{Path(name).stem}.part{i:05d}.hdf5" for i in range(len(parts))]
     assert max(peaks) == 2 and not busy
     assert len({(name, index) for name, index, gpu in calls}) == len(calls)
+
+
+@pytest.mark.parametrize("changed", ["data.hdf5", "receipt.json", "keyboard_dataset_manifest.json"])
+def test_bundle_validation_session_reuses_only_unchanged_verified_files(tmp_path, monkeypatch, changed):
+    import os
+
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib import keyboard_data
+
+    path = tmp_path / "data.hdf5"
+    path.write_bytes(b"verified")
+    (tmp_path / keyboard_data.MANIFEST).write_text("{}")
+    (tmp_path / "receipt.json").write_text("{}")
+    names = [path.name, "receipt.json", keyboard_data.MANIFEST]
+    monkeypatch.setattr(keyboard_data, "bundle_files", lambda *args: names)
+    expected = {name: keyboard_data.file_sha256(tmp_path / name) for name in names}
+    calls = []
+
+    def verify(root, experiment):
+        calls.append(dict(experiment))
+        if any(keyboard_data.file_sha256(root / name) != digest for name, digest in expected.items()):
+            raise ValueError("Changed data hash")
+        return {"files": dict(expected)}
+
+    monkeypatch.setattr(keyboard_data, "_validate_bundle", verify)
+    with keyboard_data.bundle_validation_session():
+        first = keyboard_data.validate_bundle(tmp_path, {"train_cfg": "source.yaml", "minimum": 1})
+        first["files"].clear()
+        second = keyboard_data.validate_bundle(tmp_path, {"train_cfg": "resolved.yaml", "minimum": 1})
+        assert second["files"] and len(calls) == 1
+        keyboard_data.validate_bundle(tmp_path, {"minimum": 2})
+        assert len(calls) == 2
+        path = tmp_path / changed
+        previous = path.stat()
+        original = path.read_bytes()
+        path.write_bytes(b"x" * len(original))
+        os.utime(path, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+        with pytest.raises(ValueError, match="Changed data hash"):
+            keyboard_data.validate_bundle(tmp_path, {"minimum": 2})
+    path.write_bytes(original)
+    keyboard_data.validate_bundle(tmp_path, {"minimum": 2})
+    assert len(calls) == 4
+
+
+def test_bundle_validation_detects_mutation_during_full_check(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib import keyboard_data
+
+    path = tmp_path / keyboard_data.MANIFEST
+    path.write_text("{}")
+    monkeypatch.setattr(keyboard_data, "bundle_files", lambda *args: [keyboard_data.MANIFEST])
+
+    def mutate(*args):
+        path.write_text('{"changed": true}')
+        return {}
+
+    monkeypatch.setattr(keyboard_data, "_validate_bundle", mutate)
+    with keyboard_data.bundle_validation_session(), pytest.raises(ValueError, match="changed during"):
+        keyboard_data.validate_bundle(tmp_path, {})
 
 
 @pytest.mark.parametrize("mode", ["full_replay", "basic"])
