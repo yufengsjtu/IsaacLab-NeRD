@@ -20,7 +20,7 @@ from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_TOKEN_GEOMETRY_SLICE,
     CONTACT_TOKEN_VALID_INDEX,
 )
-from isaaclab_neural.contacts.native_pair_projector import project_native_pairs
+from isaaclab_neural.contacts.native_pair_projector import gather_or_fill, project_native_pairs
 from isaaclab_neural.utils import torch_utils
 
 
@@ -407,26 +407,19 @@ class ContactSetEncoder:
         return packed_out, overflow_out, body_ids_out
 
     def _shape_body_ids(self, shapes: torch.Tensor) -> torch.Tensor:
-        body_ids = torch.full(shapes.shape, -1, dtype=torch.long, device=shapes.device)
-        valid_shapes = (shapes >= 0) & (shapes < self.shape_body_torch.shape[0])
-        body_ids[valid_shapes] = self.shape_body_torch[shapes[valid_shapes].long()]
-        return body_ids
+        return gather_or_fill(self.shape_body_torch, shapes, -1)
 
     def _contact_env_ids(self, body_ids: torch.Tensor, shapes: torch.Tensor) -> torch.Tensor:
         """Return per-contact env ids; ``-1`` marks unknown/static-only contacts."""
-        env_ids = torch.full(body_ids.shape, -1, dtype=torch.long, device=body_ids.device)
         dynamic = body_ids >= 0
-        if dynamic.any() and self.body_world is not None:
-            env_ids[dynamic] = self.body_world.to(device=body_ids.device)[body_ids[dynamic].long()]
-        static = ~dynamic
-        if static.any():
-            static_envs = torch.div(shapes[static].long(), self.bodies_per_env, rounding_mode="floor")
-            invalid_static = (shapes[static] < 0) | (static_envs < 0) | (static_envs >= self.num_envs)
-            env_ids[static] = torch.where(
-                invalid_static,
-                torch.full_like(static_envs, -1, dtype=torch.long),
-                static_envs.to(dtype=torch.long),
-            )
+        env_ids = torch.full(body_ids.shape, -1, dtype=torch.long, device=body_ids.device)
+        if self.body_world is not None:
+            body_world = self.body_world.to(device=body_ids.device, dtype=torch.long)
+            env_ids = torch.where(dynamic, gather_or_fill(body_world, body_ids, -1), env_ids)
+        static_envs = torch.div(shapes.long(), self.bodies_per_env, rounding_mode="floor")
+        invalid_static = (shapes < 0) | (static_envs < 0) | (static_envs >= self.num_envs)
+        static_envs = torch.where(invalid_static, torch.full_like(static_envs, -1), static_envs)
+        env_ids = torch.where(dynamic, env_ids, static_envs)
         # Keep unknown env ids as -1 so packing can dump them instead of env 0.
         return env_ids
 

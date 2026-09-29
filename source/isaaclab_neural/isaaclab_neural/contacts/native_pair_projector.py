@@ -29,6 +29,21 @@ def native_pair_solver_active_mask(native_pairs: Mapping[str, torch.Tensor]) -> 
     return native_pairs["separation"] < 0.0
 
 
+def gather_or_fill(table: torch.Tensor, indices: torch.Tensor, fill: int | bool = -1) -> torch.Tensor:
+    """Return ``table[indices]`` where ``0 <= indices < len(table)`` and ``fill`` elsewhere.
+
+    Unlike boolean-mask gathers, this issues no host synchronization and keeps the input shape.
+    """
+    if table.shape[0] == 0:
+        return torch.full(indices.shape, fill, dtype=table.dtype, device=indices.device)
+    valid = (indices >= 0) & (indices < table.shape[0])
+    gathered = table.index_select(0, indices.reshape(-1).long().clamp(0, table.shape[0] - 1)).reshape(indices.shape)
+    return torch.where(valid, gathered, torch.full_like(gathered, fill))
+
+
+_FIXED_SLOT_TENSORS: dict[tuple[tuple[int, ...], torch.device], torch.Tensor] = {}
+
+
 def native_pair_filter_mask(
     native_pairs: Mapping[str, torch.Tensor], contact_filter: str, fixed_body_slots: tuple[int, ...] | None = None
 ) -> torch.Tensor:
@@ -42,7 +57,11 @@ def native_pair_filter_mask(
         raise ValueError(f"Unsupported contact filter: {contact_filter!r}.")
     if fixed_body_slots is None or any(type(slot) is not int or slot < 0 for slot in fixed_body_slots):
         raise ValueError("Movable contact filtering requires verified fixed body slots (mobility metadata).")
-    fixed = torch.tensor(fixed_body_slots, device=active.device, dtype=torch.long)
+    key = (tuple(fixed_body_slots), active.device)
+    fixed = _FIXED_SLOT_TENSORS.get(key)
+    if fixed is None:
+        # Cached: re-uploading the slot list every frame cost a host-to-device copy per step.
+        fixed = _FIXED_SLOT_TENSORS[key] = torch.tensor(fixed_body_slots, device=active.device, dtype=torch.long)
     immovable = [
         (native_pairs[f"body_ids_{side}"] < 0) | torch.isin(native_pairs[f"body_slots_{side}"], fixed)
         for side in (0, 1)
@@ -296,10 +315,11 @@ def _project_tokens(
 
     dropped = directed_valid & ~directed_keep
     valid_directed_frames = (directed_frames >= 0) & (directed_frames < num_frames)
+    # Masked adds of zero instead of boolean selection, so no host synchronization.
     overflow.scatter_add_(
         0,
-        directed_frames[valid_directed_frames],
-        dropped[valid_directed_frames].to(torch.long),
+        directed_frames.clamp(0, max(num_frames - 1, 0)),
+        (dropped & valid_directed_frames).to(torch.long),
     )
     return result
 

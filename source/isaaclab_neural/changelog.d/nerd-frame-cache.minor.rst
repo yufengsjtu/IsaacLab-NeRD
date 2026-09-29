@@ -20,3 +20,7 @@ Changed
   model inference on CUDA, with ``--inference-precision`` overrides in ``keyboard_policy`` and
   ``keyboard_benchmark env``. Reduced precisions changed predictions beyond FP32 roundoff and must be
   validated closed loop before use.
+* Changed native contact packing to gather shape/body/world ids with bounded ``torch.where`` lookups and a
+  single ``nonzero`` per frame instead of boolean-mask indexing per field, and cached the fixed-slot filter
+  tensor. Outputs were unchanged (verified against the previous helpers on 1478 live SO101 frames); host
+  synchronizations per NeRD physics frame dropped from about 49 to 8.

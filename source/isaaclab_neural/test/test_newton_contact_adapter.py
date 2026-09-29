@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import warp as wp
-from isaaclab_neural.contacts.native_pair_projector import project_native_pairs
+from isaaclab_neural.contacts.native_pair_projector import gather_or_fill, project_native_pairs
 from isaaclab_neural.contacts.newton_contact_adapter import NewtonContactAdapter
 from isaaclab_neural.contacts.packing import get_contact_order, resolve_contact_packing_policy
 from isaaclab_neural.generate.adapter import DataGenerationAdapter
@@ -382,3 +382,17 @@ def test_shared_native_pair_projection_matches_flat_reference():
     ):
         expected = native_pairs[source_name][selected].reshape(2, -1)
         torch.testing.assert_close(actual[output_name], expected)
+
+
+def test_gather_or_fill_matches_masked_lookup_at_bounds():
+    table = torch.tensor([4, -1, 7])
+    indices = torch.tensor([[-2, 0, 1], [2, 3, 0]])
+    expected = torch.full_like(indices, -9)
+    valid = (indices >= 0) & (indices < table.numel())
+    expected[valid] = table[indices[valid]]
+    torch.testing.assert_close(gather_or_fill(table, indices, -9), expected)
+    torch.testing.assert_close(
+        gather_or_fill(torch.zeros(0, dtype=torch.long), indices, -1), torch.full_like(indices, -1)
+    )
+    mask = torch.tensor([True, False])
+    assert gather_or_fill(mask, torch.tensor([1, 0, 5]), False).tolist() == [False, True, False]

@@ -27,7 +27,11 @@ from isaaclab_neural.contacts.contact_set_schema import (
     NATIVE_CONTACT_VECTOR_FIELDS,
 )
 from isaaclab_neural.contacts.kernels import transform_native_contact_geometry
-from isaaclab_neural.contacts.native_pair_projector import native_pair_filter_mask, project_native_pairs
+from isaaclab_neural.contacts.native_pair_projector import (
+    gather_or_fill,
+    native_pair_filter_mask,
+    project_native_pairs,
+)
 from isaaclab_neural.contacts.packing import ContactPackingPolicy
 from isaaclab_neural.utils import step_profile, torch_utils
 
@@ -476,30 +480,32 @@ class NewtonContactAdapter:
         surface1_world = raw.get("surface1_world", point1_world)
         offset0 = raw.get("offset0", torch.zeros_like(point0_local))
         offset1 = raw.get("offset1", torch.zeros_like(point1_local))
+        # One nonzero (one host sync) instead of a synchronizing boolean mask per field; order is unchanged.
+        kept = torch.nonzero(valid, as_tuple=False).reshape(-1)
         pairs = {
-            "shape_ids_0": raw["shape0"][valid].to(dtype=torch.int64),
-            "shape_ids_1": raw["shape1"][valid].to(dtype=torch.int64),
-            "body_ids_0": body_ids_0[valid].to(dtype=torch.int64),
-            "body_ids_1": body_ids_1[valid].to(dtype=torch.int64),
-            "body_slots_0": body_slots_0[valid].to(dtype=torch.int64),
-            "body_slots_1": body_slots_1[valid].to(dtype=torch.int64),
-            "world_ids": world_ids[valid].to(dtype=torch.int64),
-            "points_0_local": point0_local[valid].to(dtype=torch.float32),
-            "points_1_local": point1_local[valid].to(dtype=torch.float32),
-            "points_0_w": point0_world[valid].to(dtype=torch.float32),
-            "points_1_w": point1_world[valid].to(dtype=torch.float32),
-            "surface_points_0_w": surface0_world[valid].to(dtype=torch.float32),
-            "surface_points_1_w": surface1_world[valid].to(dtype=torch.float32),
-            "normal_w": normal[valid].to(dtype=torch.float32),
-            "separation": raw["surface_separation"][valid].to(dtype=torch.float32),
-            "thickness_0": raw["thickness0"][valid].to(dtype=torch.float32),
-            "thickness_1": raw["thickness1"][valid].to(dtype=torch.float32),
-            "offsets_0": offset0[valid].to(dtype=torch.float32),
-            "offsets_1": offset1[valid].to(dtype=torch.float32),
-            "lever_arms_0_w": lever_arms_0_w[valid].to(dtype=torch.float32),
-            "lever_arms_1_w": lever_arms_1_w[valid].to(dtype=torch.float32),
-            "relative_velocities_0_w": relative_velocities_0_w[valid].to(dtype=torch.float32),
-            "relative_velocities_1_w": relative_velocities_1_w[valid].to(dtype=torch.float32),
+            "shape_ids_0": raw["shape0"].index_select(0, kept).to(dtype=torch.int64),
+            "shape_ids_1": raw["shape1"].index_select(0, kept).to(dtype=torch.int64),
+            "body_ids_0": body_ids_0.index_select(0, kept).to(dtype=torch.int64),
+            "body_ids_1": body_ids_1.index_select(0, kept).to(dtype=torch.int64),
+            "body_slots_0": body_slots_0.index_select(0, kept).to(dtype=torch.int64),
+            "body_slots_1": body_slots_1.index_select(0, kept).to(dtype=torch.int64),
+            "world_ids": world_ids.index_select(0, kept).to(dtype=torch.int64),
+            "points_0_local": point0_local.index_select(0, kept).to(dtype=torch.float32),
+            "points_1_local": point1_local.index_select(0, kept).to(dtype=torch.float32),
+            "points_0_w": point0_world.index_select(0, kept).to(dtype=torch.float32),
+            "points_1_w": point1_world.index_select(0, kept).to(dtype=torch.float32),
+            "surface_points_0_w": surface0_world.index_select(0, kept).to(dtype=torch.float32),
+            "surface_points_1_w": surface1_world.index_select(0, kept).to(dtype=torch.float32),
+            "normal_w": normal.index_select(0, kept).to(dtype=torch.float32),
+            "separation": raw["surface_separation"].index_select(0, kept).to(dtype=torch.float32),
+            "thickness_0": raw["thickness0"].index_select(0, kept).to(dtype=torch.float32),
+            "thickness_1": raw["thickness1"].index_select(0, kept).to(dtype=torch.float32),
+            "offsets_0": offset0.index_select(0, kept).to(dtype=torch.float32),
+            "offsets_1": offset1.index_select(0, kept).to(dtype=torch.float32),
+            "lever_arms_0_w": lever_arms_0_w.index_select(0, kept).to(dtype=torch.float32),
+            "lever_arms_1_w": lever_arms_1_w.index_select(0, kept).to(dtype=torch.float32),
+            "relative_velocities_0_w": relative_velocities_0_w.index_select(0, kept).to(dtype=torch.float32),
+            "relative_velocities_1_w": relative_velocities_1_w.index_select(0, kept).to(dtype=torch.float32),
         }
         if set(pairs) != set(NATIVE_CONTACT_INTEGER_FIELDS + NATIVE_CONTACT_FLOAT_FIELDS):
             raise RuntimeError("Native contact-pair fields do not match the schema.")
@@ -722,17 +728,11 @@ class NewtonContactAdapter:
 
     def _shape_body_ids(self, shapes: torch.Tensor) -> torch.Tensor:
         """Return owning body indices, using ``-1`` for static or invalid shapes."""
-        body_ids = torch.full(shapes.shape, -1, dtype=torch.long, device=shapes.device)
-        valid_shapes = (shapes >= 0) & (shapes < self.shape_body_torch.shape[0])
-        body_ids[valid_shapes] = self.shape_body_torch[shapes[valid_shapes].long()]
-        return body_ids
+        return gather_or_fill(self.shape_body_torch, shapes, -1)
 
     def _is_primary_body(self, body_ids: torch.Tensor) -> torch.Tensor:
         """Return whether each body is an articulated contact owner."""
-        result = torch.zeros_like(body_ids, dtype=torch.bool)
-        valid = (body_ids >= 0) & (body_ids < self.primary_body_mask.shape[0])
-        result[valid] = self.primary_body_mask[body_ids[valid]]
-        return result
+        return gather_or_fill(self.primary_body_mask, body_ids, False)
 
     def _derive_primary_body_mask(self) -> tuple[torch.Tensor, str]:
         """Mark every articulated body in each world as a contact owner."""
@@ -938,19 +938,12 @@ class NewtonContactAdapter:
 
     def _shapes_to_env_ids(self, shapes: torch.Tensor) -> torch.Tensor:
         body_ids = self._shape_body_ids(shapes)
-        env_ids = torch.full(body_ids.shape, -1, dtype=torch.long, device=shapes.device)
-        valid = body_ids >= 0
-        if not bool(valid.any()):
-            return env_ids
         body_world_torch = getattr(self, "body_world_torch", None)
+        if body_world_torch is None and self.body_world is not None:
+            body_world_torch = torch.as_tensor(self.body_world, dtype=torch.long, device=shapes.device)
         if body_world_torch is not None:
-            env_ids[valid] = body_world_torch[body_ids[valid]]
-        elif self.body_world is not None:
-            body_world = torch.as_tensor(self.body_world, dtype=torch.long, device=shapes.device)
-            env_ids[valid] = body_world[body_ids[valid]]
-        else:
-            env_ids[valid] = body_ids[valid] // self.bodies_per_env
-        return env_ids
+            return gather_or_fill(body_world_torch, body_ids, -1)
+        return torch.where(body_ids >= 0, body_ids // self.bodies_per_env, torch.full_like(body_ids, -1))
 
     def _shape_to_env_id(self, shape_id: int) -> int:
         if shape_id < 0 or shape_id >= len(self.shape_body):
