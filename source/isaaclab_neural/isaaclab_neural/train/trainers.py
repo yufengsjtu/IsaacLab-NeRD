@@ -843,10 +843,26 @@ class VanillaTrainer:
         cli_eval_interval = cli_cfg.get("eval_interval")
         self.eval_interval = eval_cfg.get("interval", 0) if cli_eval_interval is None else cli_eval_interval
         self.evaluator = None
+        self.keyboard_policy_eval = None
         if getattr(self, "robot_force_head_enabled", False) and self.eval_interval > 0:
-            raise ValueError(
-                "Keyboard POC requires --eval-interval 0 and world-preserving keyboard checkpoint evaluation."
-            )
+            if eval_cfg.get("mode") != "keyboard_policy":
+                raise ValueError(
+                    "Keyboard training evaluates only closed-loop typing (algorithm.eval.mode: keyboard_policy); "
+                    "the generic rollout evaluator does not preserve Keyboard worlds, contacts or force heads."
+                )
+            checkpoint = Path(eval_cfg["policy_checkpoint"])
+            if not checkpoint.is_file():
+                raise FileNotFoundError(f"Keyboard evaluation policy checkpoint not found: {checkpoint}")
+            control_steps = int(eval_cfg.get("control_steps", 450))
+            if control_steps <= 0:
+                raise ValueError("algorithm.eval.control_steps must be positive.")
+            self.keyboard_policy_eval = {
+                "checkpoint": checkpoint,
+                "control_steps": control_steps,
+                "seed": int(eval_cfg.get("seed", 43)),
+            }
+            self._keyboard_policy = None
+            return
         if self.eval_interval <= 0:
             return
 
@@ -1800,8 +1816,62 @@ class VanillaTrainer:
             for key, value in valid_loss_itemized.items():
                 self.logger.add_scalar(f"validating_info/{key}_{valid_dataset_name}/epoch", value, epoch)
 
+    def _eval_keyboard_policy(self, epoch: int) -> None:
+        """Run the typing policy closed loop in the training environment with the current model weights.
+
+        The training environment's NeRD solver shares the trained module, so no checkpoint is loaded. Each
+        evaluation reseeds a forked RNG from ``seed + epoch``, leaving the training RNG streams unchanged. The
+        best clean success rate selects ``best_eval_model``.
+        """
+        from isaaclab_neural.eval.keyboard_policy import (
+            EPISODE_CATEGORIES,
+            load_keyboard_policy,
+            rollout_keyboard_policy,
+            summarize_keyboard_episodes,
+        )
+
+        settings = cast(dict[str, Any], self.keyboard_policy_eval)
+        env = self.neural_env.neural_adapter.isaaclab_env
+        if self._keyboard_policy is None:
+            self._keyboard_policy = load_keyboard_policy(
+                env, settings["checkpoint"], device=str(env.device), seed=settings["seed"]
+            )
+        wrapped, policy, runner = self._keyboard_policy
+        self.neural_model_unwrapped.eval()
+        devices = [torch.device(self.device)] if torch.device(self.device).type == "cuda" else []
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(settings["seed"] + epoch)
+            with torch.inference_mode():
+                rollout = rollout_keyboard_policy(env, wrapped, policy, runner, settings["control_steps"])
+        summary = summarize_keyboard_episodes(rollout["episodes"])
+        episodes = summary["episodes"]
+        success_rate = summary["success"] / episodes if episodes else 0.0
+        prefix = "eval_closed_loop"
+        self.logger.add_scalar(f"{prefix}/success_rate/epoch", success_rate, epoch)
+        self.logger.add_scalar(f"{prefix}/episodes/epoch", episodes, epoch)
+        self.logger.add_scalar(f"{prefix}/finite/epoch", float(rollout["finite"]), epoch)
+        self.logger.add_scalar(f"{prefix}/max_normal_force_N/epoch", rollout["max_observed_force_n_after_step"], epoch)
+        if episodes:
+            self.logger.add_scalar(f"{prefix}/mean_episode_length/epoch", summary["length_sum"] / episodes, epoch)
+            for category in EPISODE_CATEGORIES[1:]:
+                self.logger.add_scalar(f"{prefix}/{category}_rate/epoch", summary[category] / episodes, epoch)
+        print_info(
+            f"[Evaluate] closed-loop typing: success {summary['success']}/{episodes} = {success_rate:.4f}, "
+            f"{format_dict({key: summary[key] for key in EPISODE_CATEGORIES[1:]})}, finite = {rollout['finite']}"
+        )
+        eval_error = 1.0 - success_rate if rollout["finite"] and episodes else np.inf
+        if eval_error < self.best_eval_error:
+            self.best_eval_error = eval_error
+            self.save_model("best_eval_model")
+            with open(os.path.join(self.model_log_dir, "saved_best_eval_model_epochs.txt"), "a") as fp:
+                fp.write(f"{epoch}\n")
+            print_ok(f"Save Best Eval Model at Epoch {epoch} with closed-loop success rate {success_rate:.4f}.")
+
     @torch.no_grad()
     def eval(self, epoch: int) -> None:
+        if getattr(self, "keyboard_policy_eval", None) is not None:
+            self._eval_keyboard_policy(epoch)
+            return
         if self.evaluator is None:
             return
 

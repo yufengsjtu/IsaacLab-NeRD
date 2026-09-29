@@ -41,7 +41,7 @@ experiment:
   train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/SO101/transformer_keyboard_throughput.yaml
   train_seed: 42
   num_gpus: 8
-  train_num_envs: 8
+  train_num_envs: 64
   data_gen_num_envs: 1024
   trajectory_length: 64
   minimum_unique_transitions:
@@ -56,7 +56,7 @@ experiment:
   num_primary_bodies: 116
   contact_packing_policy: body_round_robin_pair_atomic
   update_dataset_statistics: true
-  eval_interval: 0
+  eval_interval: 5
   save_interval: 100
   headless: true
   no_time_stamp: true

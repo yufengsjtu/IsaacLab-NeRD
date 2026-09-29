@@ -7,7 +7,7 @@ env:
   env_name: SO101-Keyboard-Fixed
   robot_name: SO101-Keyboard-Fixed
   keyboard_variant: 0
-  num_envs: 8
+  num_envs: 64
   neural_solver_cfg:
     name: TransformerNeuralSolver
     states_frame: body
@@ -70,7 +70,12 @@ algorithm:
     num_data_workers: 0
     max_total_workers: 64
   eval:
-    interval: 0
+    # Closed-loop typing with the collection policy in the training environment (rank 0, current weights).
+    interval: 5
+    mode: keyboard_policy
+    policy_checkpoint: ./pretrained/control_policy/so101_keyboard/model_14999.pt
+    control_steps: 450
+    seed: 43
 inputs:
   low_dim: [states_embedding, joint_f, gravity_dir]
   contact_set:

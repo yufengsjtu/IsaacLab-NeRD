@@ -276,6 +276,34 @@ arm-velocity terminations, and short local runs (9k updates) ranked the two the 
 way. The best-validation checkpoint (Epoch 51, 87.4%) was worse than Epoch 99 because
 the force head overfit, so select checkpoints by closed-loop evaluation.
 
+### In-training closed-loop evaluation
+
+The throughput recipe sets `algorithm.eval.mode: keyboard_policy` with `interval: 5`.
+Every fifth epoch, rank 0 runs the typing policy (`policy_checkpoint`) for
+`control_steps` control steps in the training environment, whose NeRD solver shares
+the model being trained (no checkpoint export). The environment has 64 worlds, and
+each evaluation reseeds a forked RNG from `seed + epoch`. W&B receives
+`eval_closed_loop/success_rate` and the rates of `excessive_contact`, `abnormal_robot`,
+`timeout_no_key`, `timeout_wrong_key` and `timeout_incomplete`, the same exclusive
+categories `eval/keyboard_policy.py` reports, plus episode counts and lengths. The best
+success rate saves and uploads `best_eval_model.pt`. Loading K Epoch 99 into the
+trainer gave 95.3-95.8% over three evaluations (about 1,120 episodes each), consistent
+with offline evaluation. Keyboard training rejects every other evaluation mode because
+the generic rollout evaluator does not preserve Keyboard worlds, contacts or force
+heads. `--eval-interval` defaults to 5 and overrides the recipe.
+
+### Split throughput measurement
+
+`python -m isaaclab_neural.eval.keyboard_benchmark model --nerd-checkpoint CKPT` times
+one full-window model call on GPU-resident synthetic inputs over a batch sweep, with
+optional `--autocast fp16|bf16`. It excludes the simulator, collision detection, contact
+packing and input preparation. `... env --num-envs N [--nerd-checkpoint CKPT]` times
+policy-driven environment steps with MJWarp or NeRD. A synchronized phase splits
+physics from the rest of the step, and NeRD `step_profile` sections are recorded. Run
+both modes on an otherwise idle GPU. With K Epoch 99 at 4096 worlds, the model alone
+took about 110 ms per call (four calls per control step), capping NeRD below 10k
+control steps/s before any simulator cost.
+
 Training logs separate robot/key position and velocity errors in physical units.
 Checkpoint rollout reports include per-frame error curves, true/false pressed
 states, missed presses, and requested versus actually scored coverage. A student

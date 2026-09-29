@@ -57,7 +57,7 @@ experiment:
   num_primary_bodies: 116
   contact_packing_policy: body_round_robin_pair_atomic
   update_dataset_statistics: true
-  eval_interval: 0
+  eval_interval: 1
   save_interval: 1
   headless: true
   no_time_stamp: true

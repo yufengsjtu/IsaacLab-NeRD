@@ -18,7 +18,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from isaaclab_neural.data.keyboard import KEYBOARD_TASK
@@ -28,8 +28,138 @@ from isaaclab_neural.generate.keyboard_dataset import configure_fixed_keyboard
 if TYPE_CHECKING:
     from isaaclab.envs.manager_based_rl_env import ManagerBasedRLEnv
 
-    from isaaclab_tasks.contrib.keyboard.mdp.commands.typing_commands import LetterTypingCommand
     from isaaclab_tasks.contrib.keyboard.so101_env_cfg import SO101KeyboardEnvCfg
+
+
+EPISODE_CATEGORIES = (
+    "success",
+    "excessive_contact",
+    "abnormal_robot",
+    "timeout_no_key",
+    "timeout_wrong_key",
+    "timeout_incomplete",
+)
+"""Mutually exclusive outcomes of one typing episode, in classification priority order."""
+
+
+def classify_keyboard_episode(episode: dict[str, Any]) -> str:
+    """Return the outcome category of one recorded episode (see :data:`EPISODE_CATEGORIES`).
+
+    A clean success has no excessive-contact or abnormal-robot termination. Timeouts are split into episodes that
+    registered no key, left a wrong key in the buffer, or kept a correct but incomplete prefix.
+    """
+    if episode["excessive_contact"]:
+        return "excessive_contact"
+    if episode["abnormal_robot"]:
+        return "abnormal_robot"
+    if episode["success"]:
+        return "success"
+    typed = [slot for slot in episode["typed"] if slot >= 0]
+    target = [slot for slot in episode["target"] if slot >= 0]
+    prefix = 0
+    for typed_slot, target_slot in zip(typed, target):
+        if typed_slot != target_slot:
+            break
+        prefix += 1
+    if episode["final_distance"] == episode["start_distance"] and len(typed) == episode["initial_typed_len"]:
+        return "timeout_no_key"
+    return "timeout_wrong_key" if prefix < len(typed) else "timeout_incomplete"
+
+
+def summarize_keyboard_episodes(episodes: list[dict[str, Any]]) -> dict[str, int]:
+    """Count episodes, total control steps and each outcome category."""
+    counts = dict.fromkeys(EPISODE_CATEGORIES, 0)
+    for episode in episodes:
+        counts[classify_keyboard_episode(episode)] += 1
+    return {"episodes": len(episodes), "length_sum": sum(ep["length"] for ep in episodes), **counts}
+
+
+def load_keyboard_policy(env: Any, checkpoint: Path, *, device: str, seed: int):
+    """Wrap ``env`` and load the RSL-RL typing policy, preferring the agent config saved beside the checkpoint."""
+    from isaaclab_tasks.utils.hydra import resolve_presets
+    from isaaclab_tasks.utils.parse_cfg import resolve_task_config
+
+    # Explicit empty overrides keep the caller's command line (e.g. training arguments) out of Hydra.
+    _, agent = resolve_task_config(KEYBOARD_TASK, "rsl_rl_cfg_entry_point", overrides=[])
+    agent = resolve_presets(agent, {"newton_mjwarp"})
+    runner_cfg = load_saved_agent_cfg_for_policy(str(checkpoint), agent, device=device, seed=seed)
+    return build_policy_env(env, runner_cfg, str(checkpoint), device)
+
+
+def rollout_keyboard_policy(
+    env: Any, wrapped: Any, policy: Any, runner: Any, control_steps: int, *, on_step: Any = None
+) -> dict[str, Any]:
+    """Reset ``env`` and run the typing policy closed loop, recording every episode that ends.
+
+    Call under :func:`torch.inference_mode`. Episodes still running after ``control_steps`` are not recorded.
+    ``on_step(env, command, episodes)`` runs after each control step.
+
+    Returns:
+        Recorded episodes, whether all states, forces and rewards stayed finite, completed control steps, the
+        reward sum and the largest robot normal-force norm [N] observed after a step.
+    """
+    episodes: list[dict[str, Any]] = []
+    env.reset()
+    obs = wrapped.get_observations()
+    original_reset = env._reset_idx
+    command = env.command_manager.get_term("typing")
+    initial_typed_len = command.typed_len.clone()
+
+    def capture_reset(env_ids):
+        success = env.termination_manager.get_term("success")[env_ids].clone()
+        excessive = env.termination_manager.get_term("excessive_contact")[env_ids].clone()
+        abnormal = env.termination_manager.get_term("abnormal_robot")[env_ids].clone()
+        for row, world in enumerate(env_ids.tolist()):
+            episodes.append(
+                {
+                    "world": world,
+                    "success": bool(success[row]),
+                    "excessive_contact": bool(excessive[row]),
+                    "abnormal_robot": bool(abnormal[row]),
+                    "length": int(env.episode_length_buf[world]),
+                    "start_distance": int(command._start_distance[world]),
+                    "initial_typed_len": int(initial_typed_len[world]),
+                    "final_distance": int(command.distance[world]),
+                    "target": command.target[world].cpu().tolist(),
+                    "typed": command.typed[world].cpu().tolist(),
+                }
+            )
+        original_reset(env_ids)
+        initial_typed_len[env_ids] = command.typed_len[env_ids]
+
+    finite, completed, reward_sum, max_force_n = True, 0, 0.0, 0.0
+    env._reset_idx = capture_reset
+    try:
+        for _ in range(control_steps):
+            actions = policy(obs)
+            if not bool(torch.isfinite(actions).all()):
+                finite = False
+                break
+            obs, reward, done, _ = wrapped.step(actions)
+            if on_step is not None:
+                on_step(env, command, episodes)
+            reset_policy(policy, runner, done)
+            reward_sum += float(reward.sum())
+            completed += 1
+            forces = env.scene.sensors["robot_contact"].data.net_normal_forces_w_history.torch
+            finite = bool(
+                torch.isfinite(env.scene["robot"].data.joint_pos.torch).all()
+                and torch.isfinite(env.scene["robot"].data.joint_vel.torch).all()
+                and torch.isfinite(forces).all()
+                and torch.isfinite(reward).all()
+            )
+            max_force_n = max(max_force_n, float(forces.norm(dim=-1).max()))
+            if not finite:
+                break
+    finally:
+        env._reset_idx = original_reset
+    return {
+        "episodes": episodes,
+        "finite": finite,
+        "completed_control_steps": completed,
+        "reward_sum": reward_sum,
+        "max_observed_force_n_after_step": max_force_n,
+    }
 
 
 def main() -> None:
@@ -70,9 +200,8 @@ def main() -> None:
     if args.video_dir is not None and args.video_dir.exists():
         raise FileExistsError(args.video_dir)
     sys.argv = [sys.argv[0]]
-    cfg, agent = resolve_task_config(KEYBOARD_TASK, "rsl_rl_cfg_entry_point")
+    cfg, _ = resolve_task_config(KEYBOARD_TASK, "rsl_rl_cfg_entry_point")
     cfg = cast("SO101KeyboardEnvCfg", resolve_presets(cfg, {"newton_mjwarp"}))
-    agent = resolve_presets(agent, {"newton_mjwarp"})
     cfg = configure_fixed_keyboard(cfg, variant=0)
     if args.reset_mode == "uniform":
         cfg.commands.typing.reset.enabled = False
@@ -143,13 +272,22 @@ def main() -> None:
                 "sha256": hashlib.file_digest(stream, "sha256").hexdigest(),
                 "epoch": nerd.get("epoch"),
             }
-    runner_cfg = load_saved_agent_cfg_for_policy(str(args.checkpoint), agent, device=cfg.sim.device, seed=args.seed)
-    episodes = []
     overlay = []
-    max_force_n = 0.0
-    reward_sum = 0.0
-    completed_steps = 0
-    finite = True
+
+    def record_overlay(env, command, episodes):
+        # Headless on-demand capture does not dispatch marker callbacks; refresh the next-key
+        # marker here so the next captured frame shows it (lagging the scene by one step).
+        env.sim.vis_marker_registry.dispatch_callbacks()
+        overlay.append(
+            {
+                "target": command.target[0].tolist(),
+                "typed": command.typed[0].tolist(),
+                "prefix_len": int(command.prefix_len[0]),
+                "episodes": sum(ep["world"] == 0 for ep in episodes),
+                "successes": sum(ep["world"] == 0 and ep["success"] for ep in episodes),
+            }
+        )
+
     with launch_simulation(launch_cfg, args):
         if nerd_provenance is None:
             env = cast("ManagerBasedRLEnv", gym.make(KEYBOARD_TASK, cfg=cfg).unwrapped)
@@ -157,77 +295,21 @@ def main() -> None:
             from isaaclab_neural.envs.keyboard_nerd_env import NerdSO101KeyboardEnv
 
             env = cast("ManagerBasedRLEnv", NerdSO101KeyboardEnv(cfg=cfg))
-        wrapped, policy, runner = build_policy_env(env, runner_cfg, str(args.checkpoint), cfg.sim.device)
-        with torch.inference_mode():
-            env.reset()
-            obs = wrapped.get_observations()
-            original_reset = env._reset_idx
-            command = cast("LetterTypingCommand", env.command_manager.get_term("typing"))
-            initial_typed_len = command.typed_len.clone()
-
-            def capture_reset(env_ids):
-                command = cast("LetterTypingCommand", env.command_manager.get_term("typing"))
-                success = env.termination_manager.get_term("success")[env_ids].clone()
-                excessive = env.termination_manager.get_term("excessive_contact")[env_ids].clone()
-                abnormal = env.termination_manager.get_term("abnormal_robot")[env_ids].clone()
-                for row, world in enumerate(env_ids.tolist()):
-                    episodes.append(
-                        {
-                            "world": world,
-                            "success": bool(success[row]),
-                            "excessive_contact": bool(excessive[row]),
-                            "abnormal_robot": bool(abnormal[row]),
-                            "length": int(env.episode_length_buf[world]),
-                            "start_distance": int(command._start_distance[world]),
-                            "initial_typed_len": int(initial_typed_len[world]),
-                            "final_distance": int(command.distance[world]),
-                            "target": command.target[world].cpu().tolist(),
-                            "typed": command.typed[world].cpu().tolist(),
-                        }
-                    )
-                original_reset(env_ids)
-                initial_typed_len[env_ids] = command.typed_len[env_ids]
-
-            env._reset_idx = capture_reset
-            try:
-                for _ in range(args.control_steps):
-                    actions = policy(obs)
-                    if not bool(torch.isfinite(actions).all()):
-                        finite = False
-                        break
-                    obs, reward, done, _ = wrapped.step(actions)
-                    if args.video_dir is not None:
-                        # Headless on-demand capture does not dispatch marker callbacks; refresh the next-key
-                        # marker here so the next captured frame shows it (lagging the scene by one step).
-                        env.sim.vis_marker_registry.dispatch_callbacks()
-                        overlay.append(
-                            {
-                                "target": command.target[0].tolist(),
-                                "typed": command.typed[0].tolist(),
-                                "prefix_len": int(command.prefix_len[0]),
-                                "episodes": sum(ep["world"] == 0 for ep in episodes),
-                                "successes": sum(ep["world"] == 0 and ep["success"] for ep in episodes),
-                            }
-                        )
-                    reset_policy(policy, runner, done)
-                    reward_sum += float(reward.sum())
-                    completed_steps += 1
-                    q = env.scene["robot"].data.joint_pos.torch
-                    qd = env.scene["robot"].data.joint_vel.torch
-                    forces = env.scene.sensors["robot_contact"].data.net_normal_forces_w_history.torch
-                    finite = bool(
-                        torch.isfinite(q).all()
-                        and torch.isfinite(qd).all()
-                        and torch.isfinite(forces).all()
-                        and torch.isfinite(reward).all()
-                    )
-                    max_force_n = max(max_force_n, float(forces.norm(dim=-1).max()))
-                    if not finite:
-                        break
-            finally:
-                env._reset_idx = original_reset
-                env.close()
-    successes = sum(ep["success"] and not ep["excessive_contact"] and not ep["abnormal_robot"] for ep in episodes)
+        try:
+            wrapped, policy, runner = load_keyboard_policy(env, args.checkpoint, device=cfg.sim.device, seed=args.seed)
+            with torch.inference_mode():
+                rollout = rollout_keyboard_policy(
+                    env,
+                    wrapped,
+                    policy,
+                    runner,
+                    args.control_steps,
+                    on_step=record_overlay if args.video_dir is not None else None,
+                )
+        finally:
+            env.close()
+    episodes, finite = rollout["episodes"], rollout["finite"]
+    successes = summarize_keyboard_episodes(episodes)["success"]
     result = {
         "checkpoint": str(args.checkpoint.resolve()),
         "dynamics": "native_mjwarp" if nerd_provenance is None else "nerd",
@@ -239,15 +321,15 @@ def main() -> None:
         "requested_control_steps": args.control_steps,
         "reset_ik_iters": cfg.commands.typing.reset.ik_iters,
         "finite": finite,
-        "completed_control_steps": completed_steps,
+        "completed_control_steps": rollout["completed_control_steps"],
         "completed_episodes": len(episodes),
         "clean_successes": successes,
         "clean_success_rate": successes / len(episodes) if episodes else None,
         "episodes_with_empty_initial_buffer": sum(ep["initial_typed_len"] == 0 for ep in episodes),
         "excessive_contact_episodes": sum(ep["excessive_contact"] for ep in episodes),
         "abnormal_robot_episodes": sum(ep["abnormal_robot"] for ep in episodes),
-        "reward_sum": reward_sum,
-        "max_observed_force_n_after_step": max_force_n,
+        "reward_sum": rollout["reward_sum"],
+        "max_observed_force_n_after_step": rollout["max_observed_force_n_after_step"],
         "video_dir": str(args.video_dir) if args.video_dir else None,
         "policy_accepted": False,
         "requires_video_and_multiseed_review": True,

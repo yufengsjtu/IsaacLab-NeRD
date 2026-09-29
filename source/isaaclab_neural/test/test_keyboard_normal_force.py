@@ -246,6 +246,65 @@ def test_pooled_key_velocity_weights_match_concatenated_samples_and_key_layout_i
         validate_keyboard_key_head_layout(model.key_head, metadata)
 
 
+def test_keyboard_episode_outcomes_are_exclusive_and_ordered():
+    from isaaclab_neural.eval.keyboard_policy import summarize_keyboard_episodes
+
+    def episode(**overrides):
+        base = {
+            "success": False,
+            "excessive_contact": False,
+            "abnormal_robot": False,
+            "length": 10,
+            "start_distance": 3,
+            "final_distance": 3,
+            "initial_typed_len": 0,
+            "target": [4, 5, 6, -1],
+            "typed": [-1, -1, -1, -1],
+        }
+        return {**base, **overrides}
+
+    episodes = [
+        episode(success=True, final_distance=0, typed=[4, 5, 6, -1]),
+        episode(success=True, excessive_contact=True),  # a contact termination is never a clean success
+        episode(abnormal_robot=True),
+        episode(),  # nothing registered
+        episode(final_distance=4, typed=[4, 9, -1, -1]),  # wrong key in the buffer
+        episode(final_distance=1, typed=[4, 5, -1, -1]),  # correct but incomplete prefix
+    ]
+    assert summarize_keyboard_episodes(episodes) == {
+        "episodes": 6,
+        "length_sum": 60,
+        "success": 1,
+        "excessive_contact": 1,
+        "abnormal_robot": 1,
+        "timeout_no_key": 1,
+        "timeout_wrong_key": 1,
+        "timeout_incomplete": 1,
+    }
+
+
+def test_keyboard_training_eval_requires_closed_loop_policy_mode(tmp_path):
+    from isaaclab_neural.train.trainers import VanillaTrainer
+
+    trainer = object.__new__(VanillaTrainer)
+    trainer.robot_force_head_enabled = True
+    with pytest.raises(ValueError, match="keyboard_policy"):
+        trainer._init_evaluator({"eval": {"interval": 5, "mode": "dataset"}}, {})
+    with pytest.raises(FileNotFoundError):
+        trainer._init_evaluator(
+            {"eval": {"interval": 5, "mode": "keyboard_policy", "policy_checkpoint": "missing.pt"}}, {}
+        )
+    policy = tmp_path / "policy.pt"
+    policy.touch()
+    trainer._init_evaluator(
+        {"eval": {"mode": "keyboard_policy", "policy_checkpoint": str(policy)}}, {"eval_interval": 5}
+    )
+    assert trainer.eval_interval == 5 and trainer.evaluator is None
+    assert trainer.keyboard_policy_eval == {"checkpoint": policy, "control_steps": 450, "seed": 43}
+    trainer._init_evaluator({"eval": {"interval": 5, "mode": "keyboard_policy"}}, {"eval_interval": 0})
+    assert trainer.keyboard_policy_eval is None
+
+
 def test_robot_force_cache_reset_is_selective_and_cached_inference_is_rejected():
     from isaaclab_neural.solvers.neural_solver import NeuralSolver
 

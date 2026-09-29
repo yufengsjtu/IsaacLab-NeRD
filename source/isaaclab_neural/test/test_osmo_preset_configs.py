@@ -181,7 +181,7 @@ def test_keyboard_training_command_uses_explicit_process_count(tmp_path, monkeyp
     run_experiment.run_training(exp, tmp_path, Namespace(enable_wandb=False))
     command = calls[0]
     assert command[command.index("--nproc_per_node") + 1] == "4"
-    assert command[command.index("--eval-interval") + 1] == "0"
+    assert command[command.index("--eval-interval") + 1] == "1"
     assert "--no-time-stamp" in command and "--skip-check-log-override" not in command
 
 
@@ -289,7 +289,10 @@ def test_keyboard_recipe_is_fixed_owner_frame_and_matches_franka_training_scale(
     for key in ("encoder_type", "body_latent_dim", "hidden_dim"):
         assert cfg["inputs"]["contact_set"][key] == franka["inputs"]["contact_set"][key]
     assert solver["num_states_history"] == cfg["algorithm"]["sample_sequence_length"] == 10
-    assert cfg["env"]["num_envs"] == exp["train_num_envs"] == 8
+    assert cfg["env"]["num_envs"] == exp["train_num_envs"] == 64
+    assert exp["eval_interval"] == cfg["algorithm"]["eval"]["interval"] == 5
+    assert cfg["algorithm"]["eval"]["mode"] == "keyboard_policy"
+    assert (REPOSITORY_ROOT / cfg["algorithm"]["eval"]["policy_checkpoint"]).is_file()
     dataset = cfg["algorithm"]["dataset"]
     assert (dataset["load_mode"], dataset["num_data_workers"]) == ("eager", 0)
     # The K recipe: the only configuration that matched native closed-loop typing.
