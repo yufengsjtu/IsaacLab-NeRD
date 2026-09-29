@@ -262,6 +262,51 @@ uv run python -m isaaclab_neural.train.train \
   --cfg-overrides 'algorithm.num_epochs 100 algorithm.loss.keyboard_key_position_scale_m 0.0001 algorithm.loss.keyboard_robot_position_scale_rad 0.001'
 ```
 
+### State-group loss balance
+
+The variance-weighted state loss averages all 228 SO101 coordinates, so the 216
+key coordinates dominate the six-joint arm. The optional
+`algorithm.loss.keyboard_state_group_weights: {robot: w_r, key: w_k}` replaces the
+plain mean with `w_r * mean(robot q/qd) + w_k * mean(key q/qd)`, independent of
+group sizes. It defaults to `null` (unchanged objective), requires the MSE loss,
+keeps per-coordinate variance weights and force losses, and is read from the
+configuration on every start, including resumes. `{robot: 1.0, key: 0.0}` is a
+diagnostic that leaves key predictions unsupervised.
+
+Training also logs `<group>_weighted_state_MSE` for `robot_q`, `robot_qd`, `key_q`
+and `key_qd`. With variance weights, values near one mean the group is predicted
+no better than its mean change; key positions below the `1e-5` variance floor are
+down-weighted and read low regardless of accuracy.
+
+### Factorized key head
+
+`network.key_head` (default absent/disabled) splits the SO101 state model. The
+Transformer trunk sees robot coordinates, robot `joint_f`, gravity, non-key contact
+latents and an order-independent sum over per-key features. One key decoder with
+shared parameters predicts each key's position and velocity change from the trunk
+context, that key's last `history_steps` states and contact latent, and a learned
+key embedding. Key inputs and outputs use statistics pooled over all keys. Outputs
+are scattered back into the original prediction order, so the solver interface is
+unchanged. It requires the `shared_per_body` contact encoder, identity low-dim
+inputs `[states_embedding, joint_f, gravity_dir]`, output normalization and full
+history windows (feature/KV caches are rejected). `key_q_start`, `num_keys` and
+`key_body_slot_start` are checked against the recorded joint and body names.
+
+Two optional losses accompany it: `keyboard_key_velocity_weighting: pooled` gives
+all key velocity changes one variance weight, and `keyboard_key_event_weighting:
+{weight, position_threshold_m, velocity_threshold_m_s}` multiplies coordinates of
+keys whose recorded state changes (it did not help in 2026-09 ablations).
+
+`SO101/transformer_keyboard_formal_key_head.yaml` (OSMO preset
+`so101_keyboard_formal_key_head`) combines the key head, pooled key-velocity weights,
+0.2 mm key-position scale and 0.5/0.5 robot/key groups on the full 10M/3M fixed-v2 data.
+On 8x L40 (2026-09-29), `model_epoch99.pt` reached 94.7% closed-loop typing success
+under `eval/keyboard_policy.py --nerd-checkpoint` (3 seeds x 64 worlds), matching native
+MJWarp's 94.7%; the same recipe without the key head fell to 4.2% through arm-velocity
+terminations. Short local runs (9k updates) ranked these the other way, and the
+best-validation checkpoint (Epoch 51, 87.4%) was worse than Epoch 99 because the force
+head overfit, so select checkpoints by closed-loop evaluation.
+
 Training logs separate robot/key position and velocity errors in physical units.
 Checkpoint rollout reports include per-frame error curves, true/false pressed
 states, missed presses, and requested versus actually scored coverage. A student
