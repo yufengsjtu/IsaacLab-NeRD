@@ -3,11 +3,18 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Evaluate a native SO101 typing policy on the fixed keyboard and optionally record headless Newton GL video."""
+"""Evaluate an SO101 typing policy on the fixed keyboard and optionally record headless Newton GL video.
+
+By default the native Newton MJWarp teacher simulates the scene. ``--nerd-checkpoint``
+replaces it with the learned NeRD dynamics while keeping the task, policy, resets and
+termination thresholds unchanged, so success rates are directly comparable.
+"""
 
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -36,6 +43,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--nerd-checkpoint", type=Path, help="Simulate with this NeRD checkpoint instead of MJWarp.")
+    parser.add_argument("--robot-usd", type=Path, help="Local copy of the SO101 USD, for offline asset caches.")
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--reset-mode", choices=("training", "uniform"), default="uniform")
     parser.add_argument("--reset_ik_iters", type=int, help="Override reset IK iterations for a diagnostic comparison.")
@@ -44,6 +53,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=100)
     parser.add_argument("--video-dir", type=Path)
     parser.add_argument("--video-length", type=int, default=400)
+    parser.add_argument(
+        "--camera-eye", type=float, nargs=3, help="Video camera position [m]; defaults to the task view."
+    )
+    parser.add_argument(
+        "--camera-lookat", type=float, nargs=3, help="Video camera target [m]; defaults to the task view."
+    )
     add_launcher_args(parser)
     args = parser.parse_args()
     if args.num_envs <= 0 or args.control_steps <= 0 or args.video_length <= 0:
@@ -66,17 +81,26 @@ def main() -> None:
     cfg.scene.num_envs = args.num_envs
     cfg.sim.device = args.device or "cuda:0"
     cfg.seed = args.seed
+    if args.robot_usd is not None:
+        if not args.robot_usd.is_file():
+            raise FileNotFoundError(args.robot_usd)
+        cfg.scene.robot.spawn.usd_path = str(args.robot_usd.resolve())
     if args.video_dir is not None:
         from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
 
         camera = cfg.sim.default_visualizer_cfg
         if camera is None:
             raise ValueError("Video recording requires a default visualizer configuration.")
+        # Show the next-key marker for the recorded world. The in-scene letter banner is readable only from
+        # +X, so it is lifted out of view; per-frame typing state is written for a 2D overlay instead.
+        cfg.commands.typing.debug_vis = True
+        cfg.commands.typing.viz_env_ids = (0,)
+        cfg.commands.typing.viz_banner_height = 20.0
         cfg.sim.visualizer_cfgs = [
             NewtonGLVisualizerCfg(
                 headless=True,
-                eye=camera.eye,
-                lookat=camera.lookat,
+                eye=tuple(args.camera_eye) if args.camera_eye else camera.eye,
+                lookat=tuple(args.camera_lookat) if args.camera_lookat else camera.lookat,
                 window_width=1280,
                 window_height=720,
             )
@@ -93,14 +117,46 @@ def main() -> None:
         args.visualizer = ["newton_gl"]
         args.visualizer_explicit = True
         args.max_visible_envs = 1
+    launch_cfg = cfg
+    nerd_provenance = None
+    if args.nerd_checkpoint is not None:
+        from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
+        from isaaclab_neural.utils.checkpoint import load_checkpoint
+
+        nerd = load_checkpoint(args.nerd_checkpoint, device="cpu")
+        launch_cfg = copy.deepcopy(cfg)
+        launch_cfg.sim.physics.use_cuda_graph = False
+        solver_cfg = NerdSolverCfg(**nerd["cfg"]["env"]["neural_solver_cfg"])
+        solver_cfg.neural_model_path = str(args.nerd_checkpoint.resolve())
+        teacher = cfg.sim.physics
+        cfg.sim.physics = NerdNewtonCfg(
+            solver_cfg=solver_cfg,
+            collision_cfg=teacher.collision_cfg,
+            default_shape_cfg=teacher.default_shape_cfg,
+            num_substeps=1,
+            use_cuda_graph=False,
+        )
+        cfg.robot_normal_force_sensor = "robot_contact"
+        with args.nerd_checkpoint.open("rb") as stream:
+            nerd_provenance = {
+                "checkpoint": str(args.nerd_checkpoint.resolve()),
+                "sha256": hashlib.file_digest(stream, "sha256").hexdigest(),
+                "epoch": nerd.get("epoch"),
+            }
     runner_cfg = load_saved_agent_cfg_for_policy(str(args.checkpoint), agent, device=cfg.sim.device, seed=args.seed)
     episodes = []
+    overlay = []
     max_force_n = 0.0
     reward_sum = 0.0
     completed_steps = 0
     finite = True
-    with launch_simulation(cfg, args):
-        env = cast("ManagerBasedRLEnv", gym.make(KEYBOARD_TASK, cfg=cfg).unwrapped)
+    with launch_simulation(launch_cfg, args):
+        if nerd_provenance is None:
+            env = cast("ManagerBasedRLEnv", gym.make(KEYBOARD_TASK, cfg=cfg).unwrapped)
+        else:
+            from isaaclab_neural.envs.keyboard_nerd_env import NerdSO101KeyboardEnv
+
+            env = cast("ManagerBasedRLEnv", NerdSO101KeyboardEnv(cfg=cfg))
         wrapped, policy, runner = build_policy_env(env, runner_cfg, str(args.checkpoint), cfg.sim.device)
         with torch.inference_mode():
             env.reset()
@@ -140,6 +196,19 @@ def main() -> None:
                         finite = False
                         break
                     obs, reward, done, _ = wrapped.step(actions)
+                    if args.video_dir is not None:
+                        # Headless on-demand capture does not dispatch marker callbacks; refresh the next-key
+                        # marker here so the next captured frame shows it (lagging the scene by one step).
+                        env.sim.vis_marker_registry.dispatch_callbacks()
+                        overlay.append(
+                            {
+                                "target": command.target[0].tolist(),
+                                "typed": command.typed[0].tolist(),
+                                "prefix_len": int(command.prefix_len[0]),
+                                "episodes": sum(ep["world"] == 0 for ep in episodes),
+                                "successes": sum(ep["world"] == 0 and ep["success"] for ep in episodes),
+                            }
+                        )
                     reset_policy(policy, runner, done)
                     reward_sum += float(reward.sum())
                     completed_steps += 1
@@ -161,6 +230,8 @@ def main() -> None:
     successes = sum(ep["success"] and not ep["excessive_contact"] and not ep["abnormal_robot"] for ep in episodes)
     result = {
         "checkpoint": str(args.checkpoint.resolve()),
+        "dynamics": "native_mjwarp" if nerd_provenance is None else "nerd",
+        "nerd": nerd_provenance,
         "scene": "fixed",
         "reset_mode": args.reset_mode,
         "seed": args.seed,
@@ -184,6 +255,10 @@ def main() -> None:
     }
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+    if args.video_dir is not None:
+        args.video_dir.mkdir(parents=True, exist_ok=True)
+        overlay_record = {"slot_labels": list(cfg.commands.typing.slot_labels), "fps": 25, "frames": overlay}
+        (args.video_dir / "typing_overlay.json").write_text(json.dumps(overlay_record) + "\n")
     if not finite:
         raise RuntimeError("Policy evaluation produced non-finite values.")
 
