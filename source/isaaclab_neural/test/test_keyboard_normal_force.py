@@ -195,6 +195,15 @@ def test_key_head_assembles_robot_and_pooled_key_outputs_in_original_order():
         torch.testing.assert_close(state[..., keys], mean[keys].mean().expand_as(state[..., keys]))
 
 
+def test_key_head_assembles_fp32_state_under_reduced_precision_autocast():
+    model, inputs, _, _ = make_key_head_model()
+    reference = model({k: v.clone() for k, v in inputs.items()})
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        reduced = model({k: v.clone() for k, v in inputs.items()})
+    assert reduced.dtype == torch.float32
+    torch.testing.assert_close(reduced, reference, rtol=0.1, atol=0.1)
+
+
 def test_key_head_checkpoint_roundtrip_and_cached_inference_rejection(tmp_path):
     model, inputs, input_cfg, network = make_key_head_model()
     path = tmp_path / "model.pt"

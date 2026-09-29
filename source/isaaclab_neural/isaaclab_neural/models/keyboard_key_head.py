@@ -172,8 +172,10 @@ class KeyboardKeyHead(nn.Module):
         self, robot_normalized: torch.Tensor, key_normalized: torch.Tensor, output_rms: RunningMeanStd
     ) -> torch.Tensor:
         """Un-normalize robot outputs per coordinate and key outputs with pooled statistics, in original order."""
-        output = robot_normalized.new_zeros((*robot_normalized.shape[:-1], 2 * self.num_q))
         mean, var = output_rms.mean, output_rms.var
+        # Un-normalize in the statistics dtype (FP32) even when the decoders ran under reduced-precision autocast.
+        robot_normalized, key_normalized = robot_normalized.to(mean.dtype), key_normalized.to(mean.dtype)
+        output = robot_normalized.new_zeros((*robot_normalized.shape[:-1], 2 * self.num_q))
         robot = robot_normalized * torch.sqrt(var.index_select(0, self.robot_state) + _EPSILON)
         output[..., self.robot_state] = robot + mean.index_select(0, self.robot_state)
         for channel, index in enumerate((self.key_q, self.key_qd)):
