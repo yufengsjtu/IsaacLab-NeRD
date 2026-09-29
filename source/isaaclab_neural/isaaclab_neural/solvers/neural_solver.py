@@ -11,7 +11,8 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import warnings
-from contextlib import nullcontext
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
@@ -27,6 +28,21 @@ from isaaclab_neural.solvers.kernels import determine_angular_dofs
 from isaaclab_neural.solvers.world_layout import resolve_neural_solver_layout
 from isaaclab_neural.utils import newton_utils, torch_utils, warp_utils
 from isaaclab_neural.utils.newton_utils import base_joint_type
+
+INFERENCE_PRECISIONS = ("fp32", "tf32", "fp16", "bf16")
+"""Supported ``inference_precision`` values of online NeRD model inference."""
+
+
+@contextmanager
+def _tf32_matmul() -> Iterator[None]:
+    """Temporarily allow TF32 CUDA matmuls and convolutions, restoring the previous flags."""
+    previous = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = True
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = previous
+
 
 if TYPE_CHECKING:
     from isaaclab_neural.models.models import ModelMixedInputOutput
@@ -61,6 +77,7 @@ class NeuralSolver(SolverBase):
         max_contact_tokens: int = 0,
         contact_filter: str = "none",
         contact_token_frame: str = "root",
+        inference_precision: str = "fp32",
     ):
         """
         Args:
@@ -88,6 +105,8 @@ class NeuralSolver(SolverBase):
             contact_filter: Native-pair selection applied before packing.
             contact_token_frame: Frame for packed token geometry; ``"root"`` or
                 ``"owner"``. Defaults to ``"root"``.
+            inference_precision: Matmul precision of online model inference on CUDA; one of
+                ``"fp32"``, ``"tf32"``, ``"fp16"`` or ``"bf16"`` (autocast). Defaults to ``"fp32"``.
         """
         self.solver_name = name
         if model is None:
@@ -138,6 +157,9 @@ class NeuralSolver(SolverBase):
         if contact_token_frame not in {"root", "owner"}:
             raise ValueError(f"Unsupported contact_token_frame: {contact_token_frame!r}.")
         self.contact_token_frame = contact_token_frame
+        if inference_precision not in INFERENCE_PRECISIONS:
+            raise ValueError(f"inference_precision must be one of {INFERENCE_PRECISIONS}, got {inference_precision!r}.")
+        self.inference_precision = inference_precision
         self.contact_adapter = contact_adapter
         self.primary_body_q = getattr(contact_adapter, "primary_body_q", None)
         adapter_contact_filter = getattr(contact_adapter, "contact_filter", "none")
@@ -483,6 +505,15 @@ class NeuralSolver(SolverBase):
                 raise ValueError("Robot normal-force prediction must be finite [B, 7, 3].")
             robot_forces.copy_(prediction)
 
+    def _inference_precision_context(self):
+        """Return the reduced-precision context for online model inference (no-op for FP32 or CPU)."""
+        precision = getattr(self, "inference_precision", "fp32")
+        if precision == "fp32" or not str(self.torch_device).startswith("cuda"):
+            return nullcontext()
+        if precision == "tf32":
+            return _tf32_matmul()
+        return torch.autocast("cuda", dtype=torch.float16 if precision == "fp16" else torch.bfloat16)
+
     def _model_forward(self, model_inputs):
         """Run the neural-model inference path for the current solver."""
         return self._forward_neural_model(model_inputs)
@@ -518,8 +549,8 @@ class NeuralSolver(SolverBase):
                 self._before_model_forward()
                 model_inputs = self.get_neural_model_inputs()
             # compute the prediction using neural model, shape (num_envs, 1, dim)
-            with step_profile.section("model_forward"):
-                prediction = self._model_forward(model_inputs)
+            with step_profile.section("model_forward"), self._inference_precision_context():
+                prediction = self._model_forward(model_inputs).float()
 
             with step_profile.section("prediction_postprocess"):
                 cur_states = model_inputs["states"][:, -1, :]

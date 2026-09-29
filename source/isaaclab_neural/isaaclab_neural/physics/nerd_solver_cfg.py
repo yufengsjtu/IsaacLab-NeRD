@@ -107,6 +107,13 @@ class NerdSolverCfg(NewtonSolverCfg):
     coordinate anchoring (``anchor_frame_step="every"`` or world-frame states) and excludes the feature/KV caches.
     """
 
+    inference_precision: str = "fp32"
+    """Matmul precision of online model inference on CUDA: ``"fp32"``, ``"tf32"``, ``"fp16"`` or ``"bf16"``.
+
+    Reduced precisions change predictions beyond FP32 roundoff; validate closed-loop behavior before use.
+    Training is unaffected.
+    """
+
     reset_seq_length: int = 1
     """Step interval used by ``RNNNeuralSolver`` to reset recurrent hidden state."""
 

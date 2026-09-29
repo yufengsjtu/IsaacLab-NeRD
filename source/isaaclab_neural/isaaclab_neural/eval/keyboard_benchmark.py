@@ -151,6 +151,8 @@ def benchmark_env(args: argparse.Namespace, launcher_args: argparse.Namespace) -
         solver_cfg = NerdSolverCfg(**nerd["cfg"]["env"]["neural_solver_cfg"])
         if args.frame_cache is not None:
             solver_cfg.use_frame_cache = args.frame_cache
+        if args.inference_precision is not None:
+            solver_cfg.inference_precision = args.inference_precision
         solver_cfg.neural_model_path = str(args.nerd_checkpoint.resolve())
         teacher = cfg.sim.physics
         cfg.sim.physics = NerdNewtonCfg(
@@ -170,6 +172,7 @@ def benchmark_env(args: argparse.Namespace, launcher_args: argparse.Namespace) -
         "decimation": cfg.decimation,
         "num_substeps": cfg.sim.physics.num_substeps,
         "use_frame_cache": getattr(getattr(cfg.sim.physics, "solver_cfg", None), "use_frame_cache", None),
+        "inference_precision": getattr(getattr(cfg.sim.physics, "solver_cfg", None), "inference_precision", None),
         "gpu": torch.cuda.get_device_name(0),
     }
     try:
@@ -295,6 +298,11 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Override the checkpoint's NeRD use_frame_cache.",
+    )
+    env.add_argument(
+        "--inference-precision",
+        choices=("fp32", "tf32", "fp16", "bf16"),
+        help="Override the checkpoint's NeRD online inference precision.",
     )
     env.add_argument("--num-envs", type=int, required=True)
     env.add_argument("--seed", type=int, default=43)

@@ -16,3 +16,7 @@ Changed
 * Changed single-step ``ModelMixedInput`` inference to evaluate the final Transformer block, state
   decoder, keyboard key head and auxiliary heads only at the newest position. Outputs were unchanged
   up to floating-point roundoff; full-window training outputs were unaffected.
+* Added ``NerdSolverCfg.inference_precision`` (``fp32`` default, ``tf32``, ``fp16``, ``bf16``) for online
+  model inference on CUDA, with ``--inference-precision`` overrides in ``keyboard_policy`` and
+  ``keyboard_benchmark env``. Reduced precisions changed predictions beyond FP32 roundoff and must be
+  validated closed loop before use.
