@@ -80,6 +80,7 @@ class TransformerNeuralSolver(NeuralSolver):
         # Per-frame (trunk tokens, per-key features or None), aligned with ``states_history``.
         self.frame_cache: deque[tuple[torch.Tensor, torch.Tensor | None]] = deque(maxlen=self.num_states_history)
         self.frame_cache_rebuild_env_ids = None
+        self.stream_cache = None
 
     def preload_states_history(self, history: Mapping[str, torch.Tensor]) -> None:
         """Replace solver history with validated raw dataset inputs.
@@ -318,7 +319,14 @@ class TransformerNeuralSolver(NeuralSolver):
         self.frame_cache.append((tokens[:, 0], None if key_features is None else key_features[:, 0]))
         rebuild_env_ids = self.frame_cache_rebuild_env_ids
         self.frame_cache_rebuild_env_ids = None
+        streaming = bool(getattr(neural_model, "supports_streaming", False))
+        if streaming:
+            spans = neural_model.transformer_model.config.attention_spans
+            if sum(span - 1 for span in spans) + 1 > self.num_states_history:
+                raise ValueError("Streaming inference requires a receptive field within num_states_history.")
+        stream_cache = getattr(self, "stream_cache", None)
         if len(self.frame_cache) != len(self.states_history):
+            stream_cache = None
             # Externally loaded history (e.g. preload_states_history): re-encode the complete window.
             all_tokens, all_keys = neural_model.encode_frames(self._processed_history_rows(None))
             self.frame_cache.clear()
@@ -333,7 +341,22 @@ class TransformerNeuralSolver(NeuralSolver):
                     frame_keys.index_copy_(0, rebuild_env_ids, row_keys[:, step])
         window_tokens = torch.stack([frame[0] for frame in self.frame_cache], dim=1)
         window_keys = None if key_features is None else torch.stack([frame[1] for frame in self.frame_cache], dim=1)
-        output = neural_model.forward_encoded(window_tokens, window_keys)
+        if not streaming:
+            output = neural_model.forward_encoded(window_tokens, window_keys)
+        elif stream_cache is None:
+            output, self.stream_cache = neural_model.build_stream(window_tokens, window_keys)
+        else:
+            # Each layer attends only to its cached cone; reset rows rebuild their cone from the window.
+            output = neural_model.forward_stream(tokens, window_keys, stream_cache)
+            if rebuild_env_ids is not None and rebuild_env_ids.numel() > 0:
+                row_output, row_cache = neural_model.build_stream(
+                    window_tokens.index_select(0, rebuild_env_ids),
+                    None if window_keys is None else window_keys.index_select(0, rebuild_env_ids),
+                )
+                stream_cache.copy_rows_from(row_cache, rebuild_env_ids)
+                output.state_prediction.index_copy_(0, rebuild_env_ids, row_output.state_prediction)
+                for name, value in output.auxiliary_predictions.items():
+                    value.index_copy_(0, rebuild_env_ids, row_output.auxiliary_predictions[name])
         self._publish_auxiliary_predictions(output)
         return output.state_prediction
 

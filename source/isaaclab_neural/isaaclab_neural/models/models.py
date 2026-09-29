@@ -147,6 +147,7 @@ class ModelMixedInput(nn.Module):
                 dropout=network_cfg["transformer"]["dropout"],
                 position_encoding=network_cfg["transformer"].get("position_encoding", "learned_absolute"),
                 rope_base=network_cfg["transformer"].get("rope_base", 10000.0),
+                attention_spans=network_cfg["transformer"].get("attention_spans"),
             )
             self.transformer_model = GPT(gptconf)
             self.transformer_model.to(self.device)
@@ -554,6 +555,24 @@ class ModelMixedInput(nn.Module):
         """
         features = self._trunk(tokens, last_only=True)
         return self._outputs_from_features(features, key_features, deterministic, last_only=True)
+
+    @property
+    def supports_streaming(self) -> bool:
+        """Whether the Transformer trunk can stream one position per step (``relative_lag`` attention)."""
+        return bool(self.is_transformer and not self.is_rnn and self.transformer_model.supports_streaming)
+
+    def build_stream(self, tokens, key_features=None):
+        """Predict the newest step of an encoded window and return it with the trunk's stream cache."""
+        features, cache = self.transformer_model.build_stream_cache(tokens)
+        return self._outputs_from_features(features, key_features, False, last_only=True), cache
+
+    def forward_stream(self, new_tokens, key_features, cache):
+        """Advance the trunk stream by the newest encoded frame ``[B, 1, D]`` and predict it.
+
+        ``key_features`` still covers the recent window used by the keyboard key head.
+        """
+        features = self.transformer_model.forward_stream(new_tokens, cache)
+        return self._outputs_from_features(features, key_features, False, last_only=True)
 
     def _outputs_from_features(self, features, key_features, deterministic, last_only):
         state_prediction = self._decode_state(

@@ -25,9 +25,9 @@ class _TransformerTestHarness(TransformerNeuralSolver):
         return model_inputs
 
 
-def _gpt(position_encoding: str = "rope") -> GPT:
+def _gpt(position_encoding: str = "rope", attention_spans=None) -> GPT:
     torch.manual_seed(7)
-    return GPT(
+    model = GPT(
         GPTConfig(
             block_size=8,
             vocab_size=6,
@@ -37,8 +37,13 @@ def _gpt(position_encoding: str = "rope") -> GPT:
             dropout=0.0,
             bias=False,
             position_encoding=position_encoding,
+            attention_spans=attention_spans,
         )
     ).eval()
+    for name, parameter in model.named_parameters():
+        if name.endswith("lag_bias"):
+            torch.nn.init.normal_(parameter)
+    return model
 
 
 def test_solver_history_stacks_directly_into_batch_time_layout():
@@ -74,7 +79,7 @@ def test_solver_kv_input_preparation_uses_only_latest_frame():
     assert solver.kv_cache_rebuild_inputs is None
 
 
-def _mixed_input_model(position_encoding: str = "rope") -> ModelMixedInput:
+def _mixed_input_model(position_encoding: str = "rope", attention_spans=None) -> ModelMixedInput:
     input_sample = {"observation": torch.zeros(2, 1, 6)}
     input_cfg = {"low_dim": ["observation"]}
     network_cfg = {
@@ -95,6 +100,7 @@ def _mixed_input_model(position_encoding: str = "rope") -> ModelMixedInput:
             "dropout": 0.0,
             "bias": False,
             "position_encoding": position_encoding,
+            "attention_spans": attention_spans,
         },
         "model": {
             "mlp": {
@@ -104,7 +110,11 @@ def _mixed_input_model(position_encoding: str = "rope") -> ModelMixedInput:
             }
         },
     }
-    return ModelMixedInput(input_sample, 4, input_cfg, network_cfg, device="cpu").eval()
+    model = ModelMixedInput(input_sample, 4, input_cfg, network_cfg, device="cpu").eval()
+    for name, parameter in model.named_parameters():
+        if name.endswith("lag_bias"):
+            torch.nn.init.normal_(parameter)
+    return model
 
 
 def _mixed_contact_model() -> ModelMixedInput:
@@ -446,10 +456,12 @@ def test_feature_cache_matches_shared_per_body_contact_encoder():
             torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
 
 
-@pytest.mark.parametrize("position_encoding", ["learned_absolute", "rope"])
+@pytest.mark.parametrize(
+    ("position_encoding", "spans"), [("learned_absolute", None), ("rope", None), ("relative_lag", (3, 2))]
+)
 @pytest.mark.parametrize("steps", [1, 3, 8])
-def test_gpt_last_only_matches_last_row_of_full_window(position_encoding, steps):
-    model = _gpt(position_encoding)
+def test_gpt_last_only_matches_last_row_of_full_window(position_encoding, spans, steps):
+    model = _gpt(position_encoding, spans)
     tokens = torch.randn(3, steps, 6)
     with torch.inference_mode():
         torch.testing.assert_close(model(tokens, last_only=True), model(tokens)[:, -1:], atol=1e-6, rtol=1e-5)
@@ -468,12 +480,14 @@ def _frame_cache_solver(model: ModelMixedInput, history: int) -> _TransformerTes
     solver.feature_cache_rebuild_env_ids = solver.kv_cache_rebuild_env_ids = None
     solver.frame_cache = deque(maxlen=history)
     solver.frame_cache_rebuild_env_ids = None
+    solver.stream_cache = None
     solver.states_history = deque(maxlen=history)
     return solver
 
 
-def test_solver_frame_cache_matches_full_window_through_growth_eviction_and_row_rebuild():
-    model = _mixed_input_model("learned_absolute")
+@pytest.mark.parametrize(("position_encoding", "spans"), [("learned_absolute", None), ("relative_lag", (3, 2))])
+def test_solver_frame_cache_matches_full_window_through_growth_eviction_and_row_rebuild(position_encoding, spans):
+    model = _mixed_input_model(position_encoding, spans)
     solver = _frame_cache_solver(model, history=4)
     frames = torch.randn(2, 9, 6)
 
@@ -504,3 +518,26 @@ def test_solver_frame_cache_matches_full_window_through_growth_eviction_and_row_
 def test_frame_cache_is_exclusive_with_other_caches():
     with pytest.raises(ValueError, match="mutually exclusive"):
         TransformerNeuralSolver(use_kv_cache=True, use_frame_cache=True)
+
+
+def test_relative_lag_stream_matches_a_sliding_window_over_its_receptive_field():
+    # spans (3, 2): each output depends on the newest 1 + 2 + 1 = 4 inputs only.
+    model = _gpt("relative_lag", (3, 2))
+    inputs = torch.randn(3, 8, 6)
+    with torch.inference_mode():
+        full = model(inputs)
+        _, cache = model.build_stream_cache(inputs[:, :1])
+        for step in range(1, 8):
+            streamed = model.forward_stream(inputs[:, step : step + 1], cache)
+            window = inputs[:, max(step - 3, 0) : step + 1]
+            torch.testing.assert_close(streamed, model(window)[:, -1:], atol=1e-6, rtol=1e-5)
+            torch.testing.assert_close(streamed, full[:, step : step + 1], atol=1e-6, rtol=1e-5)
+            rebuilt, _ = model.build_stream_cache(window)
+            torch.testing.assert_close(rebuilt, streamed, atol=1e-6, rtol=1e-5)
+
+
+def test_relative_lag_rejects_spans_that_do_not_fit():
+    with pytest.raises(ValueError, match="one attention span"):
+        _gpt("relative_lag", (3,))
+    with pytest.raises(ValueError, match="receptive field"):
+        _gpt("relative_lag", (6, 5))

@@ -1,0 +1,124 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+env:
+  env_name: SO101-Keyboard-Fixed
+  robot_name: SO101-Keyboard-Fixed
+  keyboard_variant: 0
+  num_envs: 64
+  neural_solver_cfg:
+    name: TransformerNeuralSolver
+    states_frame: body
+    anchor_frame_step: every
+    states_embedding_type: identical
+    prediction_type: relative
+    orientation_prediction_parameterization: quaternion
+    num_states_history: 10
+    use_frame_cache: true
+    contact_mode: newton_native
+    contact_representation: contact_tokens
+    contact_filter: solver_active_movable
+    contact_token_frame: owner
+    num_contacts_per_env: 128
+    max_contact_tokens: 128
+    contact_packing_policy: body_round_robin_pair_atomic
+algorithm:
+  name: SequenceModelTrainer
+  num_epochs: 1000
+  num_iters_per_epoch: 1250
+  sample_sequence_length: 10
+  batch_size: 512
+  num_valid_batches: 100
+  truncate_grad: true
+  grad_norm: 1.0
+  update_dataset_statistics: true
+  loss:
+    type: MSE
+    beta: 0.0
+    keyboard_key_position_scale_m: 0.0002
+    keyboard_robot_position_scale_rad: null
+    keyboard_state_group_weights:
+      robot: 0.5
+      key: 0.5
+    keyboard_key_velocity_weighting: pooled
+    robot_net_normal_force:
+      weight: 1.0
+  optimizer:
+    type: Adam
+    weight_decay: 0.0
+    lr_start: 0.0002
+    lr_end: 0.00002
+    lr_schedule: linear
+    betas: [0.9, 0.999]
+  dataset:
+    train_datasets:
+      policy:
+        path: ./data/datasets/so101-keyboard-fixed-v2/SO101-Keyboard-Fixed/seed42_variant00.hdf5
+        weight: 1.0
+    valid_datasets:
+      policy: ./data/datasets/so101-keyboard-fixed-v2/SO101-Keyboard-Fixed/seed43_variant00.hdf5
+    max_capacity: 10000000
+    capacity_unit: unique_transition
+    capacity_scope: global
+    window_sampling: sliding
+    valid_max_capacity: 3000000
+    load_mode: eager
+    eager_preload_frames: 4096
+    pin_memory: true
+    non_blocking: true
+    num_data_workers: 0
+    max_total_workers: 64
+  eval:
+    # Closed-loop typing with the collection policy in the training environment (rank 0, current weights).
+    interval: 5
+    mode: keyboard_policy
+    policy_checkpoint: ./pretrained/control_policy/so101_keyboard/model_14999.pt
+    control_steps: 450
+    seed: 43
+inputs:
+  low_dim: [states_embedding, joint_f, gravity_dir]
+  contact_set:
+    dim: 17
+    encoder_type: shared_per_body
+    body_latent_dim: 16
+    hidden_dim: 64
+    max_other_bodies: 128
+network:
+  key_head:
+    enabled: true
+    key_q_start: 6
+    num_keys: 108
+    key_body_slot_start: 8
+    history_steps: 3
+    embed_dim: 8
+    summary_dim: 64
+    context_dim: 64
+    hidden_sizes: [128, 128]
+  robot_net_normal_force_head:
+    enabled: true
+  normalize_input: true
+  normalize_output: true
+  encoder:
+    low_dim:
+      layer_sizes: []
+      activation: relu
+      layernorm: false
+  transformer:
+    block_size: 32
+    n_layer: 6
+    n_head: 12
+    n_embd: 384
+    dropout: 0.0
+    bias: false
+    # Streaming temporal cone: layer l attends to lags 0..span-1 with a learned lag bias. The receptive
+    # field sum(span - 1) + 1 = 10 equals num_states_history, so inference advances one frame per layer.
+    position_encoding: relative_lag
+    attention_spans: [3, 3, 3, 2, 2, 2]
+  model:
+    output_tanh: false
+    mlp:
+      layer_sizes: [64]
+      activation: relu
+      layernorm: false

@@ -35,7 +35,7 @@ class LayerNorm(nn.Module):
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_index=None):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         if config.position_encoding == "rope" and (config.n_embd // config.n_head) % 2 != 0:
@@ -51,6 +51,10 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         self.dropout = config.dropout
         self.position_encoding = config.position_encoding
+        if self.position_encoding == "relative_lag":
+            # Temporal cone: attend to lags 0..span-1 with a learned per-head lag bias.
+            self.span = int(config.attention_spans[layer_index])
+            self.lag_bias = nn.Parameter(torch.zeros(config.n_head, self.span))
         if self.position_encoding == "rope":
             head_dim = config.n_embd // config.n_head
             inv_freq = 1.0 / (config.rope_base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
@@ -77,8 +81,56 @@ class CausalSelfAttention(nn.Module):
         x_rotated = torch.stack((-x_odd, x_even), dim=-1).flatten(-2)
         return x * cos + x_rotated * sin
 
+    def _lag_mask(self, lags):
+        """Additive attention bias for integer lags ``query - key``; lags outside the span are masked."""
+        allowed = (lags >= 0) & (lags < self.span)
+        bias = self.lag_bias[:, lags.clamp(0, self.span - 1)]
+        return torch.where(allowed, bias, torch.full_like(bias, float("-inf")))
+
+    def project_kv(self, x):
+        """Return per-head keys and values ``[B, nh, T, hs]`` of normalized block inputs."""
+        B, T, C = x.size()
+        _, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        return (
+            k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2),
+            v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2),
+        )
+
+    def forward_stream(self, x, cached_keys, cached_values, seen):
+        """Attend from one new position to the cached cone and return ``(y, keys, values)``.
+
+        Args:
+            x: Normalized input of the newest position, shape ``[B, 1, C]``.
+            cached_keys: Keys of the previous ``span - 1`` positions, oldest first, shape ``[B, nh, span - 1, hs]``.
+            cached_values: Values matching ``cached_keys``.
+            seen: Number of earlier positions in each row's stream, shape ``[B]``.
+        """
+        B, _, C = x.size()
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        q = q.view(B, 1, self.n_head, C // self.n_head).transpose(1, 2)
+        keys = torch.cat((cached_keys, k.view(B, 1, self.n_head, C // self.n_head).transpose(1, 2)), dim=2)
+        values = torch.cat((cached_values, v.view(B, 1, self.n_head, C // self.n_head).transpose(1, 2)), dim=2)
+        lags = torch.arange(self.span - 1, -1, -1, device=x.device)
+        mask = self._lag_mask(lags)[:, None, :].unsqueeze(0).expand(B, -1, -1, -1)
+        invalid = (lags[None, :] > seen[:, None]).view(B, 1, 1, self.span)
+        mask = mask.masked_fill(invalid, float("-inf")).to(q.dtype)
+        y = torch.nn.functional.scaled_dot_product_attention(q, keys, values, attn_mask=mask)
+        y = self.resid_dropout(self.c_proj(y.transpose(1, 2).reshape(B, 1, C)))
+        return y, keys[:, :, 1:], values[:, :, 1:]
+
     def forward(self, x, position_ids=None, cache=None, cache_indices=None):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
+        if self.position_encoding == "relative_lag":
+            if cache is not None:
+                raise ValueError("relative_lag attention streams with GPT.forward_stream(), not the RoPE KV cache.")
+            q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+            q, k, v = (z.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) for z in (q, k, v))
+            positions = torch.arange(T, device=x.device)
+            mask = self._lag_mask(positions[:, None] - positions[None, :]).to(q.dtype)
+            y = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=mask.unsqueeze(0), dropout_p=self.dropout if self.training else 0
+            )
+            return self.resid_dropout(self.c_proj(y.transpose(1, 2).contiguous().view(B, T, C)))
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
@@ -147,7 +199,10 @@ class CausalSelfAttention(nn.Module):
             q = self._apply_rope(q, position_ids)
             k = self._apply_rope(k, position_ids)
         q = q[:, :, -1:]
-        if self.flash:
+        if self.position_encoding == "relative_lag":
+            mask = self._lag_mask(T - 1 - torch.arange(T, device=x.device))[:, None, :].unsqueeze(0).to(q.dtype)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        elif self.flash:
             y = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, dropout_p=self.dropout if self.training else 0
             )
@@ -175,10 +230,10 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_index=None):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
+        self.attn = CausalSelfAttention(config, layer_index)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
@@ -204,6 +259,8 @@ class GPTConfig:
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     position_encoding: str = "learned_absolute"
     rope_base: float = 10000.0
+    attention_spans: tuple[int, ...] | None = None
+    """Per-layer attention spans for ``position_encoding="relative_lag"`` (the streaming temporal cone)."""
 
 
 class GPT(nn.Module):
@@ -285,17 +342,27 @@ class GPT(nn.Module):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
-        if config.position_encoding not in {"learned_absolute", "rope"}:
+        if config.position_encoding not in {"learned_absolute", "rope", "relative_lag"}:
             raise ValueError(
-                f"Unsupported position_encoding '{config.position_encoding}'. Expected 'learned_absolute' or 'rope'."
+                f"Unsupported position_encoding '{config.position_encoding}'. "
+                "Expected 'learned_absolute', 'rope' or 'relative_lag'."
             )
+        if config.position_encoding == "relative_lag":
+            spans = tuple(int(span) for span in config.attention_spans or ())
+            if len(spans) != config.n_layer or min(spans) < 1:
+                raise ValueError("relative_lag requires one attention span >= 1 per layer.")
+            if sum(span - 1 for span in spans) + 1 > config.block_size:
+                raise ValueError("The attention spans' receptive field exceeds block_size.")
+            config.attention_spans = spans
+        elif config.attention_spans is not None:
+            raise ValueError("attention_spans requires position_encoding='relative_lag'.")
         self.config = config
 
         transformer_modules = dict(
             # wte = nn.Embedding(config.vocab_size, config.n_embd),
             wte=nn.Linear(config.vocab_size, config.n_embd),
             drop=nn.Dropout(config.dropout),
-            h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h=nn.ModuleList([Block(config, layer_index) for layer_index in range(config.n_layer)]),
             ln_f=LayerNorm(config.n_embd, bias=config.bias),
         )
         if config.position_encoding == "learned_absolute":
@@ -365,6 +432,67 @@ class GPT(nn.Module):
 
         output_features = self.lm_head(x)
         return output_features
+
+    class StreamCache:
+        """Per-layer keys/values of the previous ``span - 1`` positions for streaming ``relative_lag`` inference."""
+
+        def __init__(self, keys, values, seen):
+            self.keys = keys
+            self.values = values
+            self.seen = seen
+
+        def copy_rows_from(self, source, batch_indices):
+            """Replace selected rows with the rows of a cache built for those rows only."""
+            self.seen.index_copy_(0, batch_indices, source.seen)
+            for destination, rows in zip((*self.keys, *self.values), (*source.keys, *source.values)):
+                destination.index_copy_(0, batch_indices, rows.to(destination.dtype))
+
+    @property
+    def supports_streaming(self):
+        """Whether each layer attends to a bounded cone, so inference can stream one position per step."""
+        return self.config.position_encoding == "relative_lag"
+
+    def build_stream_cache(self, idx):
+        """Run a window ``[B, T, input]`` and return the newest output ``[B, 1, C]`` and its stream cache.
+
+        Every position's cone lies inside the window when ``T`` covers the receptive field, so later
+        :meth:`forward_stream` steps equal full-window evaluation up to floating-point roundoff.
+        """
+        if not self.supports_streaming:
+            raise ValueError("Streaming inference requires position_encoding='relative_lag'.")
+        x = self.transformer.drop(self.transformer.wte(idx))
+        steps = x.shape[1]
+        keys, values = [], []
+        for block in self.transformer.h:
+            width = block.attn.span - 1
+            k, v = block.attn.project_kv(block.ln_1(x))
+            k, v = k[:, :, max(steps - width, 0) :], v[:, :, max(steps - width, 0) :]
+            pad = width - k.shape[2]
+            if pad > 0:
+                k = torch.cat((k.new_zeros(*k.shape[:2], pad, k.shape[3]), k), dim=2)
+                v = torch.cat((v.new_zeros(*v.shape[:2], pad, v.shape[3]), v), dim=2)
+            keys.append(k)
+            values.append(v)
+            x = block(x)
+        output = self.lm_head(self.transformer.ln_f(x[:, -1:]))
+        seen = torch.full((x.shape[0],), steps, device=x.device, dtype=torch.long)
+        return output, GPT.StreamCache(keys, values, seen)
+
+    def forward_stream(self, idx, cache):
+        """Advance the stream by one position ``[B, 1, input]`` and return its output ``[B, 1, C]``.
+
+        ``cache.seen`` counts each row's earlier positions (it is updated in place with the per-layer keys/values).
+        """
+        x = self.transformer.drop(self.transformer.wte(idx))
+        seen = cache.seen
+        for layer, block in enumerate(self.transformer.h):
+            y, cache.keys[layer], cache.values[layer] = block.attn.forward_stream(
+                block.ln_1(x), cache.keys[layer], cache.values[layer], seen
+            )
+            x = x + y
+            x = x + block.mlp(block.ln_2(x))
+        cache.seen = cache.seen + 1
+        return self.lm_head(self.transformer.ln_f(x))
 
     def init_kv_cache(self, batch_size, max_cache_length=None, *, device=None, dtype=None):
         """Create an empty KV cache for incremental RoPE inference."""
