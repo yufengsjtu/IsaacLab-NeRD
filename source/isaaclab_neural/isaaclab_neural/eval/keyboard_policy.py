@@ -175,6 +175,12 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--nerd-checkpoint", type=Path, help="Simulate with this NeRD checkpoint instead of MJWarp.")
     parser.add_argument("--robot-usd", type=Path, help="Local copy of the SO101 USD, for offline asset caches.")
+    parser.add_argument(
+        "--frame-cache",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override the checkpoint's NeRD use_frame_cache (encode only the newest frame each step).",
+    )
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--reset-mode", choices=("training", "uniform"), default="uniform")
     parser.add_argument("--reset_ik_iters", type=int, help="Override reset IK iterations for a diagnostic comparison.")
@@ -256,6 +262,8 @@ def main() -> None:
         launch_cfg = copy.deepcopy(cfg)
         launch_cfg.sim.physics.use_cuda_graph = False
         solver_cfg = NerdSolverCfg(**nerd["cfg"]["env"]["neural_solver_cfg"])
+        if args.frame_cache is not None:
+            solver_cfg.use_frame_cache = args.frame_cache
         solver_cfg.neural_model_path = str(args.nerd_checkpoint.resolve())
         teacher = cfg.sim.physics
         cfg.sim.physics = NerdNewtonCfg(

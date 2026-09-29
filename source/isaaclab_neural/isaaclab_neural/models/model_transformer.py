@@ -131,6 +131,32 @@ class CausalSelfAttention(nn.Module):
         y = self.resid_dropout(self.c_proj(y))
         return y
 
+    def forward_last(self, x, position_ids=None):
+        """Attend from only the newest position to the full window, shape ``[B, 1, C]``.
+
+        Keys and values still cover every position, so the result equals the last row of :meth:`forward`.
+        """
+        B, T, C = x.size()
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        if self.position_encoding == "rope":
+            if position_ids is None:
+                position_ids = torch.arange(T, device=x.device).expand(B, -1)
+            q = self._apply_rope(q, position_ids)
+            k = self._apply_rope(k, position_ids)
+        q = q[:, :, -1:]
+        if self.flash:
+            y = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, dropout_p=self.dropout if self.training else 0
+            )
+        else:
+            att = F.softmax((q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1))), dim=-1)
+            y = self.attn_dropout(att) @ v
+        y = y.transpose(1, 2).contiguous().view(B, 1, C)
+        return self.resid_dropout(self.c_proj(y))
+
 
 class MLP(nn.Module):
     def __init__(self, config):
@@ -160,6 +186,11 @@ class Block(nn.Module):
         x = x + self.attn(self.ln_1(x), position_ids, cache, cache_indices)
         x = x + self.mlp(self.ln_2(x))
         return x
+
+    def forward_last(self, x, position_ids=None):
+        """Return only the newest position's block output, shape ``[B, 1, C]``."""
+        x = x[:, -1:] + self.attn.forward_last(self.ln_1(x), position_ids)
+        return x + self.mlp(self.ln_2(x))
 
 
 @dataclass
@@ -309,7 +340,8 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, last_only=False):
+        """Run the causal trunk; with ``last_only`` the final block and head evaluate only the newest position."""
         device = idx.device
         b, t, input_dim = idx.size()
         assert t <= self.config.block_size, (
@@ -324,8 +356,11 @@ class GPT(nn.Module):
             x = self.transformer.drop(tok_emb + pos_emb)
         else:
             x = self.transformer.drop(tok_emb)
-        for block in self.transformer.h:
+        blocks = list(self.transformer.h)
+        for block in blocks[:-1] if last_only else blocks:
             x = block(x, position_ids=pos)
+        if last_only:
+            x = blocks[-1].forward_last(x, position_ids=pos) if blocks else x[:, -1:]
         x = self.transformer.ln_f(x)
 
         output_features = self.lm_head(x)

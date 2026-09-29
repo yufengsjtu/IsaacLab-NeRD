@@ -153,19 +153,28 @@ class KeyboardKeyHead(nn.Module):
             dim=-1,
         )
 
-    def decode(self, trunk: torch.Tensor, key_features: torch.Tensor) -> torch.Tensor:
-        """Return pooled-normalized key position and velocity changes, shape ``[B, T, keys, 2]``."""
+    def decode(self, trunk: torch.Tensor, key_features: torch.Tensor, last_only: bool = False) -> torch.Tensor:
+        """Return pooled-normalized key position and velocity changes, shape ``[B, T, keys, 2]``.
+
+        With ``last_only``, ``trunk`` holds only the newest position ``[B, 1, D]`` while ``key_features`` keeps the
+        window, and the result is the newest step ``[B, 1, keys, 2]``.
+        """
         history = []
+        steps = key_features.shape[1]
         for lag in range(self.history_steps):
-            if lag == 0:
+            if last_only:
+                # Early windows repeat the first available frame, as in the full-window path below.
+                index = max(steps - 1 - lag, 0)
+                shifted = key_features[:, index : index + 1]
+            elif lag == 0:
                 shifted = key_features
             else:
                 # Early timesteps repeat the first available frame, matching the causal trunk window.
-                pad = key_features[:, :1].expand(-1, min(lag, key_features.shape[1]), -1, -1)
-                shifted = torch.cat([pad, key_features[:, :-lag]], dim=1)[:, : key_features.shape[1]]
+                pad = key_features[:, :1].expand(-1, min(lag, steps), -1, -1)
+                shifted = torch.cat([pad, key_features[:, :-lag]], dim=1)[:, :steps]
             history.append(shifted)
         context = self.context_proj(trunk).unsqueeze(-2).expand(-1, -1, self.num_keys, -1)
-        embedding = self.key_embedding.weight.expand(*key_features.shape[:-1], -1)
+        embedding = self.key_embedding.weight.expand(*history[0].shape[:-1], -1)
         return self.decoder(torch.cat([context, *history, embedding], dim=-1))
 
     def assemble(

@@ -99,6 +99,14 @@ class NerdSolverCfg(NewtonSolverCfg):
     use_kv_cache: bool = False
     """Whether to use incremental RoPE Transformer inference with a per-environment KV cache."""
 
+    use_frame_cache: bool = False
+    """Whether ``TransformerNeuralSolver`` preprocesses and encodes only the newest frame each step.
+
+    Earlier frames' encodings are reused and the Transformer still attends over the full window, so predictions
+    (including auxiliary force heads) equal uncached inference up to floating-point roundoff. Requires per-frame
+    coordinate anchoring (``anchor_frame_step="every"`` or world-frame states) and excludes the feature/KV caches.
+    """
+
     reset_seq_length: int = 1
     """Step interval used by ``RNNNeuralSolver`` to reset recurrent hidden state."""
 

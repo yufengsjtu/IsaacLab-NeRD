@@ -16,6 +16,7 @@ env:
     prediction_type: relative
     orientation_prediction_parameterization: quaternion
     num_states_history: 10
+    use_frame_cache: true
     contact_mode: newton_native
     contact_representation: contact_tokens
     contact_filter: solver_active_movable

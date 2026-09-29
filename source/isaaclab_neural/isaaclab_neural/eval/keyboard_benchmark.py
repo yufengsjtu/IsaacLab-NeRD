@@ -149,6 +149,8 @@ def benchmark_env(args: argparse.Namespace, launcher_args: argparse.Namespace) -
         launch_cfg = copy.deepcopy(cfg)
         launch_cfg.sim.physics.use_cuda_graph = False
         solver_cfg = NerdSolverCfg(**nerd["cfg"]["env"]["neural_solver_cfg"])
+        if args.frame_cache is not None:
+            solver_cfg.use_frame_cache = args.frame_cache
         solver_cfg.neural_model_path = str(args.nerd_checkpoint.resolve())
         teacher = cfg.sim.physics
         cfg.sim.physics = NerdNewtonCfg(
@@ -167,6 +169,7 @@ def benchmark_env(args: argparse.Namespace, launcher_args: argparse.Namespace) -
         "physics_dt_s": cfg.sim.dt,
         "decimation": cfg.decimation,
         "num_substeps": cfg.sim.physics.num_substeps,
+        "use_frame_cache": getattr(getattr(cfg.sim.physics, "solver_cfg", None), "use_frame_cache", None),
         "gpu": torch.cuda.get_device_name(0),
     }
     try:
@@ -287,6 +290,12 @@ def main() -> None:
     env.add_argument("--nerd-checkpoint", type=Path, help="NeRD dynamics; omit for native MJWarp.")
     env.add_argument("--checkpoint", type=Path, default=Path("pretrained/control_policy/so101_keyboard/model_14999.pt"))
     env.add_argument("--robot-usd", type=Path)
+    env.add_argument(
+        "--frame-cache",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override the checkpoint's NeRD use_frame_cache.",
+    )
     env.add_argument("--num-envs", type=int, required=True)
     env.add_argument("--seed", type=int, default=43)
     env.add_argument("--warmup", type=int, default=30)

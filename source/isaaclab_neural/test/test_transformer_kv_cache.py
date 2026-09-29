@@ -444,3 +444,63 @@ def test_feature_cache_matches_shared_per_body_contact_encoder():
             expected = model(window, single_step=True)
             actual, feature_cache = model.forward_feature_cached(window, feature_cache)
             torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
+
+
+@pytest.mark.parametrize("position_encoding", ["learned_absolute", "rope"])
+@pytest.mark.parametrize("steps", [1, 3, 8])
+def test_gpt_last_only_matches_last_row_of_full_window(position_encoding, steps):
+    model = _gpt(position_encoding)
+    tokens = torch.randn(3, steps, 6)
+    with torch.inference_mode():
+        torch.testing.assert_close(model(tokens, last_only=True), model(tokens)[:, -1:], atol=1e-6, rtol=1e-5)
+
+
+def _frame_cache_solver(model: ModelMixedInput, history: int) -> _TransformerTestHarness:
+    solver = _TransformerTestHarness.__new__(_TransformerTestHarness)
+    solver.num_envs = 2
+    solver.num_states_history = history
+    solver.use_feature_cache = solver.use_kv_cache = False
+    solver.use_frame_cache = True
+    solver.neural_model = model
+    solver.torch_device = "cpu"
+    solver.predicted_body_net_contact_forces_b = None
+    solver.feature_cache = solver.kv_cache = None
+    solver.feature_cache_rebuild_env_ids = solver.kv_cache_rebuild_env_ids = None
+    solver.frame_cache = deque(maxlen=history)
+    solver.frame_cache_rebuild_env_ids = None
+    solver.states_history = deque(maxlen=history)
+    return solver
+
+
+def test_solver_frame_cache_matches_full_window_through_growth_eviction_and_row_rebuild():
+    model = _mixed_input_model("learned_absolute")
+    solver = _frame_cache_solver(model, history=4)
+    frames = torch.randn(2, 9, 6)
+
+    def full_window():
+        return {"observation": torch.stack([entry["observation"] for entry in solver.states_history], dim=1)}
+
+    with torch.inference_mode():
+        for step in range(9):
+            solver.states_history.append({"observation": frames[:, step].clone()})
+            if step == 6:
+                # A partial reset rewrites row 0's raw history; its cached encodings must be rebuilt.
+                for entry in solver.states_history:
+                    entry["observation"][0] = frames[0, step]
+                solver.rebuild_history_rows(torch.tensor([0]))
+            inputs = solver.get_neural_model_inputs()
+            assert inputs["observation"].shape == (2, 1, 6)
+            expected = model(full_window(), single_step=True)
+            torch.testing.assert_close(solver.predict(inputs), expected, atol=1e-6, rtol=1e-5)
+        assert len(solver.frame_cache) == 4
+
+        # Externally loaded history (frame cache out of step) re-encodes the whole window.
+        solver.frame_cache.clear()
+        solver.states_history.append({"observation": torch.randn(2, 6)})
+        expected = model(full_window(), single_step=True)
+        torch.testing.assert_close(solver.predict(solver.get_neural_model_inputs()), expected, atol=1e-6, rtol=1e-5)
+
+
+def test_frame_cache_is_exclusive_with_other_caches():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        TransformerNeuralSolver(use_kv_cache=True, use_frame_cache=True)

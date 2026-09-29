@@ -50,19 +50,24 @@ class TransformerNeuralSolver(NeuralSolver):
         num_states_history: int = 1,
         use_feature_cache: bool = False,
         use_kv_cache: bool = False,
+        use_frame_cache: bool = False,
         **kwargs,
     ):
-        if use_feature_cache and use_kv_cache:
-            raise ValueError("use_feature_cache and use_kv_cache cannot both be enabled.")
+        if sum((use_feature_cache, use_kv_cache, use_frame_cache)) > 1:
+            raise ValueError("use_feature_cache, use_kv_cache and use_frame_cache are mutually exclusive.")
         self.num_states_history = num_states_history
         self.use_feature_cache = use_feature_cache
         self.use_kv_cache = use_kv_cache
+        self.use_frame_cache = use_frame_cache
         self.feature_cache: torch.Tensor | None = None
         self.feature_cache_rebuild_env_ids: torch.Tensor | None = None
         self.kv_cache: GPT.KVCache | None = None
         self.kv_cache_rebuild_env_ids: torch.Tensor | None = None
         self.kv_cache_rebuild_inputs: dict[str, torch.Tensor | None] | None = None
+        self.frame_cache_rebuild_env_ids: torch.Tensor | None = None
         super().__init__(**kwargs)
+        if use_frame_cache and not (self.anchor_frame_step == "every" or self.states_frame == "world"):
+            raise ValueError("use_frame_cache requires per-frame anchoring (anchor_frame_step='every').")
         self.reset_states_history()
 
     def reset_states_history(self):
@@ -72,6 +77,9 @@ class TransformerNeuralSolver(NeuralSolver):
         self.kv_cache = None
         self.kv_cache_rebuild_env_ids = None
         self.kv_cache_rebuild_inputs = None
+        # Per-frame (trunk tokens, per-key features or None), aligned with ``states_history``.
+        self.frame_cache: deque[tuple[torch.Tensor, torch.Tensor | None]] = deque(maxlen=self.num_states_history)
+        self.frame_cache_rebuild_env_ids = None
 
     def preload_states_history(self, history: Mapping[str, torch.Tensor]) -> None:
         """Replace solver history with validated raw dataset inputs.
@@ -189,6 +197,10 @@ class TransformerNeuralSolver(NeuralSolver):
             self.kv_cache_rebuild_env_ids = env_ids
         else:
             self.kv_cache_rebuild_env_ids = torch.unique(torch.cat((self.kv_cache_rebuild_env_ids, env_ids)))
+        frame_rebuild = getattr(self, "frame_cache_rebuild_env_ids", None)
+        self.frame_cache_rebuild_env_ids = (
+            env_ids if frame_rebuild is None else torch.unique(torch.cat((frame_rebuild, env_ids)))
+        )
 
     def _normalize_env_ids(self, env_ids) -> torch.Tensor:
         """Return env ids as a 1-D tensor on the solver torch device."""
@@ -240,6 +252,8 @@ class TransformerNeuralSolver(NeuralSolver):
             return {key: value.unsqueeze(1) for key, value in model_inputs.items()}
 
         history = tuple(self.states_history)
+        if getattr(self, "use_frame_cache", False):
+            return self.process_neural_model_inputs({key: value.unsqueeze(1) for key, value in history[-1].items()})
         if self.use_kv_cache:
             latest_inputs = {key: value.unsqueeze(1) for key, value in history[-1].items()}
             rebuild_env_ids = self.kv_cache_rebuild_env_ids
@@ -284,7 +298,48 @@ class TransformerNeuralSolver(NeuralSolver):
             raise RuntimeError("use_kv_cache requires callable forward_cached() and reset_transformer_cache() methods.")
         return cast("_KVCacheModel", neural_model)
 
+    def _processed_history_rows(self, env_ids: torch.Tensor | None) -> dict[str, torch.Tensor]:
+        """Stack and preprocess the raw history window, optionally for selected rows only."""
+        history = tuple(self.states_history)
+        return self.process_neural_model_inputs(
+            {
+                key: torch.stack(
+                    tuple(entry[key] if env_ids is None else entry[key].index_select(0, env_ids) for entry in history),
+                    dim=1,
+                )
+                for key in history[0]
+            }
+        )
+
+    def _model_forward_frame_cached(self, model_inputs):
+        """Encode only the newest frame, reuse earlier frame encodings, and predict the newest step."""
+        neural_model = self._require_neural_model()
+        tokens, key_features = neural_model.encode_frames(dict(model_inputs))
+        self.frame_cache.append((tokens[:, 0], None if key_features is None else key_features[:, 0]))
+        rebuild_env_ids = self.frame_cache_rebuild_env_ids
+        self.frame_cache_rebuild_env_ids = None
+        if len(self.frame_cache) != len(self.states_history):
+            # Externally loaded history (e.g. preload_states_history): re-encode the complete window.
+            all_tokens, all_keys = neural_model.encode_frames(self._processed_history_rows(None))
+            self.frame_cache.clear()
+            for step in range(all_tokens.shape[1]):
+                self.frame_cache.append((all_tokens[:, step], None if all_keys is None else all_keys[:, step]))
+        elif rebuild_env_ids is not None and rebuild_env_ids.numel() > 0:
+            # Reset rows had their raw history replaced; re-encode those rows across the window.
+            row_tokens, row_keys = neural_model.encode_frames(self._processed_history_rows(rebuild_env_ids))
+            for step, (frame_tokens, frame_keys) in enumerate(self.frame_cache):
+                frame_tokens.index_copy_(0, rebuild_env_ids, row_tokens[:, step])
+                if frame_keys is not None and row_keys is not None:
+                    frame_keys.index_copy_(0, rebuild_env_ids, row_keys[:, step])
+        window_tokens = torch.stack([frame[0] for frame in self.frame_cache], dim=1)
+        window_keys = None if key_features is None else torch.stack([frame[1] for frame in self.frame_cache], dim=1)
+        output = neural_model.forward_encoded(window_tokens, window_keys)
+        self._publish_auxiliary_predictions(output)
+        return output.state_prediction
+
     def _model_forward(self, model_inputs):
+        if getattr(self, "use_frame_cache", False):
+            return self._model_forward_frame_cached(model_inputs)
         if self.use_kv_cache:
             return self._model_forward_kv_cached(model_inputs)
         if not self.use_feature_cache:

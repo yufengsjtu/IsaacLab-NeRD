@@ -455,32 +455,42 @@ class ModelMixedInput(nn.Module):
         key_features = key_head.key_features(input_dict["states_embedding"], latents, states_rms)
         return key_head.trunk_input(input_dict, latents, key_features), key_features
 
-    def _extract_trunk_features(self, input_dict, inject_noise=False):
-        """Preprocess inputs and run the shared encoder and temporal trunk.
+    def encode_frames(self, input_dict, inject_noise=False):
+        """Normalize and encode each frame independently, before any temporal mixing.
 
-        Returns trunk features and, for the factorized keyboard model, per-key features (otherwise ``None``).
+        Returns trunk input tokens ``[B, T, feature_dim]`` and, for the factorized keyboard model, per-key features
+        ``[B, T, keys, F]`` (otherwise ``None``). Every frame's encoding depends only on that frame, so encodings of
+        earlier frames can be cached and reused during sequential inference.
         """
         input_dict = self._prepare_inputs(input_dict, inject_noise)
-        key_features = None
         if getattr(self, "key_head", None) is not None:
-            features, key_features = self._key_head_inputs(input_dict)
-        else:
-            features = self.extract_input_features(input_dict)  # (B, T, feature_dim)
+            return self._key_head_inputs(input_dict)
+        return self.extract_input_features(input_dict), None
 
+    def _trunk(self, features, last_only=False):
+        """Run the temporal trunk; ``last_only`` returns only the newest position ``[B, 1, D]``."""
         if self.is_rnn:
             if self.rnn is None:
                 raise RuntimeError("RNN inference requires an initialized recurrent module.")
             features = self.rnn(features)  # (B, T, rnn_hidden_dim)
-
         if self.is_transformer:
             if self.transformer_model is None:
                 raise RuntimeError("Transformer inference requires an initialized transformer module.")
-            features = self.transformer_model(features)  # (B, T, transform_embed_dim)
+            return self.transformer_model(features, last_only=last_only and not self.is_rnn)
+        return features[:, -1:] if last_only else features
 
-        return features, key_features
+    def _extract_trunk_features(self, input_dict, inject_noise=False, last_only=False):
+        """Preprocess inputs and run the shared encoder and temporal trunk.
 
-    def _decode_state(self, features, deterministic=False, key_features=None):
-        """Decode the state prediction from shared trunk features."""
+        Returns trunk features and, for the factorized keyboard model, per-key features (otherwise ``None``).
+        With ``last_only`` the trunk features cover only the newest position, while per-key features keep the
+        full window for the key decoder's history.
+        """
+        tokens, key_features = self.encode_frames(input_dict, inject_noise)
+        return self._trunk(tokens, last_only=last_only), key_features
+
+    def _decode_state(self, features, deterministic=False, key_features=None, last_only=False):
+        """Decode the state prediction from shared trunk features (``last_only``: features are the newest step)."""
         if self.model is None:
             raise RuntimeError("State prediction requires an initialized decoder.")
         output = self.model(features, deterministic=deterministic)
@@ -489,7 +499,7 @@ class ModelMixedInput(nn.Module):
         if key_features is None or self.output_rms is None:
             raise RuntimeError("The keyboard key head requires per-key features and output RMS statistics.")
         key_head = cast(KeyboardKeyHead, self.key_head)
-        return key_head.assemble(output, key_head.decode(features, key_features), self.output_rms)
+        return key_head.assemble(output, key_head.decode(features, key_features, last_only=last_only), self.output_rms)
 
     def forward(
         self,
@@ -522,18 +532,33 @@ class ModelMixedInput(nn.Module):
                 inject_noise=inject_noise,
             )
 
-        features, key_features = self._extract_trunk_features(input_dict, inject_noise=inject_noise)
-        output = self._decode_state(features, deterministic=deterministic, key_features=key_features)
-
-        if single_step:
-            output = output[:, -1:, :]
-
-        return output
+        # Single-step calls evaluate the final block and every head only at the newest position.
+        features, key_features = self._extract_trunk_features(
+            input_dict, inject_noise=inject_noise, last_only=single_step
+        )
+        return self._decode_state(
+            features, deterministic=deterministic, key_features=key_features, last_only=single_step
+        )
 
     def forward_with_aux(self, input_dict, single_step=False, deterministic=False, inject_noise=False):
         """Return state and enabled auxiliary predictions from one trunk pass."""
-        features, key_features = self._extract_trunk_features(input_dict, inject_noise=inject_noise)
-        state_prediction = self._decode_state(features, deterministic=deterministic, key_features=key_features)
+        features, key_features = self._extract_trunk_features(
+            input_dict, inject_noise=inject_noise, last_only=single_step
+        )
+        return self._outputs_from_features(features, key_features, deterministic, last_only=single_step)
+
+    def forward_encoded(self, tokens, key_features=None, deterministic=False):
+        """Predict the newest step from cached :meth:`encode_frames` outputs, shapes ``[B, T, ...]``.
+
+        Equals ``forward_with_aux(inputs, single_step=True)`` for the same window, up to floating-point roundoff.
+        """
+        features = self._trunk(tokens, last_only=True)
+        return self._outputs_from_features(features, key_features, deterministic, last_only=True)
+
+    def _outputs_from_features(self, features, key_features, deterministic, last_only):
+        state_prediction = self._decode_state(
+            features, deterministic=deterministic, key_features=key_features, last_only=last_only
+        )
         auxiliary_predictions = {}
         if self.predict_body_net_contact_forces:
             force_prediction = self.body_net_contact_force_head(
@@ -577,12 +602,6 @@ class ModelMixedInput(nn.Module):
             auxiliary_predictions[RAW_KEY] = force
             auxiliary_predictions[LOGITS_KEY] = logits
             auxiliary_predictions[LABEL_KEY] = torch.where((logits > 0).unsqueeze(-1), force, torch.zeros_like(force))
-
-        if single_step:
-            state_prediction = state_prediction[:, -1:, :]
-            auxiliary_predictions = {
-                name: prediction[:, -1:, ...] for name, prediction in auxiliary_predictions.items()
-            }
 
         return ModelMixedInputOutput(
             state_prediction=state_prediction,

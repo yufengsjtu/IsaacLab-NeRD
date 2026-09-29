@@ -195,6 +195,22 @@ def test_key_head_assembles_robot_and_pooled_key_outputs_in_original_order():
         torch.testing.assert_close(state[..., keys], mean[keys].mean().expand_as(state[..., keys]))
 
 
+@pytest.mark.parametrize("steps", [1, 2, 4])
+def test_key_head_single_step_and_encoded_paths_match_the_full_window(steps):
+    model, inputs, _, _ = make_key_head_model()
+    window = {k: v[:, :steps].clone() for k, v in inputs.items()}
+    with torch.inference_mode():
+        full = model({k: v.clone() for k, v in window.items()}, return_aux=True)
+        single = model({k: v.clone() for k, v in window.items()}, return_aux=True, single_step=True)
+        tokens, key_features = model.encode_frames({k: v.clone() for k, v in window.items()})
+        encoded = model.forward_encoded(tokens, key_features)
+    for output in (single, encoded):
+        torch.testing.assert_close(output.state_prediction, full.state_prediction[:, -1:], atol=1e-6, rtol=1e-5)
+        assert output.auxiliary_predictions.keys() == full.auxiliary_predictions.keys()
+        for name, value in output.auxiliary_predictions.items():
+            torch.testing.assert_close(value, full.auxiliary_predictions[name][:, -1:], atol=1e-6, rtol=1e-5)
+
+
 def test_key_head_assembles_fp32_state_under_reduced_precision_autocast():
     model, inputs, _, _ = make_key_head_model()
     reference = model({k: v.clone() for k, v in inputs.items()})

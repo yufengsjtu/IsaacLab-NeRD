@@ -462,6 +462,13 @@ class NeuralSolver(SolverBase):
         if not callable(forward_with_aux):
             raise TypeError("Auxiliary force prediction requires a callable forward_with_aux() on the neural model.")
         model_output = cast("ModelMixedInputOutput", forward_with_aux(model_inputs, single_step=True))
+        self._publish_auxiliary_predictions(model_output)
+        return model_output.state_prediction
+
+    def _publish_auxiliary_predictions(self, model_output: "ModelMixedInputOutput") -> None:
+        """Copy the newest-step auxiliary force predictions into the solver's online caches."""
+        finger_forces = getattr(self, "predicted_finger_object_normal_forces_b", None)
+        robot_forces = getattr(self, "predicted_robot_net_normal_forces_w", None)
         if self.predicted_body_net_contact_forces_b is not None:
             predicted_forces = model_output.auxiliary_predictions["body_net_contact_forces_b"]
             self.predicted_body_net_contact_forces_b.copy_(predicted_forces[:, -1])
@@ -475,7 +482,6 @@ class NeuralSolver(SolverBase):
             if prediction.shape != robot_forces.shape or not torch.isfinite(prediction).all():
                 raise ValueError("Robot normal-force prediction must be finite [B, 7, 3].")
             robot_forces.copy_(prediction)
-        return model_output.state_prediction
 
     def _model_forward(self, model_inputs):
         """Run the neural-model inference path for the current solver."""
