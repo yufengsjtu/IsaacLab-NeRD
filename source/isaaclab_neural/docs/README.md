@@ -238,74 +238,43 @@ A later randomized-scene pilot (since removed) also had substantial 16-frame sta
 and key-event errors. Neither pilot was task-fidelity-qualified for PPO training or
 simulation speed comparisons.
 
-### Position-scale diagnostics
+### Keyboard model and loss (K recipe)
 
-Keyboard training accepts two optional physical-unit loss scales under
-`algorithm.loss`: `keyboard_key_position_scale_m` and
-`keyboard_robot_position_scale_rad`. Both default to `null`, preserving the
-baseline variance-weighted loss. A key scale replaces only the key-position
-weights; the optional robot scale replaces the remaining scalar position
-weights. Velocity weights, output normalization and force losses are unchanged.
-The override is applied after checkpoint training-state restoration and saved in
-both the configuration and loss weights. These are optimization scales, not
-acceptance tolerances, joint clamps, or injected target states.
+Both SO101 recipes (`transformer_keyboard_throughput.yaml` for OSMO and
+`transformer_keyboard_small.yaml` for local runs) use the only configuration that
+matched native closed-loop typing:
 
-A controlled diagnostic configuration uses 0.1 mm key-position and 1 mrad robot
-position scales, with the same small network and datasets:
+- `network.key_head`: the Transformer trunk sees robot coordinates, robot `joint_f`,
+  gravity, non-key contact latents and an order-independent sum over per-key
+  features. One decoder with shared parameters predicts each key's position and
+  velocity change from the trunk context, that key's last `history_steps` states and
+  contact latent, and a learned key embedding. Key inputs and outputs use statistics
+  pooled over all keys; outputs are scattered back into the original prediction order,
+  so the solver interface is unchanged. It requires the `shared_per_body` contact
+  encoder, identity low-dim inputs `[states_embedding, joint_f, gravity_dir]`, output
+  normalization and full history windows (feature/KV caches are rejected).
+  `key_q_start`, `num_keys` and `key_body_slot_start` are checked against the
+  recorded joint and body names.
+- `keyboard_state_group_weights: {robot: 0.5, key: 0.5}`: replaces the plain mean over
+  228 coordinates, where 216 key coordinates dominated the six-joint arm, with
+  `0.5 * mean(robot q/qd) + 0.5 * mean(key q/qd)`. Requires the MSE loss.
+- `keyboard_key_position_scale_m: 0.0002`: key-position weights use a 0.2 mm physical
+  scale instead of variance weights truncated by the `1e-5` floor. The optional
+  `keyboard_robot_position_scale_rad` stays `null`.
+- `keyboard_key_velocity_weighting: pooled`: all key velocity changes share one weight
+  from statistics pooled over keys, matching the shared decoder.
 
-```bash
-uv run python -m isaaclab_neural.train.train \
-  --task IsaacContrib-Keyboard-SO101-NeRD \
-  --cfg source/isaaclab_neural/isaaclab_neural/train/cfg/SO101/transformer_keyboard_small.yaml \
-  --num-envs 8 --device cuda:0 --visualizer none --eval-interval 0 \
-  --save-interval 100 --logdir logs/keyboard_poc/balanced_diagnostic \
-  --cfg-overrides 'algorithm.num_epochs 100 algorithm.loss.keyboard_key_position_scale_m 0.0001 algorithm.loss.keyboard_robot_position_scale_rad 0.001'
-```
+Loss overrides are applied after checkpoint training-state restoration and recomputed
+on every start, so resuming does not compound them. Training logs
+`<group>_weighted_state_MSE` for `robot_q`, `robot_qd`, `key_q` and `key_qd`.
 
-### State-group loss balance
-
-The variance-weighted state loss averages all 228 SO101 coordinates, so the 216
-key coordinates dominate the six-joint arm. The optional
-`algorithm.loss.keyboard_state_group_weights: {robot: w_r, key: w_k}` replaces the
-plain mean with `w_r * mean(robot q/qd) + w_k * mean(key q/qd)`, independent of
-group sizes. It defaults to `null` (unchanged objective), requires the MSE loss,
-keeps per-coordinate variance weights and force losses, and is read from the
-configuration on every start, including resumes. `{robot: 1.0, key: 0.0}` is a
-diagnostic that leaves key predictions unsupervised.
-
-Training also logs `<group>_weighted_state_MSE` for `robot_q`, `robot_qd`, `key_q`
-and `key_qd`. With variance weights, values near one mean the group is predicted
-no better than its mean change; key positions below the `1e-5` variance floor are
-down-weighted and read low regardless of accuracy.
-
-### Factorized key head
-
-`network.key_head` (default absent/disabled) splits the SO101 state model. The
-Transformer trunk sees robot coordinates, robot `joint_f`, gravity, non-key contact
-latents and an order-independent sum over per-key features. One key decoder with
-shared parameters predicts each key's position and velocity change from the trunk
-context, that key's last `history_steps` states and contact latent, and a learned
-key embedding. Key inputs and outputs use statistics pooled over all keys. Outputs
-are scattered back into the original prediction order, so the solver interface is
-unchanged. It requires the `shared_per_body` contact encoder, identity low-dim
-inputs `[states_embedding, joint_f, gravity_dir]`, output normalization and full
-history windows (feature/KV caches are rejected). `key_q_start`, `num_keys` and
-`key_body_slot_start` are checked against the recorded joint and body names.
-
-Two optional losses accompany it: `keyboard_key_velocity_weighting: pooled` gives
-all key velocity changes one variance weight, and `keyboard_key_event_weighting:
-{weight, position_threshold_m, velocity_threshold_m_s}` multiplies coordinates of
-keys whose recorded state changes (it did not help in 2026-09 ablations).
-
-`SO101/transformer_keyboard_formal_key_head.yaml` (OSMO preset
-`so101_keyboard_formal_key_head`) combines the key head, pooled key-velocity weights,
-0.2 mm key-position scale and 0.5/0.5 robot/key groups on the full 10M/3M fixed-v2 data.
-On 8x L40 (2026-09-29), `model_epoch99.pt` reached 94.7% closed-loop typing success
-under `eval/keyboard_policy.py --nerd-checkpoint` (3 seeds x 64 worlds), matching native
-MJWarp's 94.7%; the same recipe without the key head fell to 4.2% through arm-velocity
-terminations. Short local runs (9k updates) ranked these the other way, and the
-best-validation checkpoint (Epoch 51, 87.4%) was worse than Epoch 99 because the force
-head overfit, so select checkpoints by closed-loop evaluation.
+On 8x L40 with the full 10M/3M fixed-v2 data (preset `so101_keyboard_resident_unique`,
+2026-09-29), `model_epoch99.pt` reached 94.7% closed-loop typing success under
+`eval/keyboard_policy.py --nerd-checkpoint` (3 seeds x 64 worlds), matching native
+MJWarp's 94.7%. The same objective without the key head fell to 4.2% through
+arm-velocity terminations, and short local runs (9k updates) ranked the two the other
+way. The best-validation checkpoint (Epoch 51, 87.4%) was worse than Epoch 99 because
+the force head overfit, so select checkpoints by closed-loop evaluation.
 
 Training logs separate robot/key position and velocity errors in physical units.
 Checkpoint rollout reports include per-frame error curves, true/false pressed

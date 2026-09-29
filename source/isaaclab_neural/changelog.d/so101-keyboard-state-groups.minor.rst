@@ -3,16 +3,22 @@ Added
 
 * Added optional ``algorithm.loss.keyboard_state_group_weights`` for SO101 Keyboard
   training, balancing robot and key state-loss groups independently of their
-  coordinate counts. The default ``null`` retained the existing variance-weighted
-  mean; per-coordinate weights and force losses were unchanged.
+  coordinate counts. Per-coordinate weights and force losses were unchanged.
 * Added per-group variance-weighted state errors (``robot_q``, ``robot_qd``,
   ``key_q``, ``key_qd``) to Keyboard training and validation logs.
 * Added an optional factorized ``network.key_head`` for SO101 Keyboard models: a
   Transformer trunk over robot state and a key summary, plus one shared per-key decoder
   using pooled key statistics. Outputs retained the original prediction order and solver
   interface; models without the key head and existing checkpoints were unchanged.
-* Added optional ``keyboard_key_velocity_weighting: pooled`` and
-  ``keyboard_key_event_weighting`` Keyboard state losses. Defaults kept the previous objective.
-* Added the ``SO101/transformer_keyboard_formal_key_head.yaml`` recipe and the
-  ``so101_keyboard_formal_key_head`` OSMO preset (key head, pooled key-velocity weights,
-  0.2 mm key-position scale, balanced groups, eager full-data loading).
+* Added optional ``keyboard_key_velocity_weighting: pooled`` Keyboard state-loss weights.
+
+Changed
+^^^^^^^
+
+* Changed both SO101 Keyboard recipes (``transformer_keyboard_throughput.yaml`` and
+  ``transformer_keyboard_small.yaml``) to the key head with balanced robot/key groups,
+  a 0.2 mm key-position scale and pooled key-velocity weights, the only configuration
+  that matched native closed-loop typing. The throughput recipe also switched to eager
+  loading with zero workers, and both ``so101_keyboard_resident_unique`` presets moved to
+  ``ovx-l40``. Checkpoints trained with the previous recipes cannot resume with the new
+  network; train a new model or pass the previous configuration explicitly.

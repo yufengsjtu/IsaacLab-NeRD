@@ -272,35 +272,6 @@ def keyboard_pooled_key_velocity_weights(
     return result
 
 
-def keyboard_key_event_weights(
-    target: torch.Tensor,
-    *,
-    num_q: int,
-    key_q_indices: list[int],
-    weight: float,
-    position_threshold_m: float = 1.0e-5,
-    velocity_threshold_m_s: float = 0.02,
-) -> torch.Tensor:
-    """Return per-coordinate loss multipliers that up-weight keys whose recorded state changes.
-
-    A key is an event when its target position change exceeds ``position_threshold_m`` [m] or its velocity
-    change exceeds ``velocity_threshold_m_s`` [m/s]; both of its coordinates receive ``weight``. Robot
-    coordinates and idle keys keep a multiplier of one. Only the supervised target is used, not predictions.
-    """
-    values = (float(weight), float(position_threshold_m), float(velocity_threshold_m_s))
-    if not all(np.isfinite(value) and value > 0 for value in values) or values[0] < 1.0:
-        raise ValueError("Key event weighting requires finite thresholds and a weight of at least one.")
-    if target.shape[-1] != 2 * num_q:
-        raise ValueError("Key event weighting requires fixed-base scalar joint coordinates.")
-    keys = torch.as_tensor(key_q_indices, device=target.device)
-    event = (target[..., keys].abs() > values[1]) | (target[..., keys + num_q].abs() > values[2])
-    multiplier = torch.ones_like(target)
-    key_weight = 1.0 + (values[0] - 1.0) * event.to(target.dtype)
-    multiplier[..., keys] = key_weight
-    multiplier[..., keys + num_q] = key_weight
-    return multiplier
-
-
 def validate_keyboard_key_head_layout(key_head: Any, metadata: dict[str, Any]) -> None:
     """Require the key head's joint and contact-slot ranges to name the same recorded keys."""
     joints = [name for asset in metadata["asset_order"] for name in metadata["joint_names"][asset]]
@@ -627,32 +598,18 @@ class VanillaTrainer:
         does not compound them.
         """
         self.state_loss_group_scale = None
-        self.key_event_weighting = None
         key_position_scale = loss_cfg.get("keyboard_key_position_scale_m")
         robot_position_scale = loss_cfg.get("keyboard_robot_position_scale_rad")
         velocity_weighting = loss_cfg.get("keyboard_key_velocity_weighting", "per_coordinate")
         group_weights = loss_cfg.get("keyboard_state_group_weights")
-        event_weighting = loss_cfg.get("keyboard_key_event_weighting")
         if velocity_weighting not in ("per_coordinate", "pooled"):
             raise ValueError("keyboard_key_velocity_weighting must be 'per_coordinate' or 'pooled'.")
         if robot_position_scale is not None and key_position_scale is None:
             raise ValueError("Keyboard robot position scaling requires an explicit key position scale.")
-        overrides = (key_position_scale, group_weights, event_weighting)
-        if all(value is None for value in overrides) and velocity_weighting == "per_coordinate":
+        if key_position_scale is None and group_weights is None and velocity_weighting == "per_coordinate":
             return
         if not self.robot_force_head_enabled or not isinstance(self.loss_weights, torch.Tensor):
             raise ValueError("Keyboard loss overrides require the keyboard contract and weighted loss.")
-        if event_weighting is not None:
-            allowed = {"weight", "position_threshold_m", "velocity_threshold_m_s"}
-            if (
-                not isinstance(event_weighting, dict)
-                or "weight" not in event_weighting
-                or set(event_weighting) - allowed
-            ):
-                raise ValueError(f"keyboard_key_event_weighting accepts {sorted(allowed)} and requires 'weight'.")
-            if not isinstance(self.loss_func, torch.nn.MSELoss):
-                raise ValueError("Keyboard key event weighting requires the MSE loss.")
-            self.key_event_weighting = dict(event_weighting)
         metadata = self.cfg["keyboard_dataset_contracts"]["train"]
         layout = {"num_q": metadata["num_q"], "key_q_indices": metadata["key_q_indices"]}
         if key_position_scale is not None:
@@ -1368,21 +1325,12 @@ class VanillaTrainer:
                 if key != SUPERVISION_MASK
             }
         group_scale = getattr(self, "state_loss_group_scale", None)
-        event_cfg = getattr(self, "key_event_weighting", None)
-        if group_scale is None and event_cfg is None:
+        if group_scale is None:
             loss = self.loss_func(prediction * self.loss_weights, prediction_target * self.loss_weights)
         else:
-            if group_scale is not None and prediction.shape[-1] != group_scale.numel():
+            if prediction.shape[-1] != group_scale.numel():
                 raise ValueError("Keyboard state group weights require scalar joint prediction coordinates.")
-            squared = ((prediction - prediction_target) * self.loss_weights).square()
-            if group_scale is not None:
-                squared = squared * group_scale
-            if event_cfg is not None:
-                metadata = self.cfg["keyboard_dataset_contracts"]["train"]
-                squared = squared * keyboard_key_event_weights(
-                    prediction_target, num_q=metadata["num_q"], key_q_indices=metadata["key_q_indices"], **event_cfg
-                )
-            loss = squared.mean()
+            loss = (((prediction - prediction_target) * self.loss_weights).square() * group_scale).mean()
         force_prediction = None
         force_target = None
         force_loss = None

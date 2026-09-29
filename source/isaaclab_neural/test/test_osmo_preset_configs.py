@@ -290,7 +290,13 @@ def test_keyboard_recipe_is_fixed_owner_frame_and_matches_franka_training_scale(
         assert cfg["inputs"]["contact_set"][key] == franka["inputs"]["contact_set"][key]
     assert solver["num_states_history"] == cfg["algorithm"]["sample_sequence_length"] == 10
     assert cfg["env"]["num_envs"] == exp["train_num_envs"] == 8
-    assert cfg["algorithm"]["dataset"]["load_mode"] == "lazy"
+    dataset = cfg["algorithm"]["dataset"]
+    assert (dataset["load_mode"], dataset["num_data_workers"]) == ("eager", 0)
+    # The K recipe: the only configuration that matched native closed-loop typing.
+    assert cfg["network"]["key_head"]["enabled"]
+    assert cfg["algorithm"]["loss"]["keyboard_state_group_weights"] == {"robot": 0.5, "key": 0.5}
+    assert cfg["algorithm"]["loss"]["keyboard_key_position_scale_m"] == 0.0002
+    assert cfg["algorithm"]["loss"]["keyboard_key_velocity_weighting"] == "pooled"
     assert exp["minimum_unique_transitions"] == {"train": 10_000_000, "valid": 3_000_000}
     for split, minimum in exp["minimum_unique_transitions"].items():
         specs = [item for item in exp["dataset_specs"] if item["split"] == split]
@@ -302,18 +308,23 @@ def test_keyboard_model_forward_backward_on_cpu():
 
     import torch
     from isaaclab_neural.models.models import ModelMixedInput
+    from isaaclab_neural.utils.running_mean_std import RunningMeanStd
 
     preset = _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique.yaml")
     cfg = _load_yaml(REPOSITORY_ROOT / preset["experiment"]["train_cfg"])
     network = copy.deepcopy(cfg["network"])
-    network["normalize_input"] = network["normalize_output"] = False
     sample = {
         key: torch.zeros(2, 10, width)
         for key, width in {"states_embedding": 228, "joint_f": 114, "gravity_dir": 3}.items()
     }
     sample["contact_tokens"] = torch.zeros(2, 10, 128, 17)
     model = ModelMixedInput(sample, 228, cfg["inputs"], network, num_bodies=116, device="cpu")
-    output = model(sample, return_aux=True)
+    assert model.key_head is not None
+    # The key head decodes with pooled output statistics, so it requires normalization buffers.
+    model.set_input_rms({key: RunningMeanStd(shape=(value.shape[-1],), device="cpu") for key, value in sample.items()})
+    model.set_output_rms(RunningMeanStd(shape=(228,), device="cpu"))
+    model.set_robot_net_normal_force_rms(RunningMeanStd(shape=(7, 3), device="cpu"))
+    output = model(copy.copy(sample), return_aux=True)
     assert output.state_prediction.shape == (2, 10, 228)
     assert output.auxiliary_predictions["robot_net_normal_forces_w"].shape == (2, 10, 7, 3)
     loss = output.state_prediction.square().mean() + sum(

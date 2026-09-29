@@ -13,7 +13,7 @@ resources:
   num_cpu: 20
   memory: 128Gi
   storage: 64Gi
-  platform: ovx-l40s
+  platform: ovx-l40
 experiment:
   training_only: false
   dataset_profile: so101_keyboard

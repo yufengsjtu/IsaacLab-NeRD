@@ -36,10 +36,12 @@ algorithm:
   loss:
     type: MSE
     beta: 0.0
-    keyboard_key_position_scale_m: null
+    keyboard_key_position_scale_m: 0.0002
     keyboard_robot_position_scale_rad: null
-    keyboard_state_group_weights: null
-    keyboard_key_velocity_weighting: per_coordinate
+    keyboard_state_group_weights:
+      robot: 0.5
+      key: 0.5
+    keyboard_key_velocity_weighting: pooled
     robot_net_normal_force:
       weight: 1.0
   optimizer:
@@ -69,6 +71,16 @@ inputs:
     max_other_bodies: 128
 
 network:
+  key_head:
+    enabled: true
+    key_q_start: 6
+    num_keys: 108
+    key_body_slot_start: 8
+    history_steps: 3
+    embed_dim: 4
+    summary_dim: 32
+    context_dim: 32
+    hidden_sizes: [64]
   robot_net_normal_force_head:
     enabled: true
   normalize_input: true

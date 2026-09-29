@@ -246,23 +246,6 @@ def test_pooled_key_velocity_weights_match_concatenated_samples_and_key_layout_i
         validate_keyboard_key_head_layout(model.key_head, metadata)
 
 
-def test_key_event_weights_select_changing_keys_from_targets_only():
-    from isaaclab_neural.train.trainers import keyboard_key_event_weights
-
-    target = torch.zeros(3, 8)
-    target[0, 2] = 2.0e-5  # key 2 position change
-    target[1, 7] = -0.05  # key 3 velocity change
-    target[2, [0, 4]] = 1.0  # robot-only changes
-    weights = keyboard_key_event_weights(target, num_q=4, key_q_indices=[2, 3], weight=5.0)
-    expected = torch.ones(3, 8)
-    expected[0, [2, 6]] = 5.0
-    expected[1, [3, 7]] = 5.0
-    torch.testing.assert_close(weights, expected)
-    for bad in ({"weight": 0.5}, {"weight": 2.0, "position_threshold_m": 0.0}, {"weight": float("nan")}):
-        with pytest.raises(ValueError, match="event weighting"):
-            keyboard_key_event_weights(target, num_q=4, key_q_indices=[2, 3], **bad)
-
-
 def test_robot_force_cache_reset_is_selective_and_cached_inference_is_rejected():
     from isaaclab_neural.solvers.neural_solver import NeuralSolver
 
