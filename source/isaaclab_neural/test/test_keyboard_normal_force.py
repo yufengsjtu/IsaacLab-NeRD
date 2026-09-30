@@ -528,3 +528,25 @@ def test_force_dataset_requires_keyboard_metadata(tmp_path):
         data.create_dataset(LABEL_KEY, data=torch.zeros(1, 2, 7, 3).numpy())
         with pytest.raises(ValueError, match="keyboard"):
             validate_force_metadata(data)
+
+
+def test_keyboard_policy_runner_is_built_outside_the_training_process_group(monkeypatch, tmp_path):
+    import isaaclab_neural.eval.keyboard_policy as keyboard_policy
+
+    import isaaclab_tasks.utils.hydra as hydra
+    import isaaclab_tasks.utils.parse_cfg as parse_cfg
+
+    seen = {}
+    monkeypatch.setattr(parse_cfg, "resolve_task_config", lambda *args, **kwargs: (None, object()))
+    monkeypatch.setattr(hydra, "resolve_presets", lambda agent, presets: agent)
+    monkeypatch.setattr(keyboard_policy, "load_saved_agent_cfg_for_policy", lambda *args, **kwargs: {})
+
+    def build(env, runner_cfg, checkpoint, device):
+        seen["world_size"] = keyboard_policy.os.environ.get("WORLD_SIZE")
+        return "policy"
+
+    monkeypatch.setattr(keyboard_policy, "build_policy_env", build)
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    assert keyboard_policy.load_keyboard_policy(None, tmp_path / "p.pt", device="cpu", seed=0) == "policy"
+    assert seen["world_size"] == "1"
+    assert keyboard_policy.os.environ["WORLD_SIZE"] == "8"

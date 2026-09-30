@@ -16,6 +16,7 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -83,7 +84,17 @@ def load_keyboard_policy(env: Any, checkpoint: Path, *, device: str, seed: int):
     _, agent = resolve_task_config(KEYBOARD_TASK, "rsl_rl_cfg_entry_point", overrides=[])
     agent = resolve_presets(agent, {"newton_mjwarp"})
     runner_cfg = load_saved_agent_cfg_for_policy(str(checkpoint), agent, device=device, seed=seed)
-    return build_policy_env(env, runner_cfg, str(checkpoint), device)
+    # The policy runs locally (on rank 0 during DDP training). RSL-RL infers distributed mode from
+    # WORLD_SIZE and would initialize the already-initialized default process group a second time.
+    world_size = os.environ.get("WORLD_SIZE")
+    os.environ["WORLD_SIZE"] = "1"
+    try:
+        return build_policy_env(env, runner_cfg, str(checkpoint), device)
+    finally:
+        if world_size is None:
+            os.environ.pop("WORLD_SIZE", None)
+        else:
+            os.environ["WORLD_SIZE"] = world_size
 
 
 def rollout_keyboard_policy(

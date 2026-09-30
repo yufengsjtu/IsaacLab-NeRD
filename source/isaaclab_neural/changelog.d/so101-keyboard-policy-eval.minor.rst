@@ -16,3 +16,10 @@ Added
 * Added ``isaaclab_neural.eval.keyboard_benchmark`` with ``model`` (model-only inference
   sweep) and ``env`` (policy-driven environment steps with physics and NeRD step-profile
   breakdowns) throughput modes.
+
+Fixed
+^^^^^
+
+* Fixed closed-loop typing evaluation during multi-GPU SO101 training failing on the first evaluation:
+  RSL-RL read ``WORLD_SIZE`` and initialized the default process group again while building the rank-0
+  typing-policy runner. The runner is now built with ``WORLD_SIZE=1``.
