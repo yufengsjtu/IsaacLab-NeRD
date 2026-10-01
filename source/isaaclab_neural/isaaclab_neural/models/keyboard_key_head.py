@@ -68,7 +68,7 @@ class KeyboardKeyHead(nn.Module):
         super().__init__()
         if output_dim % 2:
             raise ValueError("Keyboard key head requires scalar joints with equal position and velocity sizes.")
-        self.num_q = output_dim // 2
+        self.num_q = int(output_dim) // 2
         self.num_keys = int(cfg["num_keys"])
         key_start = int(cfg["key_q_start"])
         slot_start = int(cfg["key_body_slot_start"])

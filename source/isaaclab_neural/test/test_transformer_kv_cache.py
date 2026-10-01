@@ -515,6 +515,43 @@ def test_solver_frame_cache_matches_full_window_through_growth_eviction_and_row_
         torch.testing.assert_close(solver.predict(solver.get_neural_model_inputs()), expected, atol=1e-6, rtol=1e-5)
 
 
+def test_solver_compiles_only_fixed_shape_steady_stream_steps(monkeypatch):
+    model = _mixed_input_model("relative_lag", (3, 2))
+    solver = _frame_cache_solver(model, history=4)
+    solver.inference_compile = True
+    calls = []
+
+    def fake_compile(function, dynamic):
+        assert dynamic is False
+
+        def wrapped(*args, **kwargs):
+            calls.append(
+                (function.__name__, args[0]["observation"].shape if isinstance(args[0], dict) else args[0].shape)
+            )
+            return function(*args, **kwargs)
+
+        return wrapped
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    frames = torch.randn(2, 9, 6)
+    with torch.inference_mode():
+        for step in range(9):
+            solver.states_history.append({"observation": frames[:, step].clone()})
+            if step == 6:
+                for entry in solver.states_history:
+                    entry["observation"][0] = frames[0, step]
+                solver.rebuild_history_rows(torch.tensor([0]))
+            expected = model(
+                {"observation": torch.stack([entry["observation"] for entry in solver.states_history], dim=1)},
+                single_step=True,
+            )
+            torch.testing.assert_close(solver.predict(solver.get_neural_model_inputs()), expected, atol=1e-6, rtol=1e-5)
+    # The first frame builds the stream eagerly; every later frame runs both compiled callables on full batches.
+    assert [name for name, _ in calls] == ["encode_frames", "forward_stream"] * 8
+    assert all(shape[0] == 2 and shape[1] == 1 for _, shape in calls)
+    assert len(solver._compiled_inference) == 2
+
+
 def test_frame_cache_is_exclusive_with_other_caches():
     with pytest.raises(ValueError, match="mutually exclusive"):
         TransformerNeuralSolver(use_kv_cache=True, use_frame_cache=True)

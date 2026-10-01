@@ -78,6 +78,7 @@ class NeuralSolver(SolverBase):
         contact_filter: str = "none",
         contact_token_frame: str = "root",
         inference_precision: str = "fp32",
+        inference_compile: bool = False,
     ):
         """
         Args:
@@ -107,6 +108,8 @@ class NeuralSolver(SolverBase):
                 ``"owner"``. Defaults to ``"root"``.
             inference_precision: Matmul precision of online model inference on CUDA; one of
                 ``"fp32"``, ``"tf32"``, ``"fp16"`` or ``"bf16"`` (autocast). Defaults to ``"fp32"``.
+            inference_compile: Compile fixed-shape steady-state model steps with ``torch.compile`` where the
+                solver supports it (streaming frame-cached transformers). Defaults to False.
         """
         self.solver_name = name
         if model is None:
@@ -160,6 +163,7 @@ class NeuralSolver(SolverBase):
         if inference_precision not in INFERENCE_PRECISIONS:
             raise ValueError(f"inference_precision must be one of {INFERENCE_PRECISIONS}, got {inference_precision!r}.")
         self.inference_precision = inference_precision
+        self.inference_compile = bool(inference_compile)
         self.contact_adapter = contact_adapter
         self.primary_body_q = getattr(contact_adapter, "primary_body_q", None)
         adapter_contact_filter = getattr(contact_adapter, "contact_filter", "none")

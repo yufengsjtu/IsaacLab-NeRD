@@ -114,6 +114,14 @@ class NerdSolverCfg(NewtonSolverCfg):
     Training is unaffected.
     """
 
+    inference_compile: bool = False
+    """Whether to compile fixed-shape steady-state model steps with ``torch.compile`` during online inference.
+
+    Supported by streaming frame-cached ``TransformerNeuralSolver`` models. Compiled kernels fuse operations, so
+    predictions match eager inference up to floating-point roundoff; the first steps include compilation time.
+    Training is unaffected.
+    """
+
     reset_seq_length: int = 1
     """Step interval used by ``RNNNeuralSolver`` to reset recurrent hidden state."""
 

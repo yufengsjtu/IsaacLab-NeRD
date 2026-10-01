@@ -315,16 +315,22 @@ class TransformerNeuralSolver(NeuralSolver):
     def _model_forward_frame_cached(self, model_inputs):
         """Encode only the newest frame, reuse earlier frame encodings, and predict the newest step."""
         neural_model = self._require_neural_model()
-        tokens, key_features = neural_model.encode_frames(dict(model_inputs), inference=True)
+        streaming = bool(getattr(neural_model, "supports_streaming", False))
+        stream_cache = getattr(self, "stream_cache", None)
+        # Steady state: the cache stays aligned with the history after appending this frame (no full re-encode).
+        aligned = min(len(self.frame_cache) + 1, self.num_states_history) == len(self.states_history)
+        steady = streaming and stream_cache is not None and aligned
+        encode = neural_model.encode_frames
+        if steady:
+            encode = self._inference_callable("encode_frames", neural_model, encode)
+        tokens, key_features = encode(dict(model_inputs), inference=True)
         self.frame_cache.append((tokens[:, 0], None if key_features is None else key_features[:, 0]))
         rebuild_env_ids = self.frame_cache_rebuild_env_ids
         self.frame_cache_rebuild_env_ids = None
-        streaming = bool(getattr(neural_model, "supports_streaming", False))
         if streaming:
             spans = neural_model.transformer_model.config.attention_spans
             if sum(span - 1 for span in spans) + 1 > self.num_states_history:
                 raise ValueError("Streaming inference requires a receptive field within num_states_history.")
-        stream_cache = getattr(self, "stream_cache", None)
         if len(self.frame_cache) != len(self.states_history):
             stream_cache = None
             # Externally loaded history (e.g. preload_states_history): re-encode the complete window.
@@ -341,26 +347,49 @@ class TransformerNeuralSolver(NeuralSolver):
                 frame_tokens.index_copy_(0, rebuild_env_ids, row_tokens[:, step])
                 if frame_keys is not None and row_keys is not None:
                     frame_keys.index_copy_(0, rebuild_env_ids, row_keys[:, step])
-        window_tokens = torch.stack([frame[0] for frame in self.frame_cache], dim=1)
-        window_keys = None if key_features is None else torch.stack([frame[1] for frame in self.frame_cache], dim=1)
         if not streaming:
-            output = neural_model.forward_encoded(window_tokens, window_keys)
+            output = neural_model.forward_encoded(*self._frame_window())
         elif stream_cache is None:
-            output, self.stream_cache = neural_model.build_stream(window_tokens, window_keys)
+            output, self.stream_cache = neural_model.build_stream(*self._frame_window())
         else:
-            # Each layer attends only to its cached cone; reset rows rebuild their cone from the window.
-            output = neural_model.forward_stream(tokens, window_keys, stream_cache)
+            # Each layer attends only to its cached cone; the key head reads only its recent key frames.
+            key_head = getattr(neural_model, "key_head", None)
+            recent = None if key_head is None else self._frame_window(last=key_head.history_steps)[1]
+            forward_stream = neural_model.forward_stream
+            if steady:
+                forward_stream = self._inference_callable("forward_stream", neural_model, forward_stream)
+            output = forward_stream(tokens, recent, stream_cache)
             if rebuild_env_ids is not None and rebuild_env_ids.numel() > 0:
-                row_output, row_cache = neural_model.build_stream(
-                    window_tokens.index_select(0, rebuild_env_ids),
-                    None if window_keys is None else window_keys.index_select(0, rebuild_env_ids),
-                )
+                # Reset rows rebuild their cone from the window.
+                row_output, row_cache = neural_model.build_stream(*self._frame_window(rows=rebuild_env_ids))
                 stream_cache.copy_rows_from(row_cache, rebuild_env_ids)
                 output.state_prediction.index_copy_(0, rebuild_env_ids, row_output.state_prediction)
                 for name, value in output.auxiliary_predictions.items():
                     value.index_copy_(0, rebuild_env_ids, row_output.auxiliary_predictions[name])
         self._publish_auxiliary_predictions(output)
         return output.state_prediction
+
+    def _frame_window(self, *, last: int | None = None, rows: torch.Tensor | None = None):
+        """Stack cached frame encodings ``[B, T, ...]``, optionally only the newest ``last`` frames or given rows."""
+        frames = list(self.frame_cache)[-last:] if last is not None else list(self.frame_cache)
+        select = (lambda value: value) if rows is None else (lambda value: value.index_select(0, rows))
+        tokens = torch.stack([select(frame[0]) for frame in frames], dim=1)
+        keys = None if frames[0][1] is None else torch.stack([select(frame[1]) for frame in frames], dim=1)
+        return tokens, keys
+
+    def _inference_callable(self, name: str, neural_model, function):
+        """Return ``function``, or its ``torch.compile`` version when ``inference_compile`` is enabled.
+
+        Only fixed-shape steady-state stream steps use compiled callables; window builds and reset-row rebuilds
+        stay eager so changing reset counts never trigger recompilation.
+        """
+        if not getattr(self, "inference_compile", False):
+            return function
+        compiled = self.__dict__.setdefault("_compiled_inference", {})
+        key = (name, id(neural_model))
+        if key not in compiled:
+            compiled[key] = torch.compile(function, dynamic=False)
+        return compiled[key]
 
     def _model_forward(self, model_inputs):
         if getattr(self, "use_frame_cache", False):

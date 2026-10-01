@@ -197,6 +197,12 @@ def main() -> None:
         choices=("fp32", "tf32", "fp16", "bf16"),
         help="Override the checkpoint's NeRD online inference precision.",
     )
+    parser.add_argument(
+        "--inference-compile",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override the NeRD inference_compile option (torch.compile of steady-state stream steps).",
+    )
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--reset-mode", choices=("training", "uniform"), default="uniform")
     parser.add_argument("--reset_ik_iters", type=int, help="Override reset IK iterations for a diagnostic comparison.")
@@ -282,6 +288,8 @@ def main() -> None:
             solver_cfg.use_frame_cache = args.frame_cache
         if args.inference_precision is not None:
             solver_cfg.inference_precision = args.inference_precision
+        if args.inference_compile is not None:
+            solver_cfg.inference_compile = args.inference_compile
         solver_cfg.neural_model_path = str(args.nerd_checkpoint.resolve())
         teacher = cfg.sim.physics
         cfg.sim.physics = NerdNewtonCfg(

@@ -30,3 +30,10 @@ Changed
   frames, with token geometry equal up to FP32 roundoff (max 4.8e-7); adapter time per control step at 8192
   worlds fell from about 84 to 34 ms on a shared GPU. ``native_contact_pairs()`` raises in this mode; data
   collection keeps the default ``True``.
+* Added ``NerdSolverCfg.inference_compile`` (``--inference-compile`` in the keyboard evaluation and benchmark
+  tools). Streaming frame-cached transformers compile their fixed-shape steady-state frame encoding and stream
+  step with ``torch.compile``; window builds and reset-row rebuilds stay eager. Mean closed-loop FP16 error
+  against an FP32 reference stayed at FP16 level (state 1.3e-5, force 7.2e-5 N); model time per control step at
+  8192 SO101 worlds fell by about 35%. The first steps include compilation time. Defaults to False.
+* Changed streaming frame-cached steps to stack only the key-feature frames the key head reads and to gather
+  reset rows before stacking, instead of materializing the whole history window every frame.
