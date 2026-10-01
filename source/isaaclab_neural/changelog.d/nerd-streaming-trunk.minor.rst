@@ -7,5 +7,14 @@ Added
   step (``GPT.build_stream_cache`` / ``forward_stream``), matching full-window inference up to FP32
   roundoff; reset rows rebuild their cone from the cached window. The receptive field must fit within
   ``num_states_history``. Checkpoints with other position encodings are unchanged.
-* Added the ``transformer_keyboard_stream.yaml`` SO101 recipe (K recipe with spans ``[3, 3, 3, 2, 2, 2]``)
-  and the ``so101_keyboard_stream`` OSMO preset. It trains a new model; K checkpoints cannot be resumed with it.
+
+Changed
+^^^^^^^
+
+* Changed both SO101 Keyboard recipes to the streaming trunk (spans ``[3, 3, 3, 2, 2, 2]`` in
+  ``transformer_keyboard_throughput.yaml``, ``[3, 2]`` in ``transformer_keyboard_small.yaml``) with the frame
+  cache and ``inference_precision: fp16``. The streaming model matched K closed loop (95.5% best checkpoint,
+  95.3% with FP16, versus 95.2-95.5% for K) and ran 44.1k control steps/s at 8192 worlds (MJWarp 52.3k).
+  **Migration:** checkpoints from the earlier learned-absolute K recipe still load and evaluate (add
+  ``--frame-cache`` for faster inference), but cannot be resumed with the new recipes; train a new model
+  or pass the old configuration explicitly.

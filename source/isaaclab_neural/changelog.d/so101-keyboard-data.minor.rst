@@ -13,7 +13,7 @@ Added
   for PPO training or simulation speed comparisons.
 * Added explicit dynamics-frame timing overrides to training adapters while
   preserving the control-frame fallback for existing environments.
-* Added optional physical-unit keyboard and robot position loss scales without
+* Added an optional physical-unit key position loss scale without
   changing legacy defaults or velocity weights, plus grouped training errors and
   per-frame rollout error curves, key-state confusion counts, and scoring coverage.
 * Added native keyboard policy evaluation with explicit reset-IK comparisons,

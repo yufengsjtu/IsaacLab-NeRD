@@ -229,8 +229,9 @@ and train a new model.
 Two presets remain:
 
 - `so101_keyboard_resident_unique`: eight resident 1024-world collectors, then
-  eight-rank training with the K recipe (`SO101/transformer_keyboard_throughput.yaml`:
-  shared key head, balanced robot/key loss groups, eager loading) on `ovx-l40`.
+  eight-rank training with `SO101/transformer_keyboard_throughput.yaml` (shared key
+  head, balanced robot/key loss groups, streaming `relative_lag` trunk, frame cache, FP16
+  inference, eager loading) on `ovx-l40`.
   Cache prefix: `so101-keyboard-fixed-v2`.
 - `so101_keyboard_resident_unique_smoke`: the same model and entry point on two
   GPUs, with 16,384/8,192 unique train/validation targets and two epochs of two

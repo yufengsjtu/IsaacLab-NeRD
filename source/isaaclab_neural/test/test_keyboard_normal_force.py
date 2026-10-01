@@ -400,19 +400,9 @@ def test_keyboard_position_loss_scale_changes_only_key_position_coordinates():
     torch.testing.assert_close(scaled[[2, 3]], torch.full((2,), 10000.0))
     torch.testing.assert_close(scaled[[0, 1, 4, 5, 6, 7]], weights[[0, 1, 4, 5, 6, 7]])
     torch.testing.assert_close(weights, torch.arange(1, 9, dtype=torch.float32))
-    balanced = keyboard_position_loss_weights(
-        weights, num_q=4, key_q_indices=[2, 3], scale_m=0.0001, robot_scale_rad=0.001
-    )
-    torch.testing.assert_close(balanced[:2], torch.full((2,), 1000.0))
-    torch.testing.assert_close(balanced[2:4], torch.full((2,), 10000.0))
-    torch.testing.assert_close(balanced[4:], weights[4:])
     for scale in (0.0, -1.0, float("nan"), float("inf")):
         with pytest.raises(ValueError, match="scale"):
             keyboard_position_loss_weights(weights, num_q=4, key_q_indices=[2, 3], scale_m=scale)
-        with pytest.raises(ValueError, match="scale"):
-            keyboard_position_loss_weights(
-                weights, num_q=4, key_q_indices=[2, 3], scale_m=0.0001, robot_scale_rad=scale
-            )
     with pytest.raises(ValueError, match="indices"):
         keyboard_position_loss_weights(weights, num_q=4, key_q_indices=[4], scale_m=0.0001)
 

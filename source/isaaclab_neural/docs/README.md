@@ -238,11 +238,12 @@ A later randomized-scene pilot (since removed) also had substantial 16-frame sta
 and key-event errors. Neither pilot was task-fidelity-qualified for PPO training or
 simulation speed comparisons.
 
-### Keyboard model and loss (K recipe)
+### Keyboard model, loss and inference
 
 Both SO101 recipes (`transformer_keyboard_throughput.yaml` for OSMO and
-`transformer_keyboard_small.yaml` for local runs) use the only configuration that
-matched native closed-loop typing:
+`transformer_keyboard_small.yaml` for local runs) use the K model and losses, the
+configuration that matched native closed-loop typing, with a streaming trunk and FP16
+inference:
 
 - `network.key_head`: the Transformer trunk sees robot coordinates, robot `joint_f`,
   gravity, non-key contact latents and an order-independent sum over per-key
@@ -252,17 +253,31 @@ matched native closed-loop typing:
   pooled over all keys; outputs are scattered back into the original prediction order,
   so the solver interface is unchanged. It requires the `shared_per_body` contact
   encoder, identity low-dim inputs `[states_embedding, joint_f, gravity_dir]`, output
-  normalization and full history windows (feature/KV caches are rejected).
+  normalization and full history windows (the feature/KV caches are rejected; the frame
+  cache below is supported).
   `key_q_start`, `num_keys` and `key_body_slot_start` are checked against the
   recorded joint and body names.
 - `keyboard_state_group_weights: {robot: 0.5, key: 0.5}`: replaces the plain mean over
   228 coordinates, where 216 key coordinates dominated the six-joint arm, with
   `0.5 * mean(robot q/qd) + 0.5 * mean(key q/qd)`. Requires the MSE loss.
 - `keyboard_key_position_scale_m: 0.0002`: key-position weights use a 0.2 mm physical
-  scale instead of variance weights truncated by the `1e-5` floor. The optional
-  `keyboard_robot_position_scale_rad` stays `null`.
+  scale instead of variance weights truncated by the `1e-5` floor.
 - `keyboard_key_velocity_weighting: pooled`: all key velocity changes share one weight
   from statistics pooled over keys, matching the shared decoder.
+- `network.transformer.position_encoding: relative_lag` with `attention_spans`
+  (`[3, 3, 3, 2, 2, 2]` for six layers): layer `l` attends only to lags `0..span-1` with a
+  learned per-head lag bias, so the receptive field `sum(span - 1) + 1` equals
+  `num_states_history`. Training uses the same banded masks, and inference streams one
+  new position per layer and physics frame, matching full-window evaluation up to FP32
+  roundoff.
+- `neural_solver_cfg.use_frame_cache: true`: only the newest frame is preprocessed and
+  encoded each physics frame; earlier encodings, per-layer keys and values are reused,
+  and reset rows rebuild their cone from the cached window. Heads decode only the newest
+  step.
+- `neural_solver_cfg.inference_precision: fp16`: CUDA autocast for online inference
+  only (training stays FP32). `keyboard_policy` and `keyboard_benchmark env` accept
+  `--inference-precision` and `--frame-cache/--no-frame-cache` to override a
+  checkpoint's settings.
 
 Loss overrides are applied after checkpoint training-state restoration and recomputed
 on every start, so resuming does not compound them. Training logs
@@ -276,6 +291,15 @@ arm-velocity terminations, and short local runs (9k updates) ranked the two the 
 way. The best-validation checkpoint (Epoch 51, 87.4%) was worse than Epoch 99 because
 the force head overfit, so select checkpoints by closed-loop evaluation.
 
+The streaming recipe (2026-10-01, same data and platform) matched K epoch for epoch on
+validation metrics. Offline closed loop gave 95.5% for its best in-training-eval
+checkpoint (Epoch 249; 95.3% with FP16 inference) versus 95.2-95.5% for K Epochs
+99/299/699 and 94.7% native. At 8192 worlds on an idle RTX PRO 5000 Blackwell it ran
+44.1k control steps/s with FP16 (MJWarp 52.3k; K with FP16 and the frame cache 31.3k;
+the original K implementation 7.1k). Checkpoints trained with the earlier
+learned-absolute trunk still load and run with the frame cache, but cannot be resumed
+with these recipes.
+
 ### In-training closed-loop evaluation
 
 The throughput recipe sets `algorithm.eval.mode: keyboard_policy` with `interval: 5`.
@@ -286,7 +310,8 @@ each evaluation reseeds a forked RNG from `seed + epoch`. W&B receives
 `eval_closed_loop/success_rate` and the rates of `excessive_contact`, `abnormal_robot`,
 `timeout_no_key`, `timeout_wrong_key` and `timeout_incomplete`, the same exclusive
 categories `eval/keyboard_policy.py` reports, plus episode counts and lengths. The best
-success rate saves and uploads `best_eval_model.pt`. Loading K Epoch 99 into the
+success rate saves `best_eval_model.pt` (the W&B file copy is not refreshed while the
+run is active). Loading K Epoch 99 into the
 trainer gave 95.3-95.8% over three evaluations (about 1,120 episodes each), consistent
 with offline evaluation. Keyboard training rejects every other evaluation mode because
 the generic rollout evaluator does not preserve Keyboard worlds, contacts or force

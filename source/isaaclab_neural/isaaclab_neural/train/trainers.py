@@ -223,9 +223,8 @@ def keyboard_position_loss_weights(
     num_q: int,
     key_q_indices: list[int],
     scale_m: float,
-    robot_scale_rad: float | None = None,
 ) -> torch.Tensor:
-    """Set key position scales [m] and optional robot position scales [rad], retaining velocity weights."""
+    """Set key position loss scales [m], retaining all other weights."""
     if not np.isfinite(scale_m) or scale_m <= 0:
         raise ValueError("Keyboard position loss scale must be finite and positive.")
     if weights.ndim != 1 or weights.numel() != 2 * num_q:
@@ -239,11 +238,6 @@ def keyboard_position_loss_weights(
         raise ValueError("Keyboard position indices must be unique and inside the position block.")
     result = weights.clone()
     result[key_q_indices] = 1.0 / scale_m
-    if robot_scale_rad is not None:
-        if not np.isfinite(robot_scale_rad) or robot_scale_rad <= 0:
-            raise ValueError("Robot position loss scale must be finite and positive.")
-        robot_indices = sorted(set(range(num_q)) - set(key_q_indices))
-        result[robot_indices] = 1.0 / robot_scale_rad
     return result
 
 
@@ -599,13 +593,10 @@ class VanillaTrainer:
         """
         self.state_loss_group_scale = None
         key_position_scale = loss_cfg.get("keyboard_key_position_scale_m")
-        robot_position_scale = loss_cfg.get("keyboard_robot_position_scale_rad")
         velocity_weighting = loss_cfg.get("keyboard_key_velocity_weighting", "per_coordinate")
         group_weights = loss_cfg.get("keyboard_state_group_weights")
         if velocity_weighting not in ("per_coordinate", "pooled"):
             raise ValueError("keyboard_key_velocity_weighting must be 'per_coordinate' or 'pooled'.")
-        if robot_position_scale is not None and key_position_scale is None:
-            raise ValueError("Keyboard robot position scaling requires an explicit key position scale.")
         if key_position_scale is None and group_weights is None and velocity_weighting == "per_coordinate":
             return
         if not self.robot_force_head_enabled or not isinstance(self.loss_weights, torch.Tensor):
@@ -614,10 +605,7 @@ class VanillaTrainer:
         layout = {"num_q": metadata["num_q"], "key_q_indices": metadata["key_q_indices"]}
         if key_position_scale is not None:
             self.loss_weights = keyboard_position_loss_weights(
-                self.loss_weights,
-                **layout,
-                scale_m=float(key_position_scale),
-                robot_scale_rad=None if robot_position_scale is None else float(robot_position_scale),
+                self.loss_weights, **layout, scale_m=float(key_position_scale)
             )
         if velocity_weighting == "pooled":
             output_rms = getattr(self.neural_model_unwrapped, "output_rms", None)

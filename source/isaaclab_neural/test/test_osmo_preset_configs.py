@@ -285,7 +285,14 @@ def test_keyboard_recipe_is_fixed_owner_frame_and_matches_franka_training_scale(
         assert float(cfg["algorithm"]["optimizer"][key]) == float(franka["algorithm"]["optimizer"][key])
     for key in ("type", "weight_decay", "lr_schedule", "betas"):
         assert cfg["algorithm"]["optimizer"][key] == franka["algorithm"]["optimizer"][key]
-    assert cfg["network"]["transformer"] == franka["network"]["transformer"]
+    # Same trunk as Franka except the streaming temporal cone (receptive field = history length).
+    streaming = {"position_encoding", "attention_spans"}
+    trunk = {key: value for key, value in cfg["network"]["transformer"].items() if key not in streaming}
+    assert trunk == franka["network"]["transformer"]
+    assert cfg["network"]["transformer"]["position_encoding"] == "relative_lag"
+    spans = cfg["network"]["transformer"]["attention_spans"]
+    assert len(spans) == trunk["n_layer"] and sum(span - 1 for span in spans) + 1 == solver["num_states_history"]
+    assert solver["use_frame_cache"] and solver["inference_precision"] == "fp16"
     for key in ("encoder_type", "body_latent_dim", "hidden_dim"):
         assert cfg["inputs"]["contact_set"][key] == franka["inputs"]["contact_set"][key]
     assert solver["num_states_history"] == cfg["algorithm"]["sample_sequence_length"] == 10
@@ -295,7 +302,7 @@ def test_keyboard_recipe_is_fixed_owner_frame_and_matches_franka_training_scale(
     assert (REPOSITORY_ROOT / cfg["algorithm"]["eval"]["policy_checkpoint"]).is_file()
     dataset = cfg["algorithm"]["dataset"]
     assert (dataset["load_mode"], dataset["num_data_workers"]) == ("eager", 0)
-    # The K recipe: the only configuration that matched native closed-loop typing.
+    # The K losses and key head: the configuration that matched native closed-loop typing.
     assert cfg["network"]["key_head"]["enabled"]
     assert cfg["algorithm"]["loss"]["keyboard_state_group_weights"] == {"robot": 0.5, "key": 0.5}
     assert cfg["algorithm"]["loss"]["keyboard_key_position_scale_m"] == 0.0002
