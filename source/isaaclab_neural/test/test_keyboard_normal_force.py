@@ -203,7 +203,10 @@ def test_key_head_single_step_and_encoded_paths_match_the_full_window(steps):
         full = model({k: v.clone() for k, v in window.items()}, return_aux=True)
         single = model({k: v.clone() for k, v in window.items()}, return_aux=True, single_step=True)
         tokens, key_features = model.encode_frames({k: v.clone() for k, v in window.items()})
+        fast_tokens, fast_key_features = model.encode_frames({k: v.clone() for k, v in window.items()}, inference=True)
         encoded = model.forward_encoded(tokens, key_features)
+    torch.testing.assert_close(fast_tokens, tokens, atol=1e-6, rtol=1e-5)
+    torch.testing.assert_close(fast_key_features, key_features)
     for output in (single, encoded):
         torch.testing.assert_close(output.state_prediction, full.state_prediction[:, -1:], atol=1e-6, rtol=1e-5)
         assert output.auxiliary_predictions.keys() == full.auxiliary_predictions.keys()

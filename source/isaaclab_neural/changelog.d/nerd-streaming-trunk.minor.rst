@@ -18,3 +18,10 @@ Changed
   **Migration:** checkpoints from the earlier learned-absolute K recipe still load and evaluate (add
   ``--frame-cache`` for faster inference), but cannot be resumed with the new recipes; train a new model
   or pass the old configuration explicitly.
+
+* Changed streaming ``relative_lag`` steps to evaluate the short-span attention with elementwise products and to
+  shift each layer's cached keys/values in place instead of concatenating new tensors and calling a masked SDPA,
+  and changed inference-only key-head paths (``encode_frames(..., inference=True)`` and single-step decoding) to
+  split the first summary/decoder layer by input block instead of materializing per-key concatenations. Results
+  matched the previous implementation up to FP32 roundoff (closed-loop SO101 parity 7e-6 state, 3.4e-5 N force);
+  the streaming trunk step at 8192 worlds dropped from about 13.5 to 3.2 ms (FP16). Training paths are unchanged.

@@ -96,27 +96,39 @@ class CausalSelfAttention(nn.Module):
             v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2),
         )
 
-    def forward_stream(self, x, cached_keys, cached_values, seen):
-        """Attend from one new position to the cached cone and return ``(y, keys, values)``.
+    def forward_stream(self, x, cached_keys, cached_values, invalid):
+        """Attend from one new position to the cached cone, advancing the cache in place.
+
+        Spans are short, so attention is evaluated with elementwise products instead of a masked SDPA call, and
+        the cache shifts in place (no allocation), which keeps the step capturable by CUDA graphs.
 
         Args:
             x: Normalized input of the newest position, shape ``[B, 1, C]``.
             cached_keys: Keys of the previous ``span - 1`` positions, oldest first, shape ``[B, nh, span - 1, hs]``.
-            cached_values: Values matching ``cached_keys``.
-            seen: Number of earlier positions in each row's stream, shape ``[B]``.
+                Updated in place to hold the newest ``span - 1`` positions.
+            cached_values: Values matching ``cached_keys``, updated in place.
+            invalid: Lags (oldest first, ``span - 1`` down to ``0``) without an earlier position, shape ``[B, span]``.
+
+        Returns:
+            The attention output projected back to width ``C``, shape ``[B, 1, C]``.
         """
         B, _, C = x.size()
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        q = q.view(B, 1, self.n_head, C // self.n_head).transpose(1, 2)
-        keys = torch.cat((cached_keys, k.view(B, 1, self.n_head, C // self.n_head).transpose(1, 2)), dim=2)
-        values = torch.cat((cached_values, v.view(B, 1, self.n_head, C // self.n_head).transpose(1, 2)), dim=2)
+        head_dim = C // self.n_head
+        q, k, v = (z.view(B, self.n_head, head_dim) for z in self.c_attn(x).split(self.n_embd, dim=2))
+        scale = 1.0 / math.sqrt(head_dim)
+        scores = torch.cat(((cached_keys * q.unsqueeze(2)).sum(-1), (k * q).sum(-1, keepdim=True)), dim=-1) * scale
         lags = torch.arange(self.span - 1, -1, -1, device=x.device)
-        mask = self._lag_mask(lags)[:, None, :].unsqueeze(0).expand(B, -1, -1, -1)
-        invalid = (lags[None, :] > seen[:, None]).view(B, 1, 1, self.span)
-        mask = mask.masked_fill(invalid, float("-inf")).to(q.dtype)
-        y = torch.nn.functional.scaled_dot_product_attention(q, keys, values, attn_mask=mask)
-        y = self.resid_dropout(self.c_proj(y.transpose(1, 2).reshape(B, 1, C)))
-        return y, keys[:, :, 1:], values[:, :, 1:]
+        bias = self.lag_bias[:, lags].unsqueeze(0).masked_fill(invalid.unsqueeze(1), float("-inf"))
+        weights = torch.softmax(scores.float() + bias, dim=-1).to(v.dtype)
+        y = (weights[..., -1:] * v).unsqueeze(2)
+        if self.span > 1:
+            y = y + (weights[..., :-1].unsqueeze(-1) * cached_values).sum(2, keepdim=True)
+            for slot in range(self.span - 2):
+                cached_keys[:, :, slot].copy_(cached_keys[:, :, slot + 1])
+                cached_values[:, :, slot].copy_(cached_values[:, :, slot + 1])
+            cached_keys[:, :, -1].copy_(k)
+            cached_values[:, :, -1].copy_(v)
+        return self.resid_dropout(self.c_proj(self.attn_dropout(y).reshape(B, 1, C)))
 
     def forward(self, x, position_ids=None, cache=None, cache_indices=None):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
@@ -471,8 +483,9 @@ class GPT(nn.Module):
             if pad > 0:
                 k = torch.cat((k.new_zeros(*k.shape[:2], pad, k.shape[3]), k), dim=2)
                 v = torch.cat((v.new_zeros(*v.shape[:2], pad, v.shape[3]), v), dim=2)
-            keys.append(k)
-            values.append(v)
+            # Own contiguous storage: streaming steps shift these tensors in place.
+            keys.append(k.contiguous())
+            values.append(v.contiguous())
             x = block(x)
         output = self.lm_head(self.transformer.ln_f(x[:, -1:]))
         seen = torch.full((x.shape[0],), steps, device=x.device, dtype=torch.long)
@@ -481,17 +494,20 @@ class GPT(nn.Module):
     def forward_stream(self, idx, cache):
         """Advance the stream by one position ``[B, 1, input]`` and return its output ``[B, 1, C]``.
 
-        ``cache.seen`` counts each row's earlier positions (it is updated in place with the per-layer keys/values).
+        ``cache.seen`` counts each row's earlier positions. The per-layer keys/values and ``seen`` are updated in
+        place, without host synchronization or allocation-dependent shapes.
         """
         x = self.transformer.drop(self.transformer.wte(idx))
-        seen = cache.seen
+        invalid = {}
+        for span in set(self.config.attention_spans):
+            lags = torch.arange(span - 1, -1, -1, device=x.device)
+            invalid[span] = lags.unsqueeze(0) > cache.seen.unsqueeze(1)
         for layer, block in enumerate(self.transformer.h):
-            y, cache.keys[layer], cache.values[layer] = block.attn.forward_stream(
-                block.ln_1(x), cache.keys[layer], cache.values[layer], seen
+            x = x + block.attn.forward_stream(
+                block.ln_1(x), cache.keys[layer], cache.values[layer], invalid[block.attn.span]
             )
-            x = x + y
             x = x + block.mlp(block.ln_2(x))
-        cache.seen = cache.seen + 1
+        cache.seen += 1
         return self.lm_head(self.transformer.ln_f(x))
 
     def init_kv_cache(self, batch_size, max_cache_length=None, *, device=None, dtype=None):

@@ -446,7 +446,7 @@ class ModelMixedInput(nn.Module):
             output = output_rms.normalize(output, un_norm=True)
         return output
 
-    def _key_head_inputs(self, input_dict):
+    def _key_head_inputs(self, input_dict, factorized=False):
         """Return trunk inputs and per-key features for the factorized keyboard model."""
         key_head = cast(KeyboardKeyHead, self.key_head)
         latents = self.encoders["contact_set"](input_dict["contact_tokens"])
@@ -454,18 +454,20 @@ class ModelMixedInput(nn.Module):
         if self.normalize_input and self.input_rms is not None:
             states_rms = cast(RunningMeanStd, self.input_rms["states_embedding"])
         key_features = key_head.key_features(input_dict["states_embedding"], latents, states_rms)
-        return key_head.trunk_input(input_dict, latents, key_features), key_features
+        return key_head.trunk_input(input_dict, latents, key_features, factorized=factorized), key_features
 
-    def encode_frames(self, input_dict, inject_noise=False):
+    def encode_frames(self, input_dict, inject_noise=False, inference=False):
         """Normalize and encode each frame independently, before any temporal mixing.
 
         Returns trunk input tokens ``[B, T, feature_dim]`` and, for the factorized keyboard model, per-key features
         ``[B, T, keys, F]`` (otherwise ``None``). Every frame's encoding depends only on that frame, so encodings of
-        earlier frames can be cached and reused during sequential inference.
+        earlier frames can be cached and reused during sequential inference. ``inference`` selects
+        algebraically equivalent kernels that avoid materializing per-key concatenations (equal up to
+        floating-point roundoff); training keeps the reference path.
         """
         input_dict = self._prepare_inputs(input_dict, inject_noise)
         if getattr(self, "key_head", None) is not None:
-            return self._key_head_inputs(input_dict)
+            return self._key_head_inputs(input_dict, factorized=inference)
         return self.extract_input_features(input_dict), None
 
     def _trunk(self, features, last_only=False):

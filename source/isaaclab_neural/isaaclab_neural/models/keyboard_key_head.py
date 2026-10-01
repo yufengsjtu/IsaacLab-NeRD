@@ -15,7 +15,7 @@ use statistics pooled over all keys so that shared parameters see common units.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -136,11 +136,14 @@ class KeyboardKeyHead(nn.Module):
         return torch.cat([torch.stack(channels, dim=-1), latents], dim=-1)
 
     def trunk_input(
-        self, input_dict: dict[str, torch.Tensor], contact_latents: torch.Tensor, key_features: torch.Tensor
+        self,
+        input_dict: dict[str, torch.Tensor],
+        contact_latents: torch.Tensor,
+        key_features: torch.Tensor,
+        factorized: bool = False,
     ):
         """Concatenate robot coordinates, non-key contact latents and the key summary for each timestep."""
-        embedding = self.key_embedding.weight.expand(*key_features.shape[:-1], -1)
-        summary = self.summary_net(torch.cat([key_features, embedding], dim=-1)).sum(dim=-2)
+        summary = self.summary(key_features, factorized=factorized)
         others = contact_latents.index_select(-2, self.other_slots).flatten(start_dim=-2)
         return torch.cat(
             [
@@ -173,9 +176,46 @@ class KeyboardKeyHead(nn.Module):
                 pad = key_features[:, :1].expand(-1, min(lag, steps), -1, -1)
                 shifted = torch.cat([pad, key_features[:, :-lag]], dim=1)[:, :steps]
             history.append(shifted)
+        if last_only:
+            return self._decode_factorized(self.context_proj(trunk), torch.cat(history, dim=-1))
         context = self.context_proj(trunk).unsqueeze(-2).expand(-1, -1, self.num_keys, -1)
         embedding = self.key_embedding.weight.expand(*history[0].shape[:-1], -1)
         return self.decoder(torch.cat([context, *history, embedding], dim=-1))
+
+    def _decode_factorized(self, context: torch.Tensor, history: torch.Tensor) -> torch.Tensor:
+        """Apply the decoder with its first layer split by input block.
+
+        Equals ``decoder(cat([context, history, embedding]))`` up to floating-point roundoff, but projects the
+        per-environment context once instead of once per key and never materializes the concatenation.
+        """
+        first = cast(nn.Linear, self.decoder[0])
+        context_dim, history_dim = context.shape[-1], history.shape[-1]
+        weight_context, weight_history, weight_embedding = first.weight.split(
+            [context_dim, history_dim, first.weight.shape[1] - context_dim - history_dim], dim=1
+        )
+        hidden = (
+            nn.functional.linear(history, weight_history)
+            + nn.functional.linear(context, weight_context).unsqueeze(-2)
+            + nn.functional.linear(self.key_embedding.weight, weight_embedding, first.bias)
+        )
+        return self.decoder[1:](hidden)
+
+    def summary(self, key_features: torch.Tensor, factorized: bool = False) -> torch.Tensor:
+        """Return the order-independent key summary, shape ``[..., summary_dim]``.
+
+        ``factorized`` splits the first summary layer into feature and per-key embedding terms (inference only;
+        equal up to floating-point roundoff).
+        """
+        if not factorized:
+            embedding = self.key_embedding.weight.expand(*key_features.shape[:-1], -1)
+            return self.summary_net(torch.cat([key_features, embedding], dim=-1)).sum(dim=-2)
+        first = cast(nn.Linear, self.summary_net[0])
+        feature_dim = key_features.shape[-1]
+        weight_feature, weight_embedding = first.weight.split([feature_dim, first.weight.shape[1] - feature_dim], dim=1)
+        hidden = nn.functional.linear(key_features, weight_feature) + nn.functional.linear(
+            self.key_embedding.weight, weight_embedding, first.bias
+        )
+        return self.summary_net[1:](hidden).sum(dim=-2)
 
     def assemble(
         self, robot_normalized: torch.Tensor, key_normalized: torch.Tensor, output_rms: RunningMeanStd

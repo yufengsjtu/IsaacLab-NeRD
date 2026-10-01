@@ -315,7 +315,7 @@ class TransformerNeuralSolver(NeuralSolver):
     def _model_forward_frame_cached(self, model_inputs):
         """Encode only the newest frame, reuse earlier frame encodings, and predict the newest step."""
         neural_model = self._require_neural_model()
-        tokens, key_features = neural_model.encode_frames(dict(model_inputs))
+        tokens, key_features = neural_model.encode_frames(dict(model_inputs), inference=True)
         self.frame_cache.append((tokens[:, 0], None if key_features is None else key_features[:, 0]))
         rebuild_env_ids = self.frame_cache_rebuild_env_ids
         self.frame_cache_rebuild_env_ids = None
@@ -328,13 +328,15 @@ class TransformerNeuralSolver(NeuralSolver):
         if len(self.frame_cache) != len(self.states_history):
             stream_cache = None
             # Externally loaded history (e.g. preload_states_history): re-encode the complete window.
-            all_tokens, all_keys = neural_model.encode_frames(self._processed_history_rows(None))
+            all_tokens, all_keys = neural_model.encode_frames(self._processed_history_rows(None), inference=True)
             self.frame_cache.clear()
             for step in range(all_tokens.shape[1]):
                 self.frame_cache.append((all_tokens[:, step], None if all_keys is None else all_keys[:, step]))
         elif rebuild_env_ids is not None and rebuild_env_ids.numel() > 0:
             # Reset rows had their raw history replaced; re-encode those rows across the window.
-            row_tokens, row_keys = neural_model.encode_frames(self._processed_history_rows(rebuild_env_ids))
+            row_tokens, row_keys = neural_model.encode_frames(
+                self._processed_history_rows(rebuild_env_ids), inference=True
+            )
             for step, (frame_tokens, frame_keys) in enumerate(self.frame_cache):
                 frame_tokens.index_copy_(0, rebuild_env_ids, row_tokens[:, step])
                 if frame_keys is not None and row_keys is not None:
