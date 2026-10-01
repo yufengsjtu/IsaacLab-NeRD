@@ -24,3 +24,9 @@ Changed
   single ``nonzero`` per frame instead of boolean-mask indexing per field, and cached the fixed-slot filter
   tensor. Outputs were unchanged (verified against the previous helpers on 1478 live SO101 frames); host
   synchronizations per NeRD physics frame dropped from about 49 to 8.
+* Added ``NewtonContactAdapter(retain_native_pairs=False)``, used by the online NeRD solver: with a contact
+  filter, pairs the filter rejects are dropped before per-pair geometry is built (SO101 frames contain mostly
+  inactive key-ground pairs). Packing selected the same tokens, bodies and overflow counts on 299 live
+  frames, with token geometry equal up to FP32 roundoff (max 4.8e-7); adapter time per control step at 8192
+  worlds fell from about 84 to 34 ms on a shared GPU. ``native_contact_pairs()`` raises in this mode; data
+  collection keeps the default ``True``.

@@ -396,3 +396,67 @@ def test_gather_or_fill_matches_masked_lookup_at_bounds():
     )
     mask = torch.tensor([True, False])
     assert gather_or_fill(mask, torch.tensor([1, 0, 5]), False).tolist() == [False, True, False]
+
+
+def test_native_pair_prefilter_keeps_exactly_the_pairs_the_input_filter_admits():
+    from isaaclab_neural.contacts.native_pair_projector import native_pair_filter_mask
+
+    # Two worlds with bodies (0, 1) and (2, 3); slot 0 is fixed. Shape 0 is the static ground.
+    shape_body = torch.tensor([-1, 0, 1, 2, 3])
+    encoder = SimpleNamespace(
+        _shape_body_ids=lambda shapes: gather_or_fill(shape_body, shapes, -1),
+        _contact_env_ids=lambda bodies, shapes: torch.where(bodies >= 0, bodies // 2, torch.full_like(bodies, -1)),
+        body_slot=lambda bodies: torch.where(bodies >= 0, bodies % 2, torch.full_like(bodies, -1)),
+    )
+
+    def directed_rows(raw, state):
+        body0, body1 = encoder._shape_body_ids(raw["shape0"]), encoder._shape_body_ids(raw["shape1"])
+        world = torch.where(body0 >= 0, body0 // 2, torch.where(body1 >= 0, body1 // 2, torch.full_like(body0, -1)))
+        return SimpleNamespace(
+            body_id=torch.cat((body0, body1)),
+            world_id=torch.cat((world, world)),
+            lever_world=torch.cat((raw["point0_world"], raw["point1_world"])),
+            velocity_world=torch.cat((raw["point1_world"], -raw["point0_world"])),
+        )
+
+    encoder.directed_rows = directed_rows
+    adapter = NewtonContactAdapter.__new__(NewtonContactAdapter)
+    adapter.num_envs = 2
+    adapter.contact_filter = "solver_active_movable"
+    adapter.fixed_body_slots = (0,)
+    adapter.device = torch.device("cpu")
+    adapter._native_pair_encoder = encoder
+    adapter.shape_body_torch = shape_body
+    adapter.body_world_torch = torch.tensor([0, 0, 1, 1])
+    shape0 = torch.tensor([1, 2, 1, 3, 4, 2, 0, 1])
+    shape1 = torch.tensor([0, 0, 2, 0, 3, 4, 0, 0])
+    separation = torch.tensor([-1.0, -1.0, -1.0, 0.5, -1.0, -1.0, -1.0, -1.0])
+    normal = torch.tensor([[0.0, 0.0, 1.0]]).repeat(8, 1)
+    normal[7] = 0.0  # unresolved: degenerate normal
+    points = torch.arange(24, dtype=torch.float32).reshape(8, 3)
+    raw = {
+        "shape0": shape0,
+        "shape1": shape1,
+        "normal": normal,
+        "point0_world": points,
+        "point1_world": points + 1,
+        "surface_separation": separation,
+        "thickness0": torch.zeros(8),
+        "thickness1": torch.zeros(8),
+        "_body_q": torch.zeros(5, 7),
+    }
+    state = SimpleNamespace()
+
+    reference = adapter._build_native_contact_pairs(raw, state)
+    admitted = native_pair_filter_mask(reference, adapter.contact_filter, adapter.fixed_body_slots)
+    expected = {name: value[admitted] for name, value in reference.items()}
+    resolved, eligible = adapter._prefilter_masks(raw)
+    kept = torch.nonzero(eligible).reshape(-1)
+    subset = {name: value[kept] if not name.startswith("_") else value for name, value in raw.items()}
+    actual = adapter._build_native_contact_pairs(subset, state)
+
+    assert int(resolved.sum()) == reference["world_ids"].shape[0] == 6
+    assert int(eligible.sum()) == int(admitted.sum()) == 4
+    assert actual.keys() == expected.keys()
+    for name in expected:
+        torch.testing.assert_close(actual[name], expected[name])

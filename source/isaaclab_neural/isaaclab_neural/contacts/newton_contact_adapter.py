@@ -91,8 +91,16 @@ class NewtonContactAdapter:
         contact_representation: str = CONTACT_REPRESENTATION_FLAT,
         max_contact_tokens: int = DEFAULT_MAX_CONTACT_TOKENS,
         contact_filter: str = CONTACT_FILTER_NONE,
+        retain_native_pairs: bool = True,
     ):
+        """Args (beyond the layout settings):
+        retain_native_pairs: Keep every resolved native pair for :meth:`native_contact_pairs` (data
+            collection). When False and a contact filter is set, pairs the filter would reject are dropped
+            before per-pair geometry is built; packed outputs are identical, but :meth:`native_contact_pairs`
+            is unavailable. Used by the online NeRD solver.
+        """
         self.model = model
+        self.retain_native_pairs = bool(retain_native_pairs)
         self.num_envs = int(model.world_count)
         self.contact_representation = contact_representation
         self.max_contact_tokens = int(max_contact_tokens)
@@ -180,6 +188,7 @@ class NewtonContactAdapter:
         self.primary_body_q[..., 6] = 1.0
         self._contact_frames = 0
         self._raw_contacts_total = 0
+        self._raw_contacts_gpu = torch.zeros((), dtype=torch.long, device=self.device)
         self._packed_contacts_total = 0
         self._dropped_contacts_total = 0
         self._truncated_frames = 0
@@ -308,15 +317,35 @@ class NewtonContactAdapter:
 
         with step_profile.section("adapter_read_raw"):
             raw = self._read_raw_contacts(contacts, contact_count, state)
-        self._native_contact_pairs = self._build_native_contact_pairs(raw, state)
-        frame_raw = self._native_contact_pairs["world_ids"].shape[0]
-        frame_raw_tensor = torch.as_tensor(frame_raw, device=self.device, dtype=torch.long)
-        if self.contact_filter != CONTACT_FILTER_NONE:
-            frame_eligible = native_pair_filter_mask(
-                self._native_contact_pairs, self.contact_filter, self.fixed_body_slots
-            ).sum()
+        if (
+            not getattr(self, "retain_native_pairs", True)
+            and self.contact_filter != CONTACT_FILTER_NONE
+            and state is not None
+        ):
+            # Drop pairs the input filter rejects before building their geometry. Pair order is preserved,
+            # so packing (which applies the same filter) produces identical outputs.
+            resolved, eligible = self._prefilter_masks(raw)
+            kept = torch.nonzero(eligible, as_tuple=False).reshape(-1)
+            count = raw["shape0"].shape[0]
+            raw = {
+                name: value.index_select(0, kept) if value.shape[:1] == (count,) and not name.startswith("_") else value
+                for name, value in raw.items()
+            }
+            self._native_contact_pairs = self._build_native_contact_pairs(raw, state)
+            frame_raw = 0
+            frame_raw_tensor = resolved.sum()
+            self._raw_contacts_gpu += frame_raw_tensor
+            frame_eligible = eligible.sum()
         else:
-            frame_eligible = frame_raw_tensor
+            self._native_contact_pairs = self._build_native_contact_pairs(raw, state)
+            frame_raw = self._native_contact_pairs["world_ids"].shape[0]
+            frame_raw_tensor = torch.as_tensor(frame_raw, device=self.device, dtype=torch.long)
+            if self.contact_filter != CONTACT_FILTER_NONE:
+                frame_eligible = native_pair_filter_mask(
+                    self._native_contact_pairs, self.contact_filter, self.fixed_body_slots
+                ).sum()
+            else:
+                frame_eligible = frame_raw_tensor
         self._filtered_contacts_gpu += frame_raw_tensor - frame_eligible
         if self.contact_representation == CONTACT_REPRESENTATION_TOKENS:
             if state is None:
@@ -414,7 +443,33 @@ class NewtonContactAdapter:
         Callers retaining a frame must clone the tensors before the next
         :meth:`update`.
         """
+        if not getattr(self, "retain_native_pairs", True):
+            raise RuntimeError("This adapter drops filtered native pairs (retain_native_pairs=False).")
         return self._native_contact_pairs
+
+    def _prefilter_masks(self, raw: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return (resolved, filter-eligible) masks over raw pairs, matching :meth:`_build_native_contact_pairs`."""
+        encoder = self._native_pair_encoder
+        shape0, shape1 = raw["shape0"], raw["shape1"]
+        body0, body1 = encoder._shape_body_ids(shape0), encoder._shape_body_ids(shape1)
+        dynamic0, dynamic1 = body0 >= 0, body1 >= 0
+        world0, world1 = encoder._contact_env_ids(body0, shape0), encoder._contact_env_ids(body1, shape1)
+        world = torch.where(dynamic0, world0, torch.where(dynamic1, world1, torch.full_like(world0, -1)))
+        normal_norm = torch.linalg.vector_norm(raw["normal"], dim=-1)
+        resolved = (
+            (world >= 0)
+            & (world < self.num_envs)
+            & torch.isfinite(normal_norm)
+            & (normal_norm > torch.finfo(raw["normal"].dtype).eps)
+        )
+        pairs = {
+            "separation": raw["surface_separation"],
+            "body_ids_0": body0,
+            "body_ids_1": body1,
+            "body_slots_0": encoder.body_slot(body0),
+            "body_slots_1": encoder.body_slot(body1),
+        }
+        return resolved, resolved & native_pair_filter_mask(pairs, self.contact_filter, self.fixed_body_slots)
 
     def _empty_native_contact_pairs(self) -> dict[str, torch.Tensor]:
         """Return a schema-complete empty native contact-pair mapping."""
@@ -564,7 +619,7 @@ class NewtonContactAdapter:
             self._truncation_warning_emitted = True
         summary = {
             "frames": self._contact_frames,
-            "raw_contacts": self._raw_contacts_total,
+            "raw_contacts": self._raw_contacts_total + int(getattr(self, "_raw_contacts_gpu", torch.tensor(0)).item()),
             "packed_contacts": packed,
             "dropped_contacts": dropped,
             "truncated_frames": truncated,
