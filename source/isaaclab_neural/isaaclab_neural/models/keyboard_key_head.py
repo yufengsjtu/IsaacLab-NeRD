@@ -23,6 +23,8 @@ import torch.nn as nn
 from isaaclab_neural.utils.running_mean_std import RunningMeanStd
 
 REQUIRED_LOW_DIM_INPUTS = ("states_embedding", "joint_f", "gravity_dir")
+OPTIONAL_LOW_DIM_INPUTS = ("joint_target_offset",)
+"""Low-dim inputs a key-head model may append after the required ones (robot joints are used)."""
 _EPSILON = 1.0e-5
 
 
@@ -52,6 +54,7 @@ class KeyboardKeyHead(nn.Module):
         num_bodies: Number of contact-latent body slots.
         body_latent_dim: Contact latent size per body.
         trunk_dim: Temporal trunk output size.
+        joint_target_input: Append the robot joints' ``joint_target_offset`` to the trunk input.
         device: Device for parameters.
     """
 
@@ -63,9 +66,11 @@ class KeyboardKeyHead(nn.Module):
         num_bodies: int,
         body_latent_dim: int,
         trunk_dim: int,
+        joint_target_input: bool = False,
         device: Any = None,
     ):
         super().__init__()
+        self.joint_target_input = bool(joint_target_input)
         if output_dim % 2:
             raise ValueError("Keyboard key head requires scalar joints with equal position and velocity sizes.")
         self.num_q = int(output_dim) // 2
@@ -109,7 +114,11 @@ class KeyboardKeyHead(nn.Module):
         self.context_proj = nn.Linear(trunk_dim, context_dim, device=device)
         self.decoder = _mlp(context_dim + self.history_steps * key_feature_dim + embed_dim, hidden, 2, device)
         self.trunk_input_dim = (
-            self.robot_state_dim + robot_q.numel() + 3 + other_slots.numel() * body_latent_dim + summary_dim
+            self.robot_state_dim
+            + robot_q.numel() * (2 if self.joint_target_input else 1)
+            + 3
+            + other_slots.numel() * body_latent_dim
+            + summary_dim
         )
 
     def _raw(self, value: torch.Tensor, rms: RunningMeanStd | None, index: torch.Tensor) -> torch.Tensor:
@@ -145,16 +154,13 @@ class KeyboardKeyHead(nn.Module):
         """Concatenate robot coordinates, non-key contact latents and the key summary for each timestep."""
         summary = self.summary(key_features, factorized=factorized)
         others = contact_latents.index_select(-2, self.other_slots).flatten(start_dim=-2)
-        return torch.cat(
-            [
-                input_dict["states_embedding"].index_select(-1, self.robot_state),
-                input_dict["joint_f"].index_select(-1, self.robot_q),
-                input_dict["gravity_dir"],
-                others,
-                summary,
-            ],
-            dim=-1,
-        )
+        robot_inputs = [
+            input_dict["states_embedding"].index_select(-1, self.robot_state),
+            input_dict["joint_f"].index_select(-1, self.robot_q),
+        ]
+        if self.joint_target_input:
+            robot_inputs.append(input_dict["joint_target_offset"].index_select(-1, self.robot_q))
+        return torch.cat([*robot_inputs, input_dict["gravity_dir"], others, summary], dim=-1)
 
     def decode(self, trunk: torch.Tensor, key_features: torch.Tensor, last_only: bool = False) -> torch.Tensor:
         """Return pooled-normalized key position and velocity changes, shape ``[B, T, keys, 2]``.

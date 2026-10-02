@@ -131,7 +131,7 @@ KEY_HEAD = {
 }
 
 
-def make_key_head_model(transformer_overrides: dict | None = None):
+def make_key_head_model(transformer_overrides: dict | None = None, joint_target: bool = False):
     """Two robot joints (q 0-1) and three keys (q 2-4); key i owns contact body slot 3 + i of six."""
     from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_BODY_SLOT_INDEX, CONTACT_TOKEN_VALID_INDEX
 
@@ -145,6 +145,8 @@ def make_key_head_model(transformer_overrides: dict | None = None):
         "gravity_dir": torch.randn(2, 4, 3),
         "contact_tokens": tokens,
     }
+    if joint_target:
+        inputs["joint_target_offset"] = torch.randn(2, 4, 5)
     network = {
         **model_config(),
         "normalize_input": True,
@@ -160,7 +162,7 @@ def make_key_head_model(transformer_overrides: dict | None = None):
         },
     }
     input_cfg = {
-        "low_dim": ["states_embedding", "joint_f", "gravity_dir"],
+        "low_dim": ["states_embedding", "joint_f", "gravity_dir", *(["joint_target_offset"] if joint_target else [])],
         "contact_set": {"dim": 17, "encoder_type": "shared_per_body", "body_latent_dim": 4, "hidden_dim": 8},
     }
     model = ModelMixedInput(inputs, 10, input_cfg, network, device="cpu", num_bodies=6)
@@ -170,6 +172,7 @@ def make_key_head_model(transformer_overrides: dict | None = None):
         ("joint_f", (5,)),
         ("gravity_dir", (3,)),
         ("contact_tokens", (17,)),
+        *([("joint_target_offset", (5,))] if joint_target else []),
     ):
         rms[name] = RunningMeanStd(shape=shape, device="cpu")
         rms[name].update(torch.randn(64, *shape) * torch.rand(shape) + torch.randn(shape), batch_dim=True)
@@ -203,9 +206,31 @@ def test_key_head_assembles_robot_and_pooled_key_outputs_in_original_order():
         torch.testing.assert_close(state[..., keys], mean[keys].mean().expand_as(state[..., keys]))
 
 
+def test_key_head_uses_robot_joint_target_offsets_only():
+    model, inputs, _, _ = make_key_head_model(joint_target=True)
+    baseline, _, _, _ = make_key_head_model()
+    assert model.key_head.trunk_input_dim == baseline.key_head.trunk_input_dim + 2
+    with torch.no_grad():
+        reference = model({k: v.clone() for k, v in inputs.items()})
+        changed = {k: v.clone() for k, v in inputs.items()}
+        changed["joint_target_offset"][..., 2:] += 1.0
+        torch.testing.assert_close(model(changed), reference)
+        changed["joint_target_offset"][..., 0] += 1.0
+        assert not torch.allclose(model(changed), reference)
+    with pytest.raises(ValueError, match="optionally followed"):
+        bad_inputs = {**inputs, "joint_target_q": inputs["joint_target_offset"]}
+        bad_cfg = {
+            "low_dim": ["states_embedding", "joint_f", "gravity_dir", "joint_target_q"],
+            "contact_set": {"dim": 17, "encoder_type": "shared_per_body", "body_latent_dim": 4, "hidden_dim": 8},
+        }
+        _, _, _, network = make_key_head_model()
+        ModelMixedInput(bad_inputs, 10, bad_cfg, network, device="cpu", num_bodies=6)
+
+
+@pytest.mark.parametrize("joint_target", [False, True])
 @pytest.mark.parametrize("steps", [1, 2, 4])
-def test_key_head_single_step_and_encoded_paths_match_the_full_window(steps):
-    model, inputs, _, _ = make_key_head_model()
+def test_key_head_single_step_and_encoded_paths_match_the_full_window(steps, joint_target):
+    model, inputs, _, _ = make_key_head_model(joint_target=joint_target)
     window = {k: v[:, :steps].clone() for k, v in inputs.items()}
     with torch.inference_mode():
         full = model({k: v.clone() for k, v in window.items()}, return_aux=True)

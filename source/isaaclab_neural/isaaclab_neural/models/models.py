@@ -21,7 +21,11 @@ from isaaclab_neural.contacts.tensor_utils import (
 )
 from isaaclab_neural.models.base_models import CNNBase, GRUBase, LSTMBase, MLPBase
 from isaaclab_neural.models.contact_set_model import ContactSetEncoderBlock
-from isaaclab_neural.models.keyboard_key_head import REQUIRED_LOW_DIM_INPUTS, KeyboardKeyHead
+from isaaclab_neural.models.keyboard_key_head import (
+    OPTIONAL_LOW_DIM_INPUTS,
+    REQUIRED_LOW_DIM_INPUTS,
+    KeyboardKeyHead,
+)
 from isaaclab_neural.models.model_kan import KAN
 from isaaclab_neural.models.model_transformer import GPT, GPTConfig
 from isaaclab_neural.models.shared_per_body_contact_encoder import SharedPerBodyContactEncoder
@@ -103,11 +107,16 @@ class ModelMixedInput(nn.Module):
                 raise ValueError("network.key_head requires the shared_per_body contact encoder.")
             if "transformer" not in network_cfg or "rnn" in network_cfg or "kan" in network_cfg:
                 raise ValueError("network.key_head requires a Transformer trunk without RNN or KAN decoders.")
+            names = tuple(self.low_dim_input_names)
             if (
-                tuple(self.low_dim_input_names) != REQUIRED_LOW_DIM_INPUTS
+                names[: len(REQUIRED_LOW_DIM_INPUTS)] != REQUIRED_LOW_DIM_INPUTS
+                or not set(names[len(REQUIRED_LOW_DIM_INPUTS) :]) <= set(OPTIONAL_LOW_DIM_INPUTS)
                 or network_cfg["encoder"]["low_dim"]["layer_sizes"]
             ):
-                raise ValueError(f"network.key_head requires identity low_dim inputs {REQUIRED_LOW_DIM_INPUTS}.")
+                raise ValueError(
+                    f"network.key_head requires identity low_dim inputs {REQUIRED_LOW_DIM_INPUTS}, "
+                    f"optionally followed by {OPTIONAL_LOW_DIM_INPUTS}."
+                )
             if not self.normalize_output or len(self.encoders) != 2:
                 raise ValueError("network.key_head requires output normalization and no additional input encoders.")
             if input_sample["states_embedding"].shape[-1] != output_dim:
@@ -118,6 +127,7 @@ class ModelMixedInput(nn.Module):
                 num_bodies=encoder.num_bodies,
                 body_latent_dim=encoder.body_latent_dim,
                 trunk_dim=int(network_cfg["transformer"]["n_embd"]),
+                joint_target_input="joint_target_offset" in names,
                 device=device,
             )
             self.feature_dim = self.key_head.trunk_input_dim

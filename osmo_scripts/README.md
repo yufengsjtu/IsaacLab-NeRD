@@ -236,6 +236,15 @@ Two presets remain:
 - `so101_keyboard_resident_unique_smoke`: the same model and entry point on two
   GPUs, with 16,384/8,192 unique train/validation targets and two epochs of two
   updates. Qualify it before launching the full recipe.
+- `so101_keyboard_control_step` and `so101_keyboard_control_step_smoke`: one model
+  prediction per 40 ms control step (`step_mode: control_step`, joint-target input)
+  with `SO101/transformer_keyboard_control_step.yaml`. Collection records one
+  transition per control step (`collection.record_control_steps`) with non-deterministic
+  MJWarp, stores native pairs at `compact_v1` precision and writes no physics-frame
+  replay timeline. Clips hold 16 control steps (the 0.64 s of the 64-frame clips). The
+  full preset targets 6M/1M unique train/validation control steps; training keeps each
+  rank's recordings on its GPU (`load_mode: gpu`), converts native pairs to tokens per
+  batch and runs FP16 autocast. Cache prefix: `so101-keyboard-control-step-v1`.
 
 Both train `IsaacContrib-Keyboard-SO101-NeRD` (`SO101-Keyboard-Fixed`). Model inputs
 are `states_embedding`, `joint_f`, `gravity_dir` and 128 owner-frame contact tokens
