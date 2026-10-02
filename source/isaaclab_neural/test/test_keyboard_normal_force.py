@@ -131,7 +131,7 @@ KEY_HEAD = {
 }
 
 
-def make_key_head_model():
+def make_key_head_model(transformer_overrides: dict | None = None):
     """Two robot joints (q 0-1) and three keys (q 2-4); key i owns contact body slot 3 + i of six."""
     from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_BODY_SLOT_INDEX, CONTACT_TOKEN_VALID_INDEX
 
@@ -149,7 +149,15 @@ def make_key_head_model():
         **model_config(),
         "normalize_input": True,
         "key_head": dict(KEY_HEAD),
-        "transformer": {"n_layer": 1, "n_head": 2, "n_embd": 16, "block_size": 8, "dropout": 0.0, "bias": False},
+        "transformer": {
+            "n_layer": 1,
+            "n_head": 2,
+            "n_embd": 16,
+            "block_size": 8,
+            "dropout": 0.0,
+            "bias": False,
+            **(transformer_overrides or {}),
+        },
     }
     input_cfg = {
         "low_dim": ["states_embedding", "joint_f", "gravity_dir"],
@@ -212,6 +220,48 @@ def test_key_head_single_step_and_encoded_paths_match_the_full_window(steps):
         assert output.auxiliary_predictions.keys() == full.auxiliary_predictions.keys()
         for name, value in output.auxiliary_predictions.items():
             torch.testing.assert_close(value, full.auxiliary_predictions[name][:, -1:], atol=1e-6, rtol=1e-5)
+
+
+def test_streaming_key_head_solver_matches_full_window_through_growth_eviction_and_row_rebuild():
+    """The streamed key head reads only its recent key frames, yet must match the full-window prediction."""
+    from collections import deque
+
+    from isaaclab_neural.solvers.transformer_neural_solver import TransformerNeuralSolver
+
+    model, inputs, _, _ = make_key_head_model({"position_encoding": "relative_lag", "attention_spans": [3]})
+    model.eval()
+    for name, parameter in model.named_parameters():
+        if name.endswith("lag_bias"):
+            torch.nn.init.normal_(parameter)
+    history = 4  # longer than the key head's two recent frames
+    solver = TransformerNeuralSolver.__new__(TransformerNeuralSolver)
+    solver.process_neural_model_inputs = lambda model_inputs: model_inputs
+    solver.num_envs, solver.num_states_history, solver.torch_device = 2, history, "cpu"
+    solver.use_feature_cache = solver.use_kv_cache = False
+    solver.use_frame_cache, solver.neural_model = True, model
+    solver.predicted_body_net_contact_forces_b = solver.feature_cache = solver.kv_cache = None
+    solver.feature_cache_rebuild_env_ids = solver.kv_cache_rebuild_env_ids = None
+    solver.frame_cache, solver.frame_cache_rebuild_env_ids, solver.stream_cache = deque(maxlen=history), None, None
+    solver.states_history = deque(maxlen=history)
+
+    torch.manual_seed(1)
+    with torch.inference_mode():
+        for step in range(9):
+            frame = {name: value[:, step % 4].clone() for name, value in inputs.items()}
+            for name in ("states_embedding", "joint_f", "gravity_dir"):
+                frame[name] += torch.randn_like(frame[name])
+            solver.states_history.append(frame)
+            if step == 6:
+                # A partial reset rewrites row 0's raw history; its cached encodings must be rebuilt.
+                for entry in solver.states_history:
+                    for name, value in frame.items():
+                        entry[name][0] = value[0]
+                solver._mark_history_rows_for_rebuild(torch.tensor([0]))
+            window = {name: torch.stack([entry[name] for entry in solver.states_history], dim=1) for name in inputs}
+            expected = model(window, single_step=True)
+            actual = solver._model_forward(solver.get_neural_model_inputs())
+            torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
+    assert solver.stream_cache is not None
 
 
 def test_key_head_assembles_fp32_state_under_reduced_precision_autocast():

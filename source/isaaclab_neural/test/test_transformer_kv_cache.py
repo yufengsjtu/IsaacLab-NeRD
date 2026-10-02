@@ -549,7 +549,8 @@ def test_solver_compiles_only_fixed_shape_steady_stream_steps(monkeypatch):
     # The first frame builds the stream eagerly; every later frame runs both compiled callables on full batches.
     assert [name for name, _ in calls] == ["encode_frames", "forward_stream"] * 8
     assert all(shape[0] == 2 and shape[1] == 1 for _, shape in calls)
-    assert len(solver._compiled_inference) == 2
+    compiled_model, compiled = solver._compiled_inference
+    assert compiled_model is model and len(compiled) == 2
 
 
 def test_frame_cache_is_exclusive_with_other_caches():

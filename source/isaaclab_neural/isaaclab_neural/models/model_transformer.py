@@ -119,7 +119,7 @@ class CausalSelfAttention(nn.Module):
         scores = torch.cat(((cached_keys * q.unsqueeze(2)).sum(-1), (k * q).sum(-1, keepdim=True)), dim=-1) * scale
         lags = torch.arange(self.span - 1, -1, -1, device=x.device)
         bias = self.lag_bias[:, lags].unsqueeze(0).masked_fill(invalid.unsqueeze(1), float("-inf"))
-        weights = torch.softmax(scores.float() + bias, dim=-1).to(v.dtype)
+        weights = self.attn_dropout(torch.softmax(scores.float() + bias, dim=-1).to(v.dtype))
         y = (weights[..., -1:] * v).unsqueeze(2)
         if self.span > 1:
             y = y + (weights[..., :-1].unsqueeze(-1) * cached_values).sum(2, keepdim=True)
@@ -128,7 +128,7 @@ class CausalSelfAttention(nn.Module):
                 cached_values[:, :, slot].copy_(cached_values[:, :, slot + 1])
             cached_keys[:, :, -1].copy_(k)
             cached_values[:, :, -1].copy_(v)
-        return self.resid_dropout(self.c_proj(self.attn_dropout(y).reshape(B, 1, C)))
+        return self.resid_dropout(self.c_proj(y.reshape(B, 1, C)))
 
     def forward(self, x, position_ids=None, cache=None, cache_indices=None):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)

@@ -385,11 +385,14 @@ class TransformerNeuralSolver(NeuralSolver):
         """
         if not getattr(self, "inference_compile", False):
             return function
-        compiled = self.__dict__.setdefault("_compiled_inference", {})
-        key = (name, id(neural_model))
-        if key not in compiled:
-            compiled[key] = torch.compile(function, dynamic=False)
-        return compiled[key]
+        model, compiled = getattr(self, "_compiled_inference", (None, {}))
+        if model is not neural_model:
+            # A replaced model drops the old compiled callables (and the references they hold).
+            compiled = {}
+            self._compiled_inference = (neural_model, compiled)
+        if name not in compiled:
+            compiled[name] = torch.compile(function, dynamic=False)
+        return compiled[name]
 
     def _model_forward(self, model_inputs):
         if getattr(self, "use_frame_cache", False):
