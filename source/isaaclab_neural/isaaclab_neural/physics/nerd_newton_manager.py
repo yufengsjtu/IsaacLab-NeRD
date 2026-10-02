@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import torch
 import warp as wp
@@ -30,6 +30,8 @@ class NewtonNerdManager(NewtonManager):
     _finger_force_scenes: list = []
     _robot_normal_force_scenes: list = []
     _skip_applied_effort_overlay: bool = False
+    _reset_contact_snapshot: tuple[torch.Tensor, torch.Tensor] | None = None
+    """Body poses/velocities whose contacts and contact inputs the last reset sync computed, or None."""
 
     _UPSTREAM_SYNC_ATTRS = (
         "_builder",
@@ -61,6 +63,7 @@ class NewtonNerdManager(NewtonManager):
         cls._finger_force_scenes = []
         cls._robot_normal_force_scenes = []
         cls._skip_applied_effort_overlay = False
+        cls._reset_contact_snapshot = None
 
     @classmethod
     @contextmanager
@@ -243,8 +246,49 @@ class NewtonNerdManager(NewtonManager):
                 return None
             if cls._collision_pipeline is None or cls._contacts is None:
                 raise RuntimeError("NeRD newton_native contact pipeline has not been initialized.")
+            # Consumes the reset snapshot: a new collision pass and adapter update supersede it.
+            if cls._take_reusable_reset_contacts():
+                # The reset sync already collided this state and packed its contact inputs.
+                cls._solver.reuse_contact_inputs_once()
+                return cls._contacts
             cls._collision_pipeline.collide(cls.backend.state_0, cls._contacts)
             return cls._contacts
+
+    @classmethod
+    def _body_state_tensors(cls) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return torch views of the current body poses and velocities."""
+        state = cls.backend.state_0
+        return wp.to_torch(state.body_q), wp.to_torch(state.body_qd)
+
+    @classmethod
+    def _warp_stream_context(cls):
+        """Order torch work with Warp's stream on CUDA devices."""
+        device = PhysicsManager._device
+        if not str(device).startswith("cuda"):
+            return nullcontext()
+        return torch.cuda.stream(wp.stream_to_torch(device))
+
+    @classmethod
+    def _record_reset_contact_snapshot(cls) -> None:
+        """Remember the body state whose contacts the reset sync just computed."""
+        if cls._nerd_contact_adapter is None:
+            return
+        with cls._warp_stream_context():
+            cls._reset_contact_snapshot = tuple(value.clone() for value in cls._body_state_tensors())
+
+    @classmethod
+    def _take_reusable_reset_contacts(cls) -> bool:
+        """Whether the reset sync's contacts and contact inputs still describe the current body state.
+
+        Resets end with a collision pass and adapter update on the reset state; the next step's first physics
+        frame would repeat both on the same state. Reuse requires the body poses and velocities to be bitwise
+        unchanged, so any intermediate state write falls back to recomputation. The snapshot is consumed.
+        """
+        snapshot, cls._reset_contact_snapshot = cls._reset_contact_snapshot, None
+        if snapshot is None:
+            return False
+        with cls._warp_stream_context():
+            return all(torch.equal(current, saved) for current, saved in zip(cls._body_state_tensors(), snapshot))
 
     @classmethod
     def register_applied_effort_scene(cls, scene) -> None:
@@ -438,6 +482,7 @@ class NewtonNerdManager(NewtonManager):
             invalidate_fk()
         cls.forward()
         cls.sync_neural_solver(update_history=False)
+        cls._record_reset_contact_snapshot()
 
         reset_solver = getattr(cls._solver, "reset", None)
         if reset_history and reset_solver is not None:

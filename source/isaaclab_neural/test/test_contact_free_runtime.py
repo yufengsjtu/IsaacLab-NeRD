@@ -378,3 +378,109 @@ def test_neural_solver_reset_accepts_newton_world_mask_kwargs() -> None:
     solver = NeuralSolver.__new__(NeuralSolver)
     solver.predicted_body_net_contact_forces_b = None
     solver.reset(object(), world_mask=object(), flags=0)
+
+
+@pytest.mark.parametrize("prediction_type", ["relative", "absolute"])
+@pytest.mark.parametrize("orientation", ["quaternion", "exponential"])
+def test_prediction_to_next_states_matches_per_joint_conversion(prediction_type, orientation) -> None:
+    from newton import JointType
+
+    # Scalar joints around a FREE and a BALL joint, with a coordinate gap that must split the scalar runs.
+    joints = [
+        (JointType.REVOLUTE, 0, 1),
+        (JointType.REVOLUTE, 1, 2),
+        (JointType.FREE, 2, 9),
+        (JointType.PRISMATIC, 9, 10),
+        (JointType.BALL, 10, 14),
+        (JointType.REVOLUTE, 14, 15),
+        (JointType.REVOLUTE, 16, 17),
+        (JointType.REVOLUTE, 17, 18),
+    ]
+    solver = NeuralSolver.__new__(NeuralSolver)
+    solver.prediction_type = prediction_type
+    solver.orientation_prediction_parameterization = orientation
+    solver.num_joints_per_env = len(joints)
+    solver.joint_types = [joint[0] for joint in joints]
+    solver.joint_q_start = [joint[1] for joint in joints]
+    solver.joint_q_end = [joint[2] for joint in joints]
+    solver.dof_q_per_env = 18
+    states = torch.randn(5, 18 + 16)
+    rotation_dofs = 4 if orientation == "quaternion" else 3
+    prediction = torch.randn(5, 18 - 8 + 2 * rotation_dofs - 1 + 16)
+
+    expected = torch.empty_like(states)
+    offset = 0
+    for joint_type, start, end in joints:
+        if joint_type == JointType.FREE:
+            offset += solver._convert_prediction_to_next_states_regular_dofs(
+                states[:, start : start + 3], prediction[:, offset:], expected[:, start : start + 3]
+            )
+            start += 3
+        if joint_type in (JointType.FREE, JointType.BALL):
+            offset += solver._convert_prediction_to_next_states_orientation_dofs(
+                states[:, start : start + 4], prediction[:, offset:], expected[:, start : start + 4]
+            )
+        else:
+            offset += solver._convert_prediction_to_next_states_regular_dofs(
+                states[:, start:end], prediction[:, offset:], expected[:, start:end]
+            )
+    velocity = prediction[:, offset:]
+    expected[:, 18:] = velocity if prediction_type == "absolute" else states[:, 18:] + velocity
+    actual = solver.convert_prediction_to_next_states(states, prediction)
+    # Coordinate 15 belongs to no joint and stays uninitialized in both conversions.
+    covered = [index for index in range(states.shape[1]) if index != 15]
+    assert torch.equal(actual[:, covered], expected[:, covered])
+
+
+def test_reset_contacts_are_reused_only_for_an_unchanged_body_state(monkeypatch) -> None:
+    import warp as wp
+
+    from isaaclab.physics import PhysicsManager
+
+    state = SimpleNamespace(
+        body_q=wp.array(torch.randn(4, 7).numpy(), dtype=wp.float32, device="cpu"),
+        body_qd=wp.array(torch.randn(4, 6).numpy(), dtype=wp.float32, device="cpu"),
+    )
+    collisions = []
+    monkeypatch.setattr(PhysicsManager, "_device", "cpu")
+    monkeypatch.setattr(NewtonNerdManager, "backend", SimpleNamespace(state_0=state), raising=False)
+    monkeypatch.setattr(NewtonNerdManager, "_nerd_contact_adapter", object())
+    monkeypatch.setattr(NewtonNerdManager, "_contacts", object())
+    monkeypatch.setattr(
+        NewtonNerdManager, "_collision_pipeline", SimpleNamespace(collide=lambda *args: collisions.append(args))
+    )
+    monkeypatch.setattr(NewtonNerdManager, "_reset_contact_snapshot", None)
+    reuses = []
+    monkeypatch.setattr(
+        NewtonNerdManager, "_solver", SimpleNamespace(reuse_contact_inputs_once=lambda: reuses.append(1))
+    )
+
+    # Unchanged state after the reset sync: the next collision pass is skipped once, then runs again.
+    NewtonNerdManager._record_reset_contact_snapshot()
+    assert _ManagerTestHarness.prepare_contacts() is NewtonNerdManager._contacts
+    assert (len(collisions), len(reuses)) == (0, 1)
+    _ManagerTestHarness.prepare_contacts()
+    assert (len(collisions), len(reuses)) == (1, 1)
+
+    # Any intermediate body-state write forces recomputation.
+    NewtonNerdManager._record_reset_contact_snapshot()
+    wp.to_torch(state.body_qd)[2, 1] += 1e-6
+    _ManagerTestHarness.prepare_contacts()
+    assert (len(collisions), len(reuses)) == (2, 1)
+    assert NewtonNerdManager._reset_contact_snapshot is None
+
+    # The solver skips exactly one adapter update after reuse_contact_inputs_once().
+    updates = []
+    solver = NeuralSolver.__new__(NeuralSolver)
+    solver.contact_adapter = SimpleNamespace(
+        update=lambda contacts, newton_state: updates.append(contacts), to_neural_inputs=lambda: {"tokens": 1}
+    )
+    solver.root_body_ids = torch.tensor([0])
+    solver.joint_f_dim = 0
+    solver.states = torch.zeros(1, 2)
+    solver._acquire_states_to_torch = lambda newton_state, states: None
+    solver.wrap2PI = lambda states: None
+    solver.reuse_contact_inputs_once()
+    solver._update_states(state, "reset-contacts", None)
+    solver._update_states(state, "step-contacts", None)
+    assert updates == ["step-contacts"]

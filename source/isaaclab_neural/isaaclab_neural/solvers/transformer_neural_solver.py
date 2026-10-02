@@ -384,10 +384,13 @@ class TransformerNeuralSolver(NeuralSolver):
         return tokens, keys
 
     def _contact_token_transform(self):
-        transform = super()._contact_token_transform()
-        if not getattr(self, "_compile_token_transform", False):
-            return transform
-        return self._inference_callable("contact_tokens_to_model_frame", self._require_neural_model(), transform)
+        if not getattr(self, "_compile_token_transform", False) or not getattr(self, "inference_compile", False):
+            return super()._contact_token_transform()
+        from isaaclab_neural.solvers.neural_solver import contact_tokens_to_model_frame_elementwise
+
+        return self._inference_callable(
+            "contact_tokens_to_model_frame", self._require_neural_model(), contact_tokens_to_model_frame_elementwise
+        )
 
     def _inference_callable(self, name: str, neural_model, function):
         """Return ``function``, or its ``torch.compile`` version when ``inference_compile`` is enabled.

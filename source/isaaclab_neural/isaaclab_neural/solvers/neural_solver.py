@@ -66,6 +66,47 @@ def contact_tokens_to_model_frame(
     return transform_contact_tokens_to_body_frame(contact_tokens, frame_q, translation_only=translation_only)
 
 
+def _quat_rotate_inverse_elementwise(quat: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
+    """Rotate ``vector`` by the inverse of xyzw ``quat`` with broadcastable elementwise operations only."""
+    w = quat[..., 3:4]
+    xyz = quat[..., :3]
+    return (
+        vector * (2.0 * w * w - 1.0)
+        - torch.cross(xyz, vector, dim=-1) * w * 2.0
+        + xyz * (xyz * vector).sum(dim=-1, keepdim=True) * 2.0
+    )
+
+
+def contact_tokens_to_model_frame_elementwise(
+    contact_tokens: torch.Tensor, frame_q: torch.Tensor, translation_only: bool, per_owner: bool
+) -> torch.Tensor:
+    """Elementwise equivalent of :func:`contact_tokens_to_model_frame` for ``[B, T, K, D]`` tokens.
+
+    The reference rotation forms its dot products with batched matrix products, which run as slow per-row
+    matrix-vector kernels over many tokens; this version is fusible by ``torch.compile``. Results are equal up to
+    floating-point roundoff.
+    """
+    from isaaclab_neural.contacts.contact_set_encoder import gather_owner_body_q
+    from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_VALID_INDEX
+
+    if per_owner:
+        frame_q = gather_owner_body_q(frame_q, contact_tokens)
+    else:
+        frame_q = frame_q.unsqueeze(-2).expand(*contact_tokens.shape[:-1], 7)
+    position, quat = frame_q[..., :3], frame_q[..., 3:7]
+    points, normals, levers = contact_tokens[..., 4:7], contact_tokens[..., 7:10], contact_tokens[..., 10:13]
+    gap, velocities = contact_tokens[..., 13:14], contact_tokens[..., 14:17]
+    if translation_only:
+        points = points - position
+    else:
+        points = _quat_rotate_inverse_elementwise(quat, points - position)
+        normals = _quat_rotate_inverse_elementwise(quat, normals)
+        levers = _quat_rotate_inverse_elementwise(quat, levers)
+        velocities = _quat_rotate_inverse_elementwise(quat, velocities)
+    transformed = torch.cat((contact_tokens[..., :4], points, normals, levers, gap, velocities), dim=-1)
+    return transformed * (contact_tokens[..., CONTACT_TOKEN_VALID_INDEX] > 0.5).unsqueeze(-1)
+
+
 if TYPE_CHECKING:
     from isaaclab_neural.models.models import ModelMixedInputOutput
 
@@ -612,13 +653,22 @@ class NeuralSolver(SolverBase):
         self.root_body_qd = wp.to_torch(body_qd).index_select(0, self.root_body_ids)
         if self.joint_f_dim > 0:
             self.joint_f = wp.to_torch(joint_f).view(self.num_envs, self.joint_f_dim)
-        if self.contact_adapter is not None:
+        reuse_contact_inputs = getattr(self, "_reuse_contact_inputs", False)
+        self._reuse_contact_inputs = False
+        if self.contact_adapter is not None and not reuse_contact_inputs:
             assert contacts is not None
             with step_profile.section("adapter_update"):
                 self.contact_adapter.update(contacts, newton_states)
             with step_profile.section("to_neural_inputs"):
                 self.contact_inputs = self.contact_adapter.to_neural_inputs()
             self.primary_body_q = getattr(self.contact_adapter, "primary_body_q", None)
+
+    def reuse_contact_inputs_once(self) -> None:
+        """Keep the current contact inputs for the next state update instead of re-packing contacts.
+
+        The caller guarantees that the contacts and body state are unchanged since the last adapter update.
+        """
+        self._reuse_contact_inputs = True
 
     def get_contact_masks(
         self,
@@ -865,11 +915,33 @@ class NeuralSolver(SolverBase):
         if self.prediction_type in ["absolute", "relative"]:
             """ full state prediction: absolute or relative """
             prediction_dof_offset = 0
+            # Consecutive regular joints with contiguous coordinates are converted as one elementwise run
+            # (identical per-element arithmetic, far fewer kernel launches for many scalar joints).
+            run_start = run_end = None
+
+            def flush_run():
+                nonlocal prediction_dof_offset, run_start, run_end
+                if run_start is not None:
+                    prediction_dof_offset += self._convert_prediction_to_next_states_regular_dofs(
+                        states[..., run_start:run_end],
+                        prediction[..., prediction_dof_offset:],
+                        next_states[..., run_start:run_end],
+                    )
+                    run_start = run_end = None
 
             # Compute position components of the next states for each joint individually
             for joint_id in range(self.num_joints_per_env):
                 joint_dof_start = self.joint_q_start[joint_id]
-                if self.joint_types[joint_id] == JointType.FREE:
+                joint_type = self.joint_types[joint_id]
+                if joint_type != JointType.FREE and joint_type != JointType.BALL:
+                    if run_start is not None and joint_dof_start != run_end:
+                        flush_run()
+                    if run_start is None:
+                        run_start = joint_dof_start
+                    run_end = self.joint_q_end[joint_id]
+                    continue
+                flush_run()
+                if joint_type == JointType.FREE:
                     # position dofs
                     prediction_dof_offset += self._convert_prediction_to_next_states_regular_dofs(
                         states[..., joint_dof_start : joint_dof_start + 3],
@@ -882,19 +954,13 @@ class NeuralSolver(SolverBase):
                         prediction[..., prediction_dof_offset:],
                         next_states[..., joint_dof_start + 3 : joint_dof_start + 7],
                     )
-                elif self.joint_types[joint_id] == JointType.BALL:
+                else:
                     prediction_dof_offset += self._convert_prediction_to_next_states_orientation_dofs(
                         states[..., joint_dof_start : joint_dof_start + 4],
                         prediction[..., prediction_dof_offset:],
                         next_states[..., joint_dof_start : joint_dof_start + 4],
                     )
-                else:
-                    joint_dof_end = self.joint_q_end[joint_id]
-                    prediction_dof_offset += self._convert_prediction_to_next_states_regular_dofs(
-                        states[..., joint_dof_start:joint_dof_end],
-                        prediction[..., prediction_dof_offset:],
-                        next_states[..., joint_dof_start:joint_dof_end],
-                    )
+            flush_run()
 
             # Compute velocity components of the next states
             if self.prediction_type == "absolute":

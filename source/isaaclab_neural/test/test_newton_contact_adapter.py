@@ -453,10 +453,12 @@ def test_native_pair_prefilter_keeps_exactly_the_pairs_the_input_filter_admits()
     resolved, eligible = adapter._prefilter_masks(raw)
     kept = torch.nonzero(eligible).reshape(-1)
     subset = {name: value[kept] if not name.startswith("_") else value for name, value in raw.items()}
-    actual = adapter._build_native_contact_pairs(subset, state)
-
     assert int(resolved.sum()) == reference["world_ids"].shape[0] == 6
     assert int(eligible.sum()) == int(admitted.sum()) == 4
-    assert actual.keys() == expected.keys()
-    for name in expected:
-        torch.testing.assert_close(actual[name], expected[name])
+    # The prefiltered subset needs no resolution mask, and every pair passes the input filter again.
+    for assume_resolved in (False, True):
+        actual = adapter._build_native_contact_pairs(subset, state, assume_resolved=assume_resolved)
+        assert bool(native_pair_filter_mask(actual, adapter.contact_filter, adapter.fixed_body_slots).all())
+        assert actual.keys() == expected.keys()
+        for name in expected:
+            torch.testing.assert_close(actual[name], expected[name])

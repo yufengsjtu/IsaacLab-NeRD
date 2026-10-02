@@ -38,5 +38,15 @@ Changed
   stayed at FP16 level. On an idle GPU at 8192 SO101 worlds, FP16 throughput rose from 59.7k to 69.7k control
   steps/s (MJWarp: 53.0k); 6-seed closed-loop success was 94.9% versus 95.2% before the stage-1 changes. The
   first steps include compilation time. Defaults to False.
+* Changed NeRD resets to reuse their contacts: the reset sync already collides the reset state and packs its
+  contact inputs, so the next physics frame skips both while body poses and velocities are bitwise unchanged
+  (any intermediate state write or other collision pass recomputes them).
+* Changed prefiltered contact packing to skip the redundant resolution mask and input re-filtering (two host
+  synchronizations per frame); packed body ids and overflow were identical on 367 live frames.
+* Changed ``convert_prediction_to_next_states`` to convert runs of consecutive scalar joints as one elementwise
+  operation (identical results; SO101 has 114 scalar joints).
+* Changed ``inference_compile`` to compile an elementwise contact-token transform for the newest frame
+  (``contact_tokens_to_model_frame_elementwise``); the reference rotation's batched matrix products ran as slow
+  per-token matrix-vector kernels (4.6 to 0.56 ms per frame at 8192 worlds, equal up to roundoff).
 * Changed streaming frame-cached steps to stack only the key-feature frames the key head reads and to gather
   reset rows before stacking, instead of materializing the whole history window every frame.

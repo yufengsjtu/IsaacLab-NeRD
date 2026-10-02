@@ -436,3 +436,22 @@ def test_eager_trajectory_dataset_preserves_contact_token_rank(tmp_path):
     )
     sample = dataset[0]
     assert sample["contact_tokens"].shape == (2, 3, CONTACT_TOKEN_DIM)
+
+
+@pytest.mark.parametrize("translation_only", [False, True])
+@pytest.mark.parametrize("per_owner", [False, True])
+def test_elementwise_token_transform_matches_reference(translation_only, per_owner):
+    from isaaclab_neural.solvers.neural_solver import (
+        contact_tokens_to_model_frame,
+        contact_tokens_to_model_frame_elementwise,
+    )
+
+    torch.manual_seed(0)
+    tokens = torch.randn(6, 2, 5, CONTACT_TOKEN_DIM)
+    tokens[..., 0] = (torch.rand(6, 2, 5) < 0.6).float()
+    tokens[..., 1] = torch.randint(0, 4, (6, 2, 5)).float()
+    frame_q = torch.randn(6, 2, 4, 7) if per_owner else torch.randn(6, 2, 7)
+    frame_q[..., 3:] = torch.nn.functional.normalize(frame_q[..., 3:], dim=-1)
+    expected = contact_tokens_to_model_frame(tokens, frame_q, translation_only, per_owner)
+    actual = contact_tokens_to_model_frame_elementwise(tokens, frame_q, translation_only, per_owner)
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)

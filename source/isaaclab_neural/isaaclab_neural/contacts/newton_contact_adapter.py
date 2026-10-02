@@ -331,13 +331,15 @@ class NewtonContactAdapter:
                 name: value.index_select(0, kept) if value.shape[:1] == (count,) and not name.startswith("_") else value
                 for name, value in raw.items()
             }
-            self._native_contact_pairs = self._build_native_contact_pairs(raw, state)
+            self._native_contact_pairs = self._build_native_contact_pairs(raw, state, assume_resolved=True)
+            prefiltered = True
             frame_raw = 0
             frame_raw_tensor = resolved.sum()
             self._raw_contacts_gpu += frame_raw_tensor
             frame_eligible = eligible.sum()
         else:
             self._native_contact_pairs = self._build_native_contact_pairs(raw, state)
+            prefiltered = False
             frame_raw = self._native_contact_pairs["world_ids"].shape[0]
             frame_raw_tensor = torch.as_tensor(frame_raw, device=self.device, dtype=torch.long)
             if self.contact_filter != CONTACT_FILTER_NONE:
@@ -357,7 +359,8 @@ class NewtonContactAdapter:
                     representation=self.contact_representation,
                     packing_policy="body_round_robin_pair_atomic",
                     max_contact_tokens=self.max_contact_tokens,
-                    contact_filter=self.contact_filter,
+                    # Prefiltered pairs all pass the filter already; re-filtering would only add a host sync.
+                    contact_filter=CONTACT_FILTER_NONE if prefiltered else self.contact_filter,
                     fixed_body_slots=self.fixed_body_slots,
                 )
                 self.contact_tokens.copy_(projected["contact_tokens"])
@@ -491,8 +494,13 @@ class NewtonContactAdapter:
         self,
         raw: dict[str, torch.Tensor],
         state: newton.State | None,
+        assume_resolved: bool = False,
     ) -> dict[str, torch.Tensor]:
-        """Build the unresolved-capacity canonical native pair view."""
+        """Build the unresolved-capacity canonical native pair view.
+
+        ``assume_resolved`` skips the resolution mask for raw pairs already restricted to resolved pairs by
+        :meth:`_prefilter_masks` (same criteria), avoiding a host-synchronizing selection.
+        """
         pair_count = raw["shape0"].shape[0]
         body_ids_0 = self._shape_body_ids(raw["shape0"])
         body_ids_1 = self._shape_body_ids(raw["shape1"])
@@ -519,13 +527,14 @@ class NewtonContactAdapter:
             relative_velocities_0_w = vector_zeros
             relative_velocities_1_w = vector_zeros
         normal = raw["normal"]
-        normal_norm = torch.linalg.vector_norm(normal, dim=-1)
-        valid = (
-            (world_ids >= 0)
-            & (world_ids < self.num_envs)
-            & torch.isfinite(normal_norm)
-            & (normal_norm > torch.finfo(normal.dtype).eps)
-        )
+        if not assume_resolved:
+            normal_norm = torch.linalg.vector_norm(normal, dim=-1)
+            valid = (
+                (world_ids >= 0)
+                & (world_ids < self.num_envs)
+                & torch.isfinite(normal_norm)
+                & (normal_norm > torch.finfo(normal.dtype).eps)
+            )
 
         point0_world = raw["point0_world"]
         point1_world = raw["point1_world"]
@@ -535,32 +544,42 @@ class NewtonContactAdapter:
         surface1_world = raw.get("surface1_world", point1_world)
         offset0 = raw.get("offset0", torch.zeros_like(point0_local))
         offset1 = raw.get("offset1", torch.zeros_like(point1_local))
-        # One nonzero (one host sync) instead of a synchronizing boolean mask per field; order is unchanged.
-        kept = torch.nonzero(valid, as_tuple=False).reshape(-1)
+        if assume_resolved:
+
+            def select(value: torch.Tensor) -> torch.Tensor:
+                return value
+
+        else:
+            # One nonzero (one host sync) instead of a synchronizing boolean mask per field; order is unchanged.
+            kept = torch.nonzero(valid, as_tuple=False).reshape(-1)
+
+            def select(value: torch.Tensor) -> torch.Tensor:
+                return value.index_select(0, kept)
+
         pairs = {
-            "shape_ids_0": raw["shape0"].index_select(0, kept).to(dtype=torch.int64),
-            "shape_ids_1": raw["shape1"].index_select(0, kept).to(dtype=torch.int64),
-            "body_ids_0": body_ids_0.index_select(0, kept).to(dtype=torch.int64),
-            "body_ids_1": body_ids_1.index_select(0, kept).to(dtype=torch.int64),
-            "body_slots_0": body_slots_0.index_select(0, kept).to(dtype=torch.int64),
-            "body_slots_1": body_slots_1.index_select(0, kept).to(dtype=torch.int64),
-            "world_ids": world_ids.index_select(0, kept).to(dtype=torch.int64),
-            "points_0_local": point0_local.index_select(0, kept).to(dtype=torch.float32),
-            "points_1_local": point1_local.index_select(0, kept).to(dtype=torch.float32),
-            "points_0_w": point0_world.index_select(0, kept).to(dtype=torch.float32),
-            "points_1_w": point1_world.index_select(0, kept).to(dtype=torch.float32),
-            "surface_points_0_w": surface0_world.index_select(0, kept).to(dtype=torch.float32),
-            "surface_points_1_w": surface1_world.index_select(0, kept).to(dtype=torch.float32),
-            "normal_w": normal.index_select(0, kept).to(dtype=torch.float32),
-            "separation": raw["surface_separation"].index_select(0, kept).to(dtype=torch.float32),
-            "thickness_0": raw["thickness0"].index_select(0, kept).to(dtype=torch.float32),
-            "thickness_1": raw["thickness1"].index_select(0, kept).to(dtype=torch.float32),
-            "offsets_0": offset0.index_select(0, kept).to(dtype=torch.float32),
-            "offsets_1": offset1.index_select(0, kept).to(dtype=torch.float32),
-            "lever_arms_0_w": lever_arms_0_w.index_select(0, kept).to(dtype=torch.float32),
-            "lever_arms_1_w": lever_arms_1_w.index_select(0, kept).to(dtype=torch.float32),
-            "relative_velocities_0_w": relative_velocities_0_w.index_select(0, kept).to(dtype=torch.float32),
-            "relative_velocities_1_w": relative_velocities_1_w.index_select(0, kept).to(dtype=torch.float32),
+            "shape_ids_0": select(raw["shape0"]).to(dtype=torch.int64),
+            "shape_ids_1": select(raw["shape1"]).to(dtype=torch.int64),
+            "body_ids_0": select(body_ids_0).to(dtype=torch.int64),
+            "body_ids_1": select(body_ids_1).to(dtype=torch.int64),
+            "body_slots_0": select(body_slots_0).to(dtype=torch.int64),
+            "body_slots_1": select(body_slots_1).to(dtype=torch.int64),
+            "world_ids": select(world_ids).to(dtype=torch.int64),
+            "points_0_local": select(point0_local).to(dtype=torch.float32),
+            "points_1_local": select(point1_local).to(dtype=torch.float32),
+            "points_0_w": select(point0_world).to(dtype=torch.float32),
+            "points_1_w": select(point1_world).to(dtype=torch.float32),
+            "surface_points_0_w": select(surface0_world).to(dtype=torch.float32),
+            "surface_points_1_w": select(surface1_world).to(dtype=torch.float32),
+            "normal_w": select(normal).to(dtype=torch.float32),
+            "separation": select(raw["surface_separation"]).to(dtype=torch.float32),
+            "thickness_0": select(raw["thickness0"]).to(dtype=torch.float32),
+            "thickness_1": select(raw["thickness1"]).to(dtype=torch.float32),
+            "offsets_0": select(offset0).to(dtype=torch.float32),
+            "offsets_1": select(offset1).to(dtype=torch.float32),
+            "lever_arms_0_w": select(lever_arms_0_w).to(dtype=torch.float32),
+            "lever_arms_1_w": select(lever_arms_1_w).to(dtype=torch.float32),
+            "relative_velocities_0_w": select(relative_velocities_0_w).to(dtype=torch.float32),
+            "relative_velocities_1_w": select(relative_velocities_1_w).to(dtype=torch.float32),
         }
         if set(pairs) != set(NATIVE_CONTACT_INTEGER_FIELDS + NATIVE_CONTACT_FLOAT_FIELDS):
             raise RuntimeError("Native contact-pair fields do not match the schema.")
