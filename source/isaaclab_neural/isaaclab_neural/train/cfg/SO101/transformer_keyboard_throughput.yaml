@@ -19,6 +19,8 @@ env:
     use_frame_cache: true
     # Validated closed loop against FP32 (95.3% vs 95.5% success); training stays FP32.
     inference_precision: fp16
+    # Fixed-shape steady-state inference steps run compiled (FP32 parity at roundoff; 6-seed closed loop 94.9%).
+    inference_compile: true
     contact_mode: newton_native
     contact_representation: contact_tokens
     contact_filter: solver_active_movable

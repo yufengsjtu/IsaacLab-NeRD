@@ -292,7 +292,7 @@ def test_keyboard_recipe_is_fixed_owner_frame_and_matches_franka_training_scale(
     assert cfg["network"]["transformer"]["position_encoding"] == "relative_lag"
     spans = cfg["network"]["transformer"]["attention_spans"]
     assert len(spans) == trunk["n_layer"] and sum(span - 1 for span in spans) + 1 == solver["num_states_history"]
-    assert solver["use_frame_cache"] and solver["inference_precision"] == "fp16"
+    assert solver["use_frame_cache"] and solver["inference_precision"] == "fp16" and solver["inference_compile"]
     for key in ("encoder_type", "body_latent_dim", "hidden_dim"):
         assert cfg["inputs"]["contact_set"][key] == franka["inputs"]["contact_set"][key]
     assert solver["num_states_history"] == cfg["algorithm"]["sample_sequence_length"] == 10
