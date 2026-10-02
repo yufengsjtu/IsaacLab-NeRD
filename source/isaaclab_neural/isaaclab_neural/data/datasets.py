@@ -41,7 +41,7 @@ INTEGER_DATASET_KEYS = {
     "contact_token_overflow",
     "contact_token_world_ids",
 }
-DatasetLoadMode = Literal["eager", "lazy"]
+DatasetLoadMode = Literal["eager", "lazy", "gpu"]
 STRUCTURED_DATASET_KEYS = {
     "contact_tokens",
     "body_net_contact_forces_w",
@@ -1367,10 +1367,38 @@ def create_trajectory_dataset(
     window_sampling: str = "canonical",
     read_keys: tuple[str, ...] | None = None,
     eager_preload_frames: int = 4096,
+    device: str | torch.device | None = None,
+    float16_keys: tuple[str, ...] = (),
 ) -> TrajectoryDataset | LazyTrajectoryDataset | UniqueTrajectoryDataset:
-    """Create an eager or lazy dataset with independent capacity and window-sampling contracts."""
+    """Create an eager, lazy or GPU-resident dataset with independent capacity and window-sampling contracts.
+
+    ``load_mode="gpu"`` requires unique-transition capacity and a ``device``; ``float16_keys`` selects stored floating
+    fields kept in FP16 on the device (see :class:`~isaaclab_neural.data.gpu_resident.GpuResidentTrajectoryDataset`).
+    """
     if window_sampling not in WINDOW_SAMPLING:
         raise ValueError(f"Unsupported window sampling: {window_sampling}.")
+    if load_mode == "gpu":
+        from isaaclab_neural.data.gpu_resident import GpuResidentTrajectoryDataset
+
+        if capacity_unit != "unique_transition" or device is None:
+            raise ValueError("GPU-resident datasets require unique-transition capacity and a device.")
+        return GpuResidentTrajectoryDataset(
+            hdf5_dataset_path,
+            device=device,
+            float16_keys=float16_keys,
+            window_sampling=window_sampling,
+            read_keys=read_keys,
+            eager_preload_frames=eager_preload_frames,
+            max_capacity=max_capacity,
+            sample_sequence_length=sample_sequence_length,
+            rank=rank,
+            world_size=world_size,
+            contact_representation=contact_representation,
+            num_contacts_per_env=num_contacts_per_env,
+            max_contact_tokens=max_contact_tokens,
+            contact_packing_policy=contact_packing_policy,
+            contact_filter=contact_filter,
+        )
     if capacity_unit == "unique_transition":
         return UniqueTrajectoryDataset(
             hdf5_dataset_path,
@@ -1436,6 +1464,8 @@ def create_weighted_trajectory_dataset(
     window_sampling: str = "canonical",
     read_keys: tuple[str, ...] | None = None,
     eager_preload_frames: int = 4096,
+    device: str | torch.device | None = None,
+    float16_keys: tuple[str, ...] = (),
 ) -> WeightedMixedTrajectoryDataset:
     """Create a weighted mixture, with explicit source budgets under a global unique capacity."""
     if capacity_unit == "unique_transition":
@@ -1466,6 +1496,8 @@ def create_weighted_trajectory_dataset(
             max_contact_tokens=max_contact_tokens,
             contact_packing_policy=contact_packing_policy,
             contact_filter=contact_filter,
+            device=device,
+            float16_keys=float16_keys,
         )
         weights[name] = float(source_cfg["weight"])
     if capacity_unit == "unique_transition":

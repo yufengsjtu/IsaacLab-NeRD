@@ -142,6 +142,8 @@ class NeuralSolver(SolverBase):
         contact_token_frame: str = "root",
         inference_precision: str = "fp32",
         inference_compile: bool = False,
+        step_mode: str = "physics_frame",
+        joint_target_input: bool = False,
     ):
         """
         Args:
@@ -173,6 +175,10 @@ class NeuralSolver(SolverBase):
                 ``"fp32"``, ``"tf32"``, ``"fp16"`` or ``"bf16"`` (autocast). Defaults to ``"fp32"``.
             inference_compile: Compile fixed-shape steady-state inference steps with ``torch.compile`` where the
                 solver supports it (frame-cached transformers). Defaults to False.
+            step_mode: Time span of one prediction, ``"physics_frame"`` or ``"control_step"`` (see
+                :attr:`NerdSolverCfg.step_mode`). Defaults to ``"physics_frame"``.
+            joint_target_input: Expose Newton joint position targets to the model as ``joint_target_offset``.
+                Defaults to False.
         """
         self.solver_name = name
         if model is None:
@@ -227,6 +233,10 @@ class NeuralSolver(SolverBase):
             raise ValueError(f"inference_precision must be one of {INFERENCE_PRECISIONS}, got {inference_precision!r}.")
         self.inference_precision = inference_precision
         self.inference_compile = bool(inference_compile)
+        if step_mode not in ("physics_frame", "control_step"):
+            raise ValueError(f"step_mode must be 'physics_frame' or 'control_step', got {step_mode!r}.")
+        self.step_mode = step_mode
+        self.joint_target_input = bool(joint_target_input)
         self.contact_adapter = contact_adapter
         self.primary_body_q = getattr(contact_adapter, "primary_body_q", None)
         adapter_contact_filter = getattr(contact_adapter, "contact_filter", "none")
@@ -253,6 +263,7 @@ class NeuralSolver(SolverBase):
         self.root_body_qd = torch.empty((self.num_envs, 6), device=self.torch_device)
         self.states = torch.empty((self.num_envs, self.state_dim), device=self.torch_device)
         self.joint_f = torch.empty((self.num_envs, self.joint_f_dim), device=self.torch_device)
+        self.joint_target_q = torch.zeros((self.num_envs, self.dof_q_per_env), device=self.torch_device)
         self.contact_inputs: dict[str, torch.Tensor] = (
             {} if self.contact_adapter is None else self.contact_adapter.to_neural_inputs()
         )
@@ -471,6 +482,7 @@ class NeuralSolver(SolverBase):
         joint_f,
         *,
         update_history: bool = True,
+        joint_target_q=None,
     ) -> None:
         """Synchronize cached neural-model inputs from the current Newton state.
 
@@ -481,9 +493,10 @@ class NeuralSolver(SolverBase):
             update_history: Whether stateful solvers should treat this as a
                 history update. The base solver has no history, so this flag is
                 accepted for subclass consistency.
+            joint_target_q: Newton ``control.joint_target_q`` buffer, required when ``joint_target_input`` is set.
         """
         del update_history
-        self._update_states(newton_states, contacts, joint_f)
+        self._update_states(newton_states, contacts, joint_f, joint_target_q=joint_target_q)
 
     def translate_world_inputs(
         self, inputs: dict[str, torch.Tensor], translation: torch.Tensor
@@ -601,7 +614,7 @@ class NeuralSolver(SolverBase):
         if control is None:
             raise RuntimeError("Newton control is not initialized; cannot run the NeRD solver.")
         with step_profile.section("solver_update_states"):
-            self._update_states(state_in, contacts, control.joint_f)
+            self._update_states(state_in, contacts, control.joint_f, joint_target_q=control.joint_target_q)
 
         # Keep torch inference on Warp's CUDA stream so state reads, model
         # execution, and state writes preserve ordering without extra syncs.
@@ -638,7 +651,7 @@ class NeuralSolver(SolverBase):
     Update the states, joint_f, and contacts in neural solver from a Newton state.
     """
 
-    def _update_states(self, newton_states: State, contacts: Contacts | None, joint_f):
+    def _update_states(self, newton_states: State, contacts: Contacts | None, joint_f, *, joint_target_q=None):
         from isaaclab_neural.utils import step_profile
 
         if self.contact_adapter is not None and contacts is None:
@@ -653,6 +666,10 @@ class NeuralSolver(SolverBase):
         self.root_body_qd = wp.to_torch(body_qd).index_select(0, self.root_body_ids)
         if self.joint_f_dim > 0:
             self.joint_f = wp.to_torch(joint_f).view(self.num_envs, self.joint_f_dim)
+        if getattr(self, "joint_target_input", False):
+            if joint_target_q is None:
+                raise RuntimeError("joint_target_input requires Newton control.joint_target_q.")
+            self.joint_target_q = wp.to_torch(joint_target_q).view(self.num_envs, self.dof_q_per_env)
         reuse_contact_inputs = getattr(self, "_reuse_contact_inputs", False)
         self._reuse_contact_inputs = False
         if self.contact_adapter is not None and not reuse_contact_inputs:
@@ -693,6 +710,12 @@ class NeuralSolver(SolverBase):
         return contact_tokens_to_model_frame
 
     def process_neural_model_inputs(self, model_inputs):
+        # Joint targets enter the model relative to the current joint coordinates (joint space, frame-independent).
+        if "joint_target_q" in model_inputs:
+            model_inputs["joint_target_offset"] = (
+                model_inputs.pop("joint_target_q") - model_inputs["states"][..., : self.dof_q_per_env]
+            )
+
         # convert frame
         (
             model_inputs["states"],
@@ -793,6 +816,8 @@ class NeuralSolver(SolverBase):
         }
         if self.primary_body_q is not None:
             model_inputs["primary_body_q"] = self.primary_body_q
+        if getattr(self, "joint_target_input", False):
+            model_inputs["joint_target_q"] = self.joint_target_q
         for k in model_inputs.keys():
             model_inputs[k] = model_inputs[k].unsqueeze(1)  # (num_envs, T, dim)
 
@@ -810,6 +835,8 @@ class NeuralSolver(SolverBase):
         }
         if self.contact_token_frame == "owner" and self.primary_body_q is not None:
             model_inputs["primary_body_q"] = self.primary_body_q
+        if getattr(self, "joint_target_input", False):
+            model_inputs["joint_target_q"] = self.joint_target_q
         for k in model_inputs.keys():
             model_inputs[k] = model_inputs[k].unsqueeze(1)  # (num_envs, T, dim)
 

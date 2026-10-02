@@ -18,9 +18,13 @@ import torch
 
 from isaaclab_neural.contacts.contact_set_schema import (
     CONTACT_TOKEN_DIM,
+    NATIVE_CONTACT_COMPACT_DTYPES,
     NATIVE_CONTACT_DATASET_SCHEMA_VERSION,
     NATIVE_CONTACT_FRAME,
     NATIVE_CONTACT_INTEGER_FIELDS,
+    NATIVE_CONTACT_PRECISION_ATTR,
+    NATIVE_CONTACT_PRECISION_COMPACT,
+    NATIVE_CONTACT_PRECISION_FULL,
     NATIVE_CONTACT_STORAGE_SCHEMA,
     NATIVE_CONTACT_VALUE_FIELDS,
     NATIVE_CONTACT_VECTOR_FIELDS,
@@ -30,6 +34,50 @@ from isaaclab_neural.contacts.packing import ContactPackingPolicy
 NATIVE_PAIR_FIELDS = NATIVE_CONTACT_VALUE_FIELDS
 NATIVE_INTEGER_FIELDS = frozenset(NATIVE_CONTACT_INTEGER_FIELDS)
 ProjectionRepresentation = Literal["flat", "contact_tokens"]
+
+
+def canonical_native_dtype(name: str) -> np.dtype:
+    """Return the in-memory dtype of a native-pair field (int64 identifiers, float32 values)."""
+    return np.dtype("int64") if name in NATIVE_INTEGER_FIELDS else np.dtype("float32")
+
+
+def stored_native_dtype(name: str, precision: str) -> np.dtype:
+    """Return the on-disk dtype of a native-pair field for a storage precision."""
+    if precision == NATIVE_CONTACT_PRECISION_FULL:
+        return canonical_native_dtype(name)
+    if precision == NATIVE_CONTACT_PRECISION_COMPACT:
+        return np.dtype(NATIVE_CONTACT_COMPACT_DTYPES[name])
+    raise ValueError(f"Unsupported native-contact precision: {precision!r}.")
+
+
+def native_group_precision(group: h5py.Group | Mapping[str, Any]) -> str:
+    """Return the stored precision of a native-pair group (full precision when unspecified)."""
+    attrs = getattr(group, "attrs", {})
+    return str(_decode_attr(attrs.get(NATIVE_CONTACT_PRECISION_ATTR, NATIVE_CONTACT_PRECISION_FULL)))
+
+
+def compact_native_arrays(arrays: Mapping[str, np.ndarray], precision: str) -> dict[str, np.ndarray]:
+    """Cast canonical native-pair arrays to their stored dtypes, rejecting values the cast would change.
+
+    Identifiers must fit the narrower integer types exactly, and every narrowed float must stay finite.
+    """
+    result = {}
+    for name, value in arrays.items():
+        dtype = stored_native_dtype(name, precision)
+        if value.dtype == dtype:
+            result[name] = value
+            continue
+        if dtype.kind == "i":
+            limits = np.iinfo(dtype)
+            if value.size and (value.min() < limits.min or value.max() > limits.max):
+                raise ValueError(f"Native-contact field {name!r} exceeds its compact {dtype} range.")
+            result[name] = value.astype(dtype)
+        else:
+            narrowed = value.astype(dtype)
+            if not np.isfinite(narrowed).all():
+                raise ValueError(f"Native-contact field {name!r} is not finite after narrowing to {dtype}.")
+            result[name] = narrowed
+    return result
 
 
 def _to_numpy(value: Any) -> np.ndarray:
@@ -110,6 +158,7 @@ def validate_native_group(group: h5py.Group, expected_frames: int) -> int:
     offsets = np.asarray(offsets_dataset[()], dtype=np.int64)
     pair_count = int(cast(h5py.Dataset, group[NATIVE_PAIR_FIELDS[0]]).shape[0])
     validate_native_offsets(offsets, pair_count, expected_frames)
+    precision = native_group_precision(group)
     for name in NATIVE_PAIR_FIELDS:
         dataset = cast(h5py.Dataset, group[name])
         expected_shape = (pair_count, 3) if name in NATIVE_CONTACT_VECTOR_FIELDS else (pair_count,)
@@ -117,7 +166,7 @@ def validate_native_group(group: h5py.Group, expected_frames: int) -> int:
             raise ValueError(
                 f"Stored native-contact field {name!r} must have shape {expected_shape}, got {dataset.shape}."
             )
-        expected_dtype = np.dtype("int64") if name in NATIVE_INTEGER_FIELDS else np.dtype("float32")
+        expected_dtype = stored_native_dtype(name, precision)
         if dataset.dtype != expected_dtype:
             raise ValueError(f"Stored native-contact field {name!r} must use {expected_dtype}, got {dataset.dtype}.")
     return pair_count
@@ -362,7 +411,7 @@ def _read_contiguous_frames(
         filter_fields = ("separation",)
         if projection.contact_filter == "solver_active_movable":
             filter_fields += ("body_ids_0", "body_ids_1", "body_slots_0", "body_slots_1")
-        values = {name: np.asarray(cast(h5py.Dataset, group[name])[value_start:value_end]) for name in filter_fields}
+        values = {name: _read_native_field(group, name, value_start, value_end) for name in filter_fields}
         keep = native_pair_filter_mask(
             {name: torch.from_numpy(value) for name, value in values.items()},
             projection.contact_filter,
@@ -371,17 +420,18 @@ def _read_contiguous_frames(
         if not bool(keep.any()):
             return [_empty_native_arrays(field_names) for _ in range(frame_end - frame_start)]
     values.update(
-        {
-            name: np.asarray(cast(h5py.Dataset, group[name])[value_start:value_end])
-            for name in field_names
-            if name not in values
-        }
+        {name: _read_native_field(group, name, value_start, value_end) for name in field_names if name not in values}
     )
     relative_offsets = offsets - value_start
     return [
         {name: value[int(relative_offsets[index]) : int(relative_offsets[index + 1])] for name, value in values.items()}
         for index in range(frame_end - frame_start)
     ]
+
+
+def _read_native_field(group: h5py.Group | Mapping[str, h5py.Dataset], name: str, start: int, end: int) -> np.ndarray:
+    """Read one native-pair field range, widening compact storage to the canonical dtype."""
+    return np.asarray(cast(h5py.Dataset, group[name])[start:end]).astype(canonical_native_dtype(name), copy=False)
 
 
 def _empty_native_arrays(field_names: tuple[str, ...]) -> dict[str, np.ndarray]:

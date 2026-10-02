@@ -114,6 +114,22 @@ class NerdSolverCfg(NewtonSolverCfg):
     Training is unaffected.
     """
 
+    step_mode: str = "physics_frame"
+    """Time span of one model prediction: ``"physics_frame"`` or ``"control_step"``.
+
+    ``"physics_frame"`` predicts every physics frame. ``"control_step"`` predicts once per environment control
+    step (``decimation`` physics frames): the manager reports :meth:`NewtonNerdManager.handles_decimation`, so the
+    environment applies actions and steps physics once per control step, and contacts, actuator telemetry and the
+    model run once. Models must be trained on control-step records.
+    """
+
+    joint_target_input: bool = False
+    """Whether to feed joint position targets to the model as ``joint_target_offset``.
+
+    The offset is the Newton ``control.joint_target_q`` minus the current joint coordinates [m or rad, depending
+    on joint type], read after actuators update the targets of the current step.
+    """
+
     inference_compile: bool = False
     """Whether to compile fixed-shape steady-state model steps with ``torch.compile`` during online inference.
 

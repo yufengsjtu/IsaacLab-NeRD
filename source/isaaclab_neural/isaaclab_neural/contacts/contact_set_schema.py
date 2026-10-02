@@ -96,3 +96,38 @@ NATIVE_CONTACT_SCALAR_FIELDS: tuple[str, ...] = (
 
 NATIVE_CONTACT_FLOAT_FIELDS: tuple[str, ...] = NATIVE_CONTACT_VECTOR_FIELDS + NATIVE_CONTACT_SCALAR_FIELDS
 NATIVE_CONTACT_VALUE_FIELDS: tuple[str, ...] = NATIVE_CONTACT_INTEGER_FIELDS + NATIVE_CONTACT_FLOAT_FIELDS
+
+NATIVE_CONTACT_PRECISION_ATTR = "contact_value_precision"
+"""Native-pair group attribute naming the stored value precision (absent means full precision)."""
+
+NATIVE_CONTACT_PRECISION_FULL = "full"
+NATIVE_CONTACT_PRECISION_COMPACT = "compact_v1"
+
+NATIVE_CONTACT_COMPACT_DTYPES: dict[str, str] = {
+    "shape_ids_0": "int32",
+    "shape_ids_1": "int32",
+    "body_ids_0": "int32",
+    "body_ids_1": "int32",
+    "body_slots_0": "int16",
+    "body_slots_1": "int16",
+    "world_ids": "int16",
+    # Positions, separations and relative velocities drive filtering, packing and contact dynamics: keep FP32.
+    "points_0_w": "float32",
+    "points_1_w": "float32",
+    "surface_points_0_w": "float32",
+    "surface_points_1_w": "float32",
+    "separation": "float32",
+    "relative_velocities_0_w": "float32",
+    "relative_velocities_1_w": "float32",
+    # Unit normals, body-local offsets, lever arms [m] and margins [m] are bounded and tolerate FP16.
+    "points_0_local": "float16",
+    "points_1_local": "float16",
+    "normal_w": "float16",
+    "offsets_0": "float16",
+    "offsets_1": "float16",
+    "lever_arms_0_w": "float16",
+    "lever_arms_1_w": "float16",
+    "thickness_0": "float16",
+    "thickness_1": "float16",
+}
+"""Stored dtypes of ``compact_v1`` native pairs; readers widen them to int64/float32."""

@@ -18,10 +18,13 @@ import torch
 from isaaclab_neural.contacts.contact_set_schema import (
     NATIVE_CONTACT_DATASET_SCHEMA_VERSION,
     NATIVE_CONTACT_FRAME,
+    NATIVE_CONTACT_PRECISION_ATTR,
+    NATIVE_CONTACT_PRECISION_FULL,
     NATIVE_CONTACT_STORAGE_SCHEMA,
 )
 from isaaclab_neural.data.native_contacts import (
     NATIVE_PAIR_FIELDS,
+    compact_native_arrays,
     prepare_native_contacts,
     validate_native_group,
 )
@@ -40,6 +43,7 @@ def write_rollouts_to_hdf5(
     env_name: str,
     terrain_context: Mapping[str, Any] | None = None,
     body_net_contact_force_body_names: Sequence[str] | None = None,
+    native_contact_precision: str = NATIVE_CONTACT_PRECISION_FULL,
 ) -> None:
     """Serialize rollout tensors to a NeRD HDF5 trajectory dataset.
 
@@ -50,6 +54,8 @@ def write_rollouts_to_hdf5(
         env_name: Environment name stored in dataset metadata.
         terrain_context: Optional deterministic terrain provenance.
         body_net_contact_force_body_names: Primary body names in force-label slot order.
+        native_contact_precision: Stored native-pair precision, ``"full"`` (int64/float32) or ``"compact_v1"``
+            (see ``NATIVE_CONTACT_COMPACT_DTYPES``). Readers widen compact values to the full dtypes.
     """
     dataset_path = Path(dataset_path).expanduser()
     dataset_path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,7 +78,7 @@ def write_rollouts_to_hdf5(
                 chunks=True,
             )
         if native_contacts is not None:
-            _create_native_contact_group(dataset_file, *native_contacts)
+            _create_native_contact_group(dataset_file, *native_contacts, precision=native_contact_precision)
         _create_context_groups(dataset_file, trajectory_context, terrain_context)
         data_group.attrs["env"] = env_name
         data_group.attrs["mode"] = "trajectory"
@@ -544,10 +550,14 @@ def _create_native_contact_group(
     dataset_file: h5py.File,
     frame_offsets: np.ndarray,
     arrays: Mapping[str, np.ndarray],
+    precision: str = NATIVE_CONTACT_PRECISION_FULL,
 ) -> None:
     """Create appendable native-pair CSR datasets."""
+    arrays = compact_native_arrays(arrays, precision)
     contacts_group = dataset_file.create_group("contacts")
     native_group = contacts_group.create_group("native_pairs")
+    if precision != NATIVE_CONTACT_PRECISION_FULL:
+        native_group.attrs[NATIVE_CONTACT_PRECISION_ATTR] = precision
     try:
         native_group.create_dataset(
             "frame_offsets",

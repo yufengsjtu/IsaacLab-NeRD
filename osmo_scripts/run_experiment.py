@@ -187,11 +187,22 @@ def _native_contact_cache_complete(native_group: h5py.Group, total_transitions: 
             return False
         if chunk.size:
             previous = int(chunk[-1])
+    precision = native_group.attrs.get("contact_value_precision", "full")
+    precision = precision.decode() if isinstance(precision, bytes) else precision
+    if precision not in ("full", "compact_v1"):
+        print(f"Rejected cached native-contact dataset with unknown precision {precision!r}: {dataset_path}")
+        return False
     for name in integer_fields | vector_fields | scalar_fields:
         dataset = cast(h5py.Dataset, native_group[name])
         expected_tail = (3,) if name in vector_fields else ()
-        expected_dtype = np.dtype("int64") if name in integer_fields else np.dtype("float32")
-        if dataset.shape != (pair_count, *expected_tail) or dataset.dtype != expected_dtype:
+        # compact_v1 narrows fields (the training package validates the exact per-field dtypes).
+        if name in integer_fields:
+            expected_dtypes = {np.dtype("int64")} if precision == "full" else {np.dtype("int16"), np.dtype("int32")}
+        else:
+            expected_dtypes = (
+                {np.dtype("float32")} if precision == "full" else {np.dtype("float16"), np.dtype("float32")}
+            )
+        if dataset.shape != (pair_count, *expected_tail) or dataset.dtype not in expected_dtypes:
             print(f"Rejected cached native-contact dataset with invalid field {name!r}: {dataset_path}")
             return False
     return True

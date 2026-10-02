@@ -1143,3 +1143,112 @@ def test_validation_iterators_are_recreated_each_epoch() -> None:
     second = reset_iterators(loaders)
 
     assert first["valid"] is not second["valid"]
+
+
+def _write_random_native_dataset(path, *, precision: str, num_trajectories: int = 5, horizon: int = 8) -> None:
+    """Variable pair counts, mixed signs of separation and two-sided bodies, for projection parity."""
+    generator = torch.Generator().manual_seed(7)
+    counts = torch.randint(0, 5, (num_trajectories, horizon), generator=generator)
+    pair_count = int(counts.sum())
+    native = {name: torch.zeros(pair_count, dtype=torch.int64) for name in NATIVE_CONTACT_INTEGER_FIELDS}
+    native.update({name: torch.randn((pair_count, 3), generator=generator) for name in NATIVE_CONTACT_VECTOR_FIELDS})
+    native.update({name: torch.randn(pair_count, generator=generator) for name in NATIVE_CONTACT_SCALAR_FIELDS})
+    native["frame_counts"] = counts
+    worlds = torch.arange(num_trajectories).repeat_interleave(counts.sum(dim=1))
+    native["world_ids"] = worlds
+    native["body_slots_0"] = torch.randint(0, 3, (pair_count,), generator=generator)
+    native["body_ids_0"] = worlds * 3 + native["body_slots_0"]
+    static = torch.rand(pair_count, generator=generator) < 0.5
+    native["body_slots_1"] = torch.where(static, -1, torch.randint(0, 3, (pair_count,), generator=generator))
+    native["body_ids_1"] = torch.where(static, -1, worlds * 3 + native["body_slots_1"])
+    states = torch.randn((num_trajectories, horizon, 2), generator=generator)
+    write_rollouts_to_hdf5(
+        path,
+        {
+            "states": states,
+            "next_states": states + 1,
+            "joint_f": torch.randn((num_trajectories, horizon, 1), generator=generator),
+            "root_body_q": torch.zeros((num_trajectories, horizon, 7)),
+            "root_body_qd": torch.zeros((num_trajectories, horizon, 6)),
+            "gravity_dir": torch.zeros((num_trajectories, horizon, 3)),
+            "terminated": torch.zeros((num_trajectories, horizon), dtype=torch.bool),
+            "truncated": torch.zeros((num_trajectories, horizon), dtype=torch.bool),
+            "contacts": {},
+            "native_contacts": native,
+            "trajectory_context": {
+                "source_env_id": torch.arange(num_trajectories),
+                "source_start_frame": torch.zeros(num_trajectories, dtype=torch.int64),
+                **{
+                    name: torch.arange(num_trajectories)
+                    for name in ("state_world_id", "root_world_id", "contact_world_id")
+                },
+            },
+        },
+        env_name="Test-Env",
+        native_contact_precision=precision,
+    )
+    with h5py.File(path, "a") as file:
+        file["data"].attrs["recording_id"] = "gpu-resident-fixture"
+
+
+@pytest.mark.parametrize("sampling", ["canonical", "sliding"])
+@pytest.mark.parametrize("rank,world_size", [(0, 1), (1, 2)])
+@pytest.mark.parametrize("precision", ["full", "compact_v1"])
+@pytest.mark.parametrize("contact_filter", ["none", "solver_active"])
+def test_gpu_resident_batches_match_eager_windows(tmp_path, sampling, rank, world_size, precision, contact_filter):
+    from isaaclab_neural.data.datasets import WeightedMixedTrajectoryDataset, create_trajectory_dataset
+    from isaaclab_neural.data.gpu_resident import GpuBatchLoader, GpuResidentTrajectoryDataset
+    from isaaclab_neural.data.transition_index import SUPERVISION_WINDOW
+
+    path = tmp_path / "native.hdf5"
+    _write_random_native_dataset(path, precision=precision)
+    kwargs = dict(
+        hdf5_dataset_path=path,
+        sample_sequence_length=3,
+        max_capacity=29,
+        capacity_unit="unique_transition",
+        window_sampling=sampling,
+        rank=rank,
+        world_size=world_size,
+        contact_representation="contact_tokens",
+        max_contact_tokens=3,
+        contact_filter=contact_filter,
+        read_keys=("states", "next_states", "joint_f"),
+        eager_preload_frames=16,
+    )
+    eager = create_trajectory_dataset(load_mode="eager", **kwargs)
+    resident_kwargs = {key: value for key, value in kwargs.items() if key not in ("hdf5_dataset_path", "capacity_unit")}
+    # Compact resident pairs are exact only for values already stored at compact precision.
+    gpu = GpuResidentTrajectoryDataset(path, device="cpu", compact_pairs=precision == "compact_v1", **resident_kwargs)
+    half = create_trajectory_dataset(load_mode="gpu", device="cpu", float16_keys=("states",), **kwargs)
+    try:
+        assert len(gpu) == len(eager) and gpu.capacity_stats == eager.capacity_stats
+        indices = [len(eager) - 1, 0, 2, 2, 1, *range(len(eager))]
+        batch = gpu.get_batch(indices)
+        for position, index in enumerate(indices):
+            reference = eager[index]
+            assert reference.keys() == batch.keys()
+            for key, value in reference.items():
+                torch.testing.assert_close(batch[key][position], value, rtol=0, atol=0)
+        assert bool((batch["contact_tokens"][..., 0] > 0.5).any())
+        torch.testing.assert_close(half.get_batch(indices)["states"], batch["states"], rtol=1e-3, atol=1e-3)
+
+        loader = GpuBatchLoader(gpu, batch_size=4, shuffle=True, seed=3)
+        windows = torch.cat([chunk[SUPERVISION_WINDOW] for chunk in loader])
+        assert len(loader) == -(-len(gpu) // 4)
+        everything = gpu.get_batch(list(range(len(gpu))))
+        torch.testing.assert_close(windows.sort().values, everything[SUPERVISION_WINDOW].sort().values)
+        second = GpuResidentTrajectoryDataset(
+            path, device="cpu", compact_pairs=precision == "compact_v1", **resident_kwargs
+        )
+        second.supervision_source_index = 1
+        mixed = WeightedMixedTrajectoryDataset({"first": gpu, "second": second}, {"first": 2.0, "second": 1.0})
+        mixed_indices = [len(mixed) - 1, 0, int(mixed.source_boundaries[0]), 2]
+        mixed_batch = next(iter(GpuBatchLoader(mixed, batch_size=len(mixed), shuffle=False)))
+        for index in mixed_indices:
+            for key, value in mixed[index].items():
+                torch.testing.assert_close(mixed_batch[key][index], value, rtol=0, atol=0)
+    finally:
+        eager.close()
+        gpu.close()
+        half.close()

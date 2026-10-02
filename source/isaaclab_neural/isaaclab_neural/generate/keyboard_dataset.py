@@ -305,6 +305,7 @@ class KeyboardFrameRecorder:
             raise ValueError("Keyboard recording requires one observable scene update per physics frame.")
         self.env = env
         self.adapter = adapter
+        self.records_per_step = int(env.cfg.decimation)
         self.frames: list[dict[str, Any]] = []
         self.contexts: list[dict[str, torch.Tensor]] = []
         self.before: dict[str, Any] = {}
@@ -395,8 +396,8 @@ class KeyboardFrameRecorder:
                 scene.update = prior_override
             else:
                 del scene.update
-        if len(self.frames) - start != self.env.cfg.decimation:
-            raise RuntimeError("Recorded physics-frame count does not match decimation.")
+        if len(self.frames) - start != self.records_per_step:
+            raise RuntimeError("Recorded record count does not match the control step.")
         self.frames[-1].update(
             terminated=_cpu(result[2]),
             truncated=_cpu(result[3]),
@@ -427,7 +428,7 @@ class KeyboardFrameRecorder:
         """Reuse native CSR packing for fixed-length clips that do not cross reset."""
         tensors = self.tensors()
         selected = keyboard_clip_indices(
-            tensors["terminated"] | tensors["truncated"], horizon=horizon, decimation=self.env.cfg.decimation
+            tensors["terminated"] | tensors["truncated"], horizon=horizon, decimation=self.records_per_step
         )
         if not selected:
             raise ValueError("No full reset-safe clips; shorten the horizon or collect more control steps.")
@@ -436,9 +437,7 @@ class KeyboardFrameRecorder:
             for name, value in tensors.items()
         }
         output["trajectory_context"] = {
-            name: torch.stack(
-                [self.contexts[start // self.env.cfg.decimation][name][world] for world, start in selected]
-            )
+            name: torch.stack([self.contexts[start // self.records_per_step][name][world] for world, start in selected])
             for name in self.contexts[0]
         }
         output["trajectory_context"]["source_start_frame"] = torch.tensor([start for _, start in selected])
@@ -446,6 +445,70 @@ class KeyboardFrameRecorder:
             [frame["native"] for frame in self.frames], selected, horizon=horizon, num_worlds=self.env.num_envs
         )
         return output
+
+
+class KeyboardControlStepRecorder(KeyboardFrameRecorder):
+    """Record one transition per control step for ``step_mode="control_step"`` NeRD models.
+
+    Model inputs follow the control-step runtime: state, body poses and native contacts at the control boundary,
+    and the applied effort and joint position targets after the actuators of the step's first physics frame.
+    Labels are read after the last physics frame (next state, post-solve normal forces and key state).
+    """
+
+    def __init__(self, env: Any, adapter: DataGenerationAdapter):
+        super().__init__(env, adapter, record_model_context=False)
+        self.records_per_step = 1
+        self._interval_frames = 0
+        self._step_inputs: dict[str, torch.Tensor] = {}
+
+    def step(self, action: torch.Tensor) -> tuple:
+        self._interval_frames = 0
+        return super().step(action)
+
+    def _after_frame(self, action: torch.Tensor) -> None:
+        import warp as wp
+
+        env = self.env
+        self._interval_frames += 1
+        if self._interval_frames == 1:
+            control = self.adapter.control
+            assert control.joint_f is not None and control.joint_target_q is not None
+            joint_f = wp.to_torch(control.joint_f)
+            saved = joint_f.clone()
+            try:
+                self.adapter.overlay_applied_effort_into_control_joint_f()
+                effort = _cpu(joint_f.view(env.num_envs, -1))
+            finally:
+                joint_f.copy_(saved)
+            self._step_inputs = {
+                "joint_f": effort,
+                "joint_target_q": _cpu(wp.to_torch(control.joint_target_q).view(env.num_envs, -1)),
+            }
+        if self._interval_frames < env.cfg.decimation:
+            return
+        force = _cpu(env.scene.sensors["robot_contact"].data.net_normal_forces_w_history.torch[:, 0])
+        command = env.command_manager.get_term("typing")
+        keyboard = env.scene["keyboard"]
+        q = keyboard.data.joint_pos.torch[command._inst_idx, command._col_idx]
+        limits = keyboard.data.joint_pos_limits.torch[command._inst_idx, command._col_idx]
+        pressed = _cpu(q < limits[..., 1] - command.cfg.actuation_fraction * (limits[..., 1] - limits[..., 0]))
+        self.adapter.sync()
+        after = self._snapshot()
+        frame = dict(self.before)
+        frame.update(
+            next_states=after["states"],
+            **self._step_inputs,
+            actions=_cpu(action),
+            robot_net_normal_forces_w=force,
+            key_pressed=pressed,
+            terminated=torch.zeros(env.num_envs, dtype=torch.bool),
+            truncated=torch.zeros(env.num_envs, dtype=torch.bool),
+            control_boundary=torch.zeros(env.num_envs, dtype=torch.bool),
+            typed_after=torch.full_like(_cpu(command.typed), -1),
+            reward=torch.zeros(env.num_envs),
+        )
+        self.frames.append(frame)
+        self.before = after
 
 
 class KeyboardPressPolicy:
@@ -919,8 +982,11 @@ def collect_keyboard_chunk(
     started = time.monotonic()
     metadata = dict(metadata)
     metadata["recording_id"] = uuid.uuid4().hex
-    recorder = KeyboardFrameRecorder(
-        env, adapter, record_model_context=bool(metadata.get("mjwarp_model_context_fields"))
+    control_steps = metadata.get("step_mode") == "control_step"
+    recorder = (
+        KeyboardControlStepRecorder(env, adapter)
+        if control_steps
+        else KeyboardFrameRecorder(env, adapter, record_model_context=bool(metadata.get("mjwarp_model_context_fields")))
     )
     completed_episodes = clean_successes = 0
     policy = (
@@ -966,9 +1032,21 @@ def collect_keyboard_chunk(
         random_action_limit=args.random_action_limit,
         random_hold_controls=args.random_hold_controls,
         terminal_tail_clips_may_overlap=True,
-        replay_layout=KEYBOARD_REPLAY_LAYOUT,
     )
-    write_keyboard_dataset(args.dataset, rollouts, metadata, replay=recorder.timeline())
+    if control_steps:
+        # Control-step records cannot be replayed frame by frame; record the timeline length instead.
+        metadata["recorded_records_per_env"] = len(recorder.frames)
+        replay = None
+    else:
+        metadata["replay_layout"] = KEYBOARD_REPLAY_LAYOUT
+        replay = recorder.timeline()
+    write_keyboard_dataset(
+        args.dataset,
+        rollouts,
+        metadata,
+        replay=replay,
+        native_contact_precision=getattr(args, "native_contact_precision", "full"),
+    )
     packing = adapter.contact_truncation_summary()
     if packing is None:
         raise RuntimeError("Native contact statistics are unavailable.")
@@ -1003,7 +1081,9 @@ def collect_keyboard_chunk(
         "clean_success_rate": clean_successes / completed_episodes if completed_episodes else None,
         "pressed_slot_count": int(rollouts["key_pressed"].any(dim=(0, 1)).sum()),
         "trajectory_count": int(rollouts["states"].shape[0]),
-        "physics_frames_per_trajectory": args.horizon,
+        "step_mode": metadata.get("step_mode", "physics_frame"),
+        "physics_frames_per_trajectory": args.horizon * (env.cfg.decimation if control_steps else 1),
+        "records_per_trajectory": args.horizon,
         "total_recorded_frames_per_env": len(recorder.frames),
         "key_down_edges_inside_clips": int((rollouts["key_pressed"][:, 1:] & ~rollouts["key_pressed"][:, :-1]).sum()),
         "max_normal_force_n": float(rollouts["robot_net_normal_forces_w"].norm(dim=-1).max()),
@@ -1106,7 +1186,18 @@ def main() -> None:
     parser.add_argument("--bounded-deterministic-workspace", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--keyboard-variant", type=int, choices=(0,), default=None)
     parser.add_argument("--control-steps", type=int, default=140)
-    parser.add_argument("--horizon", type=int, default=64)
+    parser.add_argument("--horizon", type=int, default=64, help="Records per stored clip.")
+    parser.add_argument(
+        "--record-control-steps",
+        action="store_true",
+        help="Record one transition per control step (step_mode=control_step) instead of per physics frame.",
+    )
+    parser.add_argument(
+        "--native-contact-precision",
+        choices=("full", "compact_v1"),
+        default="full",
+        help="Stored native contact-pair precision; compact_v1 narrows bounded fields (readers widen them).",
+    )
     parser.add_argument("--max-contact-tokens", type=int, default=None)
     parser.add_argument("--contact-filter", choices=("none", "solver_active", "solver_active_movable"), default=None)
     parser.add_argument("--collection-mode", choices=("press", "random", "zero", "policy"), default="press")
@@ -1140,13 +1231,17 @@ def main() -> None:
     contact_filter = saved.get("contact_filter", "none") if saved else (args.contact_filter or "none")
     if saved and args.contact_filter is not None and args.contact_filter != contact_filter:
         raise ValueError("Replay contact filter differs from the recording.")
+    if saved and saved.get("step_mode") == "control_step":
+        raise ValueError("Control-step recordings have no physics-frame timeline to replay.")
+    if args.record_control_steps and args.mode == "replay":
+        parser.error("--record-control-steps applies to collection only")
     if saved and args.max_contact_tokens is not None and args.max_contact_tokens != max_contact_tokens:
         raise ValueError("Replay contact-token capacity differs from the recording.")
     if max_contact_tokens <= 0 or args.max_contact_tokens == 0:
         parser.error("max-contact-tokens must be positive")
     cfg, agent, variant, play_mode = _resolve_scene(args, saved)
-    if args.horizon <= 0 or args.horizon % cfg.decimation:
-        parser.error("horizon must be a positive multiple of decimation")
+    if args.horizon <= 0 or (not args.record_control_steps and args.horizon % cfg.decimation):
+        parser.error("horizon must be positive and, for physics-frame records, a multiple of decimation")
     _configure_replay_video(cfg, args, saved)
     from isaaclab_neural.generate.keyboard_determinism import keyboard_deterministic_workspace, workspace_contract
 
@@ -1178,10 +1273,15 @@ def main() -> None:
                         max_contact_tokens=max_contact_tokens,
                         contact_filter=contact_filter,
                         contact_packing_policy="body_round_robin_pair_atomic",
+                        joint_target_input=bool(args.record_control_steps),
                     ),
                 )
                 metadata = runtime_metadata(env, adapter, variant)
                 metadata["max_contact_tokens"] = max_contact_tokens
+                if args.record_control_steps:
+                    metadata["step_mode"] = "control_step"
+                    metadata["joint_target_contract"] = "newton_control_joint_target_q_after_first_frame_actuators"
+                    metadata["joint_f_contract"] = "post_actuator_shadow_PD_of_the_first_physics_frame"
                 if workspace is not None:
                     metadata["deterministic_workspace"] = workspace
                     metadata["mjwarp_model_context_fields"] = list(MJW_MODEL_FIELDS)

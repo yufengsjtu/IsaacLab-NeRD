@@ -300,6 +300,8 @@ def validate_basic_recordings(root: Path, experiment: dict[str, Any], records: d
             or metadata.get("deterministic_workspace") != expected_workspace
             or metadata.get("max_contact_tokens", 256) != experiment.get("max_contact_tokens", 256)
             or metadata.get("contact_filter", "none") != experiment.get("contact_filter", "none")
+            or metadata.get("step_mode", "physics_frame")
+            != ("control_step" if experiment["collection"].get("record_control_steps", False) else "physics_frame")
             or (
                 expected_workspace is not None
                 and metadata.get("mjwarp_model_context_fields") != list(KEYBOARD_MJW_MODEL_FIELDS)
@@ -348,7 +350,12 @@ def validate_basic_recordings(root: Path, experiment: dict[str, Any], records: d
                 or states.shape[2] != metadata["num_q"] + metadata["num_qd"]
                 or _dataset(file, "data/next_states").shape != states.shape
                 or report.get("trajectory_count") != states.shape[0]
-                or report.get("total_recorded_frames_per_env") != _dataset(file, "replay/frames/states").shape[1]
+                or report.get("total_recorded_frames_per_env")
+                != (
+                    metadata.get("recorded_records_per_env")
+                    if metadata.get("step_mode") == "control_step"
+                    else _dataset(file, "replay/frames/states").shape[1]
+                )
             ):
                 raise ValueError(f"Keyboard basic data shape mismatch: {name}.")
             done = _dataset(file, "data/terminated")[:].astype(bool) | _dataset(file, "data/truncated")[:].astype(bool)
@@ -576,8 +583,13 @@ def collection_plan(experiment: dict[str, Any]) -> dict[str, Any]:
         "deterministic_physics", not basic
     ):
         raise ValueError("Bounded deterministic workspaces require deterministic physics.")
+    if collection.get("record_control_steps", False) and not basic:
+        raise ValueError("Control-step records have no physics-frame timeline to replay; use basic validation.")
+    if collection.get("native_contact_precision", "full") not in ("full", "compact_v1"):
+        raise ValueError("Unsupported native contact precision.")
+    records_per_control = 1 if collection.get("record_control_steps", False) else 4
     if (
-        collection["chunk_control_steps"] < experiment["trajectory_length"] // 4
+        collection["chunk_control_steps"] * records_per_control < experiment["trajectory_length"]
         or collection["max_chunks_per_group"] <= 0
         or collection["seed_stride"] <= 0
     ):
@@ -780,6 +792,10 @@ def _collect_part(
         ]
         if collection.get("bounded_deterministic_workspace", False):
             command.append("--bounded-deterministic-workspace")
+        if collection.get("record_control_steps", False):
+            command.append("--record-control-steps")
+        if collection.get("native_contact_precision", "full") != "full":
+            command += ["--native-contact-precision", collection["native_contact_precision"]]
         if worker is None:
             run_logged(
                 command, diagnostics / (part + ".collect.log"), env=env, timeout=collection.get("timeout_seconds")

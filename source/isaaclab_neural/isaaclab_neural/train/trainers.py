@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import os
 import shutil
@@ -70,6 +71,17 @@ ROBOT_TRAINING_READ_KEYS = (
     "gravity_dir",
     "robot_net_normal_forces_w",
 )
+
+
+def _float_model_output(output: Any) -> Any:
+    """Widen reduced-precision model outputs to FP32 before losses and metrics."""
+    if isinstance(output, torch.Tensor):
+        return output.float()
+    if hasattr(output, "state_prediction") and hasattr(output, "auxiliary_predictions"):
+        output.state_prediction = output.state_prediction.float()
+        output.auxiliary_predictions = {key: value.float() for key, value in output.auxiliary_predictions.items()}
+    return output
+
 
 NON_MODEL_DATA_KEYS = {
     SUPERVISION_TARGET_IDS,
@@ -432,6 +444,15 @@ class VanillaTrainer:
         if self.active_contact_force_threshold_n < 0.0:
             raise ValueError("Active-contact force threshold [N] must be non-negative.")
 
+        self.training_precision = algo_cfg.get("precision", "fp32")
+        if self.training_precision not in ("fp32", "bf16", "fp16"):
+            raise ValueError("algorithm.precision must be 'fp32', 'bf16' or 'fp16'.")
+        # FP16 autocast scales the loss so small gradients do not underflow; overflowing steps are skipped.
+        self.grad_scaler = (
+            torch.amp.GradScaler("cuda")
+            if self.training_precision == "fp16" and torch.device(self.device).type == "cuda"
+            else None
+        )
         self.batch_size = int(algo_cfg["batch_size"])
         self.num_valid_batches = int(algo_cfg.get("num_valid_batches", 50))
         dataset_cfg = algo_cfg["dataset"]
@@ -627,6 +648,13 @@ class VanillaTrainer:
         if isinstance(self.neural_model, DistributedDataParallel):
             return self.neural_model.module
         return self.neural_model
+
+    def _training_precision_context(self):
+        """Return the autocast context of the model forward pass (losses and statistics stay FP32)."""
+        precision = getattr(self, "training_precision", "fp32")
+        if precision == "fp32" or torch.device(self.device).type != "cuda":
+            return contextlib.nullcontext()
+        return torch.autocast("cuda", dtype=torch.bfloat16 if precision == "bf16" else torch.float16)
 
     def _forward_model(self, data: dict[str, torch.Tensor], train: bool, **kwargs):
         """Run model forward, avoiding DDP collectives for rank-local validation."""
@@ -920,7 +948,10 @@ class VanillaTrainer:
             extra_args = {"fused": True} if fused_available and "cuda" in str(self.device) else {}
             self.optimizer = torch.optim.AdamW(optim_groups, lr=self.lr_start, betas=self.betas, **extra_args)
         else:
-            self.optimizer = torch.optim.Adam(self.neural_model.parameters(), lr=self.lr_start, betas=self.betas)
+            fused = "cuda" in str(self.device) and bool(algo_cfg["optimizer"].get("fused", False))
+            self.optimizer = torch.optim.Adam(
+                self.neural_model.parameters(), lr=self.lr_start, betas=self.betas, **({"fused": True} if fused else {})
+            )
 
     def get_datasets(self, train_dataset_path, valid_datasets_cfg, train_datasets_cfg=None) -> None:
         if self.dataset_capacity_unit != "stored_frame":
@@ -949,6 +980,7 @@ class VanillaTrainer:
 
     def _configure_keyboard_datasets(self) -> None:
         from isaaclab_neural.data.keyboard import (
+            keyboard_step_mode,
             read_keyboard_metadata,
             validate_keyboard_runtime,
             validate_keyboard_training_contracts,
@@ -987,6 +1019,12 @@ class VanillaTrainer:
                 raise ValueError("Training/runtime contact filter and recorded body mobility differ.")
         if reference["physics_dt"] != self.neural_env.frame_dt:
             raise ValueError("Keyboard dataset physics_dt differs from the training solver.")
+        if keyboard_step_mode(reference) != getattr(self.neural_solver, "step_mode", "physics_frame"):
+            raise ValueError(
+                "Keyboard dataset records and the solver step_mode differ (physics frame vs control step)."
+            )
+        if getattr(self.neural_solver, "joint_target_input", False) and keyboard_step_mode(reference) != "control_step":
+            raise ValueError("joint_target_input requires control-step Keyboard records with joint targets.")
         if (
             reference["num_q"] != self.neural_solver.dof_q_per_env
             or reference["num_qd"] != self.neural_solver.dof_qd_per_env
@@ -1058,6 +1096,16 @@ class VanillaTrainer:
         num_workers: int | None = None,
     ) -> DataLoader:
         """Create a consistently configured training or validation DataLoader."""
+        if getattr(self, "dataset_load_mode", "eager") == "gpu":
+            from isaaclab_neural.data.gpu_resident import GpuBatchLoader
+
+            del sampler, persistent_workers, num_workers
+            return cast(
+                DataLoader,
+                GpuBatchLoader(
+                    dataset, batch_size, shuffle=shuffle, drop_last=drop_last, seed=self.seed + 1_000_003 * self.rank
+                ),
+            )
         loader_workers = self.num_data_workers if num_workers is None else num_workers
         use_persistent_workers = (
             self.persistent_workers if persistent_workers is None else persistent_workers
@@ -1085,6 +1133,8 @@ class VanillaTrainer:
             and getattr(self, "dataset_window_sampling", "canonical") == "canonical"
             and hasattr(dataset, "datasets")
         ):
+            if getattr(self, "dataset_load_mode", "eager") == "gpu":
+                raise ValueError("GPU-resident datasets support statistics over sliding windows or single sources.")
             dataset = ConcatDataset(list(dataset.datasets.values()))
         dataloader = self._make_dataloader(
             dataset=dataset,
@@ -1234,11 +1284,8 @@ class VanillaTrainer:
         for key in NON_MODEL_DATA_KEYS.intersection(data):
             data.pop(key)
         if getattr(self, "robot_force_head_enabled", False):
-            data = {
-                key: value
-                for key, value in data.items()
-                if key in ROBOT_TRAINING_READ_KEYS or key.startswith("contact_")
-            }
+            robot_keys = self._robot_training_read_keys()
+            data = {key: value for key, value in data.items() if key in robot_keys or key.startswith("contact_")}
             forces = data.get("robot_net_normal_forces_w")
             if forces is None or forces.shape[-2:] != (7, 3) or not torch.isfinite(forces).all():
                 raise ValueError("Robot normal-force training requires finite [B, T, 7, 3] labels.")
@@ -1297,6 +1344,12 @@ class VanillaTrainer:
             raise ValueError("Unique-transition dataset did not provide its supervision mask.")
         return data
 
+    def _robot_training_read_keys(self) -> tuple[str, ...]:
+        """Stored fields read for robot-force (Keyboard) training, including joint targets when the model uses them."""
+        if getattr(self.neural_solver, "joint_target_input", False):
+            return (*ROBOT_TRAINING_READ_KEYS, "joint_target_q")
+        return ROBOT_TRAINING_READ_KEYS
+
     def compute_loss(self, data: dict[str, torch.Tensor], train: bool):
         self._metric_statistics: dict[str, tuple[float, float]] = {}
         if self.neural_model_unwrapped.is_rnn:
@@ -1306,9 +1359,11 @@ class VanillaTrainer:
         prediction_target = data["prediction_target"]
         finger_enabled = getattr(self, "finger_force_head_enabled", False)
         robot_enabled = getattr(self, "robot_force_head_enabled", False)
-        model_output = self._forward_model(
-            data, train, return_aux=self.force_head_enabled or finger_enabled or robot_enabled
-        )
+        with self._training_precision_context():
+            model_output = self._forward_model(
+                data, train, return_aux=self.force_head_enabled or finger_enabled or robot_enabled
+            )
+        model_output = _float_model_output(model_output)
         if self.force_head_enabled or finger_enabled or robot_enabled:
             prediction = model_output.state_prediction
         else:
@@ -1394,28 +1449,18 @@ class VanillaTrainer:
                 dt=self.neural_env.frame_dt,
             )
             self.neural_solver.wrap2PI(predicted_next_states)
-            loss_itemized = {
-                "state_MSE": torch.nn.MSELoss()(predicted_next_states, data["next_states"]).detach().cpu().item(),
+            # Metrics stay on the device and are transferred to the host together below.
+            q_dofs = self.neural_solver.dof_q_per_env
+            itemized: dict[str, torch.Tensor] = {
+                "state_MSE": torch.nn.MSELoss()(predicted_next_states, data["next_states"]),
                 "q_error_norm": torch.norm(
-                    predicted_next_states[..., : self.neural_solver.dof_q_per_env]
-                    - data["next_states"][..., : self.neural_solver.dof_q_per_env],
-                    dim=-1,
-                )
-                .mean()
-                .detach()
-                .cpu()
-                .item(),
+                    predicted_next_states[..., :q_dofs] - data["next_states"][..., :q_dofs], dim=-1
+                ).mean(),
                 "qd_error_norm": torch.norm(
-                    predicted_next_states[..., self.neural_solver.dof_q_per_env :]
-                    - data["next_states"][..., self.neural_solver.dof_q_per_env :],
-                    dim=-1,
-                )
-                .mean()
-                .detach()
-                .cpu()
-                .item(),
+                    predicted_next_states[..., q_dofs:] - data["next_states"][..., q_dofs:], dim=-1
+                ).mean(),
             }
-            loss_itemized.update(robot_metrics)
+            statistics: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
             if robot_enabled:
                 from isaaclab_neural.contacts.keyboard_normal_force import LABEL_KEY, LOGITS_KEY, MODEL_CONTRACT
 
@@ -1423,15 +1468,14 @@ class VanillaTrainer:
                 active = target.norm(dim=-1) > MODEL_CONTRACT["active_threshold_n"]
                 predicted_active = auxiliary_predictions[LOGITS_KEY] > 0
                 errors = (auxiliary_predictions[LABEL_KEY] - target).square().sum(-1)
-                tp = float((active & predicted_active).sum().cpu())
-                self._metric_statistics.update(
+                tp = (active & predicted_active).sum()
+                statistics.update(
                     {
-                        "robot_normal_active_RMSE_N": (float(errors[active].sum().cpu()), float(active.sum().cpu())),
-                        "robot_normal_contact_precision": (tp, float(predicted_active.sum().cpu())),
-                        "robot_normal_contact_recall": (tp, float(active.sum().cpu())),
+                        "robot_normal_active_RMSE_N": ((errors * active).sum(), active.sum()),
+                        "robot_normal_contact_precision": (tp, predicted_active.sum()),
+                        "robot_normal_contact_recall": (tp, active.sum()),
                     }
                 )
-            if robot_enabled:
                 metadata = self.cfg["keyboard_dataset_contracts"]["train"]
                 keys = metadata["key_q_indices"]
                 nq = metadata["num_q"]
@@ -1444,11 +1488,19 @@ class VanillaTrainer:
                     ("key_qd_m_s", "key_qd", [nq + key for key in keys]),
                     ("robot_qd_rad_s", "robot_qd", [nq + key for key in robot]),
                 ):
-                    loss_itemized[name + "_RMSE"] = float(state_error[..., indices].square().mean().sqrt().cpu())
-                    loss_itemized[name + "_max"] = float(state_error[..., indices].abs().max().cpu())
+                    itemized[name + "_RMSE"] = state_error[..., indices].square().mean().sqrt()
+                    itemized[name + "_max"] = state_error[..., indices].abs().max()
                     # Variance-weighted squared error; near one means no better than the mean target.
                     if weighted_error.shape[-1] == 2 * nq:
-                        loss_itemized[group + "_weighted_state_MSE"] = float(weighted_error[..., indices].mean().cpu())
+                        itemized[group + "_weighted_state_MSE"] = weighted_error[..., indices].mean()
+            names = [*itemized, *(f"{key}/{part}" for key in statistics for part in ("numerator", "count"))]
+            values = [*itemized.values(), *(value for pair in statistics.values() for value in pair)]
+            host = dict(zip(names, torch.stack([value.float() for value in values]).tolist(), strict=True))
+            loss_itemized = {name: host[name] for name in itemized}
+            loss_itemized.update(robot_metrics)
+            self._metric_statistics.update(
+                {key: (host[f"{key}/numerator"], host[f"{key}/count"]) for key in statistics}
+            )
             if force_prediction is not None and force_target is not None and force_loss is not None:
                 active = force_target.norm(dim=-1) > self.active_contact_force_threshold_n
                 errors = (force_prediction - force_target).square().sum(-1)
@@ -1568,16 +1620,25 @@ class VanillaTrainer:
 
                 with TimeProfiler(self.time_report, "backward"):
                     if train:
-                        backward_loss.backward()
+                        scaler = getattr(self, "grad_scaler", None)
+                        if scaler is None:
+                            backward_loss.backward()
+                        else:
+                            scaler.scale(backward_loss).backward()
+                            scaler.unscale_(self.optimizer)
                         with torch.no_grad():
-                            grad_norm_before_clip = float(grad_norm(self.neural_model.parameters()).detach().cpu())
-                            grad_info["grad_norm_before_clip"] += grad_norm_before_clip
+                            # Norms accumulate on the device; overflowing (skipped) FP16 steps contribute zero.
+                            norm = grad_norm(self.neural_model.parameters()).detach()
+                            grad_info["grad_norm_before_clip"] += torch.nan_to_num(norm, posinf=0.0)
                             if self.truncate_grad:
                                 clip_grad_norm_(self.neural_model.parameters(), self.grad_norm)
-                                grad_info["grad_norm_after_clip"] += float(
-                                    grad_norm(self.neural_model.parameters()).detach().cpu()
-                                )
-                        self.optimizer.step()
+                                norm = grad_norm(self.neural_model.parameters()).detach()
+                                grad_info["grad_norm_after_clip"] += torch.nan_to_num(norm, posinf=0.0)
+                        if scaler is None:
+                            self.optimizer.step()
+                        else:
+                            scaler.step(self.optimizer)
+                            scaler.update()
 
                 with TimeProfiler(self.time_report, "other"):
                     sum_loss += loss.detach().to(torch.float64) * weight
@@ -1602,8 +1663,7 @@ class VanillaTrainer:
         metric_scale = self.world_size if distributed_weights else 1
         avg_loss_itemized = {key: value * metric_scale / denominator for key, value in sum_loss_itemized.items()}
         if train:
-            for key in grad_info:
-                grad_info[key] /= num_batches
+            grad_info = {key: float(value) / num_batches for key, value in grad_info.items()}
         if distributed_reduce:
             avg_loss = self._distributed_mean(avg_loss)
             avg_loss_itemized = self._distributed_mean_dict(avg_loss_itemized)
@@ -1960,15 +2020,24 @@ class SequenceModelTrainer(VanillaTrainer):
 
     def get_datasets(self, train_dataset_path, valid_datasets_cfg, train_datasets_cfg=None) -> None:
         self.train_dataset_rank_sharded = self.is_distributed and (
-            self.dataset_load_mode == "eager" or self.dataset_capacity_unit == "unique_transition"
+            self.dataset_load_mode in ("eager", "gpu") or self.dataset_capacity_unit == "unique_transition"
         )
         read_keys = (
-            ROBOT_TRAINING_READ_KEYS
+            self._robot_training_read_keys()
             if getattr(self, "robot_force_head_enabled", False) and self.dataset_capacity_unit == "unique_transition"
             else None
         )
         eager_preload_frames = self.cfg["algorithm"]["dataset"].get("eager_preload_frames", 4096)
+        resident = (
+            {
+                "device": self.device,
+                "float16_keys": tuple(self.cfg["algorithm"]["dataset"].get("resident_float16_keys", ())),
+            }
+            if self.dataset_load_mode == "gpu"
+            else {}
+        )
         dataset_kwargs = {
+            **resident,
             "read_keys": read_keys,
             "eager_preload_frames": eager_preload_frames,
             "window_sampling": self.dataset_window_sampling,
@@ -2005,6 +2074,7 @@ class SequenceModelTrainer(VanillaTrainer):
                     read_keys=read_keys,
                     eager_preload_frames=eager_preload_frames,
                     max_capacity=self.cfg["algorithm"]["dataset"].get("valid_max_capacity", 100_000_000),
+                    **resident,
                     **self.dataset_contact_projection,
                 )
         if self.dataset_capacity_unit == "unique_transition":

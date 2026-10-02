@@ -144,7 +144,13 @@ class NewtonDataGenerationBackend:
             raise RuntimeError("Newton contacts are not initialized; cannot record NeRD contact tensors.")
         if self.control is None:
             raise RuntimeError("Newton control is not initialized; cannot record joint forces.")
-        solver.sync_from_newton(self.state, contacts, self.control.joint_f, update_history=False)
+        solver.sync_from_newton(
+            self.state,
+            contacts,
+            self.control.joint_f,
+            update_history=False,
+            joint_target_q=self.control.joint_target_q,
+        )
 
     def assign_solver_states(self, solver, states: torch.Tensor) -> None:
         """Write generalized states through the solver's frame-aware helper."""

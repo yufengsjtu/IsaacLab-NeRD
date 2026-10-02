@@ -736,6 +736,9 @@ def test_training_contract_requires_one_fixed_keyboard_and_independent_seeds():
         changed[key] = value
         with pytest.raises(ValueError, match="matching variants"):
             validate_keyboard_training_contracts({"a": first}, {"valid": changed})
+    control_step = {**deepcopy(valid), "step_mode": "control_step"}
+    with pytest.raises(ValueError, match="step_mode"):
+        validate_keyboard_training_contracts({"a": first}, {"valid": control_step})
     valid["physics_dt"] = 0.02
     with pytest.raises(ValueError, match="physics_dt"):
         validate_keyboard_training_contracts({"a": first}, {"valid": valid})
@@ -850,3 +853,119 @@ def test_keyboard_writer_rejects_invalid_contract(tmp_path, failure):
     with pytest.raises(ValueError):
         write_keyboard_dataset(path, rollout, metadata)
     assert not path.exists()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_control_step_recorder_reads_inputs_after_first_frame_and_labels_after_last(monkeypatch, fail):
+    from types import SimpleNamespace
+
+    import isaaclab_neural.generate.keyboard_dataset as module
+    import warp as wp
+
+    class Scene(dict[str, SimpleNamespace]):
+        sensors: dict[str, SimpleNamespace]
+
+        def update(self, dt: float) -> None:
+            pass
+
+    force = torch.zeros(1, 1, 7, 3)
+    joint_f = torch.zeros(1, 114)
+    joint_target = torch.zeros(1, 114)
+    key_q = torch.zeros(1, 108)
+    scene = Scene(
+        keyboard=SimpleNamespace(
+            data=SimpleNamespace(
+                joint_pos=SimpleNamespace(torch=key_q),
+                joint_pos_limits=SimpleNamespace(torch=torch.tensor([-0.002, 0.0]).expand(1, 108, 2)),
+            )
+        )
+    )
+    scene.sensors = {
+        "robot_contact": SimpleNamespace(data=SimpleNamespace(net_normal_forces_w_history=SimpleNamespace(torch=force)))
+    }
+    command = SimpleNamespace(
+        _inst_idx=torch.zeros(1, 108, dtype=torch.long),
+        _col_idx=torch.arange(108).unsqueeze(0),
+        cfg=SimpleNamespace(actuation_fraction=0.5),
+        typed=torch.zeros(1, 5, dtype=torch.long),
+    )
+    env = SimpleNamespace(
+        _physics_handles_decimation=False,
+        _sim_step_counter=0,
+        cfg=SimpleNamespace(decimation=4),
+        scene=scene,
+        num_envs=1,
+        command_manager=SimpleNamespace(get_term=lambda name: command),
+    )
+    frame = 0
+    adapter = create_autospec(DataGenerationAdapter, instance=True)
+    adapter.control = SimpleNamespace(joint_f=joint_f, joint_target_q=joint_target)
+    # Applied effort and labels change every physics frame; only the first frame's effort may be recorded.
+    adapter.overlay_applied_effort_into_control_joint_f.side_effect = lambda: joint_f.fill_(10.0 + frame)
+    recorder = module.KeyboardControlStepRecorder(env, adapter)
+    monkeypatch.setattr(module, "_context", lambda *args: {})
+    monkeypatch.setattr(wp, "to_torch", lambda value: value)
+    snapshots = 0
+
+    def snapshot():
+        nonlocal snapshots
+        snapshots += 1
+        if fail and snapshots == 2:
+            raise RuntimeError("snapshot failed")
+        return {"states": torch.full((1, 228), float(env._sim_step_counter))}
+
+    def step(action):
+        nonlocal frame
+        for index in range(4):
+            frame = index
+            joint_target.fill_(100.0 if index == 0 else -1.0)
+            force.fill_(float(index))
+            key_q.fill_(-0.002 if index == 3 else 0.0)
+            env._sim_step_counter += 1
+            scene.update(dt=0.01)
+        return {}, torch.zeros(1), torch.zeros(1, dtype=torch.bool), torch.zeros(1, dtype=torch.bool), {}
+
+    env.step = step
+    original_update = scene.update
+    monkeypatch.setattr(recorder, "_snapshot", snapshot)
+    if fail:
+        with pytest.raises(RuntimeError, match="snapshot failed"):
+            recorder.step(torch.zeros(1, 6))
+    else:
+        recorder.step(torch.zeros(1, 6))
+        recorder.step(torch.ones(1, 6))
+        assert len(recorder.frames) == 2 and recorder.records_per_step == 1
+        first, second = recorder.frames
+        assert torch.equal(first["joint_f"], torch.full((1, 114), 10.0))
+        assert torch.equal(first["joint_target_q"], torch.full((1, 114), 100.0))
+        assert torch.equal(first["states"], torch.zeros(1, 228)) and torch.equal(
+            first["next_states"], torch.full((1, 228), 4.0)
+        )
+        assert torch.equal(second["states"], torch.full((1, 228), 4.0))
+        assert torch.equal(first["robot_net_normal_forces_w"], torch.full((1, 7, 3), 3.0))
+        assert bool(first["key_pressed"].all()) and bool(first["control_boundary"].all())
+        assert torch.equal(second["actions"], torch.ones(1, 6))
+    assert torch.equal(joint_f, torch.zeros(1, 114))
+    assert scene.update == original_update
+
+
+def test_control_step_dataset_contract_strides_and_compact_contacts(tmp_path):
+    from isaaclab_neural.data.native_contacts import native_group_precision
+
+    rollout, metadata = sample()
+    metadata["step_mode"] = "control_step"
+    rollout["terminated"][0, -1] = True
+    with pytest.raises(ValueError, match="joint_target_q"):
+        write_keyboard_dataset(tmp_path / "missing.hdf5", rollout, metadata)
+    rollout["joint_target_q"] = torch.zeros(1, 8, 114)
+    # Every control-step record is a control boundary; a physics-frame contract would reject this terminal.
+    rollout["terminated"][0, -1] = False
+    rollout["truncated"][0, -1] = True
+    path = tmp_path / "control.hdf5"
+    write_keyboard_dataset(path, rollout, metadata, native_contact_precision="compact_v1")
+    assert read_keyboard_metadata(path) == metadata
+    with h5py.File(path, "r") as file:
+        group = file["contacts/native_pairs"]
+        assert native_group_precision(group) == "compact_v1"
+        assert group["normal_w"].dtype == "float16" and group["world_ids"].dtype == "int16"
+        assert group["separation"].dtype == "float32" and file["data/joint_target_q"].shape == (1, 8, 114)

@@ -91,6 +91,8 @@ class TransformerNeuralSolver(NeuralSolver):
         required = {"root_body_q", "states", "joint_f", "gravity_dir", *self.contact_inputs.keys()}
         if getattr(self, "contact_token_frame", "root") == "owner":
             required.add("primary_body_q")
+        if getattr(self, "joint_target_input", False):
+            required.add("joint_target_q")
         missing = sorted(required - set(history))
         if missing:
             raise ValueError(f"History is missing required model inputs: {missing}.")
@@ -115,6 +117,8 @@ class TransformerNeuralSolver(NeuralSolver):
             if self.primary_body_q is None:
                 raise ValueError("contact_token_frame='owner' requires primary_body_q on the solver.")
             live_inputs["primary_body_q"] = self.primary_body_q
+        if getattr(self, "joint_target_input", False):
+            live_inputs["joint_target_q"] = self.joint_target_q
         normalized_history: dict[str, torch.Tensor] = {}
         for key in required:
             value = history[key]
@@ -212,16 +216,22 @@ class TransformerNeuralSolver(NeuralSolver):
         return normalized.reshape(-1)
 
     def sync_from_newton(
-        self, newton_states: State, contacts: Contacts | None, joint_f, *, update_history: bool = True
+        self,
+        newton_states: State,
+        contacts: Contacts | None,
+        joint_f,
+        *,
+        update_history: bool = True,
+        joint_target_q=None,
     ) -> None:
         """Synchronize cached inputs, optionally without appending to history."""
         if update_history:
-            self._update_states(newton_states, contacts, joint_f)
+            self._update_states(newton_states, contacts, joint_f, joint_target_q=joint_target_q)
         else:
-            NeuralSolver._update_states(self, newton_states, contacts, joint_f)
+            NeuralSolver._update_states(self, newton_states, contacts, joint_f, joint_target_q=joint_target_q)
 
-    def _update_states(self, newton_states: State, contacts: Contacts | None, joint_f):
-        super()._update_states(newton_states, contacts, joint_f)
+    def _update_states(self, newton_states: State, contacts: Contacts | None, joint_f, *, joint_target_q=None):
+        super()._update_states(newton_states, contacts, joint_f, joint_target_q=joint_target_q)
         self.states_history.append(self._history_snapshot())
 
     def _history_snapshot(self) -> dict[str, torch.Tensor]:
@@ -238,6 +248,8 @@ class TransformerNeuralSolver(NeuralSolver):
             if self.primary_body_q is None:
                 raise ValueError("contact_token_frame='owner' requires primary_body_q on the solver.")
             snapshot["primary_body_q"] = self.primary_body_q.clone()
+        if getattr(self, "joint_target_input", False):
+            snapshot["joint_target_q"] = self.joint_target_q.clone()
         return snapshot
 
     def get_neural_model_inputs(self):
@@ -250,6 +262,8 @@ class TransformerNeuralSolver(NeuralSolver):
                 "gravity_dir": torch.zeros_like(self.gravity_dir),
                 **{key: torch.zeros_like(value) for key, value in self.contact_inputs.items()},
             }
+            if getattr(self, "joint_target_input", False):
+                model_inputs["joint_target_offset"] = torch.zeros_like(self.joint_target_q)
             return {key: value.unsqueeze(1) for key, value in model_inputs.items()}
 
         history = tuple(self.states_history)

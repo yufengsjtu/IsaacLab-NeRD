@@ -394,6 +394,20 @@ class NewtonNerdManager(NewtonManager):
             copy_scene_applied_effort_into_sim_joint_f(scene)
 
     @classmethod
+    def control_step_mode(cls) -> bool:
+        """Whether the active NeRD solver predicts once per environment control step."""
+        return cls._nerd_active and getattr(cls._solver, "step_mode", "physics_frame") == "control_step"
+
+    @classmethod
+    def handles_decimation(cls) -> bool:
+        """Report a single physics step per control step for control-step NeRD models.
+
+        The environment then applies actions, steps physics and updates the scene once per control step, and one
+        neural prediction spans the whole control interval.
+        """
+        return True if cls.control_step_mode() else super().handles_decimation()
+
+    @classmethod
     def _simulate_full(cls) -> None:
         if not cls._nerd_active:
             super()._simulate_full()
@@ -403,7 +417,7 @@ class NewtonNerdManager(NewtonManager):
 
         physics_dt = cls._solver_dt * cls._num_substeps
         contacts = cls._contacts
-        for _ in range(cls._decimation):
+        for _ in range(1 if cls.control_step_mode() else cls._decimation):
             contacts = cls._prepare_nerd_contacts()
 
             with step_profile.section("actuator"):
@@ -432,6 +446,9 @@ class NewtonNerdManager(NewtonManager):
         if not cls._skip_applied_effort_overlay:
             cls._overlay_applied_effort_into_joint_f()
         cls._run_solver_substeps(contacts)
+        if cls.control_step_mode():
+            # The parent eager path advances one physics frame; one prediction spans the whole control step.
+            PhysicsManager._sim_time += cls._solver_dt * cls._num_substeps * (cls._decimation - 1)
         for callback in cls._post_step_callbacks:
             callback()
         cls._update_sensors(contacts)
@@ -460,7 +477,14 @@ class NewtonNerdManager(NewtonManager):
         sync_from_newton = getattr(cls._solver, "sync_from_newton", None)
         if sync_from_newton is None:
             raise RuntimeError("Active NeRD solver does not implement sync_from_newton().")
-        sync_from_newton(cls.backend.state_0, contacts, cls.backend.control.joint_f, update_history=update_history)
+        control = cls.backend.control
+        sync_from_newton(
+            cls.backend.state_0,
+            contacts,
+            control.joint_f,
+            update_history=update_history,
+            joint_target_q=control.joint_target_q,
+        )
         cls._sync_upstream_newton_state()
 
     @classmethod

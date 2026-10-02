@@ -100,19 +100,22 @@ def normal_force_loss(
         error_sq = (prediction - target).square().sum(-1)
         predicted_active = outputs[LOGITS_KEY] > 0
         true_positive = (active & predicted_active).sum()
+        active_count = active.sum()
         metrics = {
-            "robot_normal_normalized_MSE": float(vector_loss.detach().cpu()),
-            "robot_normal_contact_BCE": float(contact_loss.detach().cpu()),
-            "robot_normal_RMSE_N": float(error_sq.mean().sqrt().cpu()),
-            "robot_normal_active_RMSE_N": float(error_sq[active].mean().sqrt().cpu()) if active.any() else 0.0,
-            "robot_normal_active_fraction": float(active.float().mean().cpu()),
-            "robot_normal_contact_precision": float((true_positive / predicted_active.sum().clamp_min(1)).cpu()),
-            "robot_normal_contact_recall": float((true_positive / active.sum().clamp_min(1)).cpu()),
-            "robot_normal_overload_disagreement": float(
-                ((prediction.norm(dim=-1).amax(-1) > 20.0) != (target.norm(dim=-1).amax(-1) > 20.0))
-                .float()
-                .mean()
-                .cpu()
-            ),
+            "robot_normal_normalized_MSE": vector_loss.detach(),
+            "robot_normal_contact_BCE": contact_loss.detach(),
+            "robot_normal_RMSE_N": error_sq.mean().sqrt(),
+            # Zero when no contact is active (the sum is zero and the count is clamped).
+            "robot_normal_active_RMSE_N": ((error_sq * active).sum() / active_count.clamp_min(1)).sqrt(),
+            "robot_normal_active_fraction": active.float().mean(),
+            "robot_normal_contact_precision": true_positive / predicted_active.sum().clamp_min(1),
+            "robot_normal_contact_recall": true_positive / active_count.clamp_min(1),
+            "robot_normal_overload_disagreement": (
+                (prediction.norm(dim=-1).amax(-1) > 20.0) != (target.norm(dim=-1).amax(-1) > 20.0)
+            )
+            .float()
+            .mean(),
         }
+        # One device-to-host transfer for all metrics.
+        metrics = dict(zip(metrics, torch.stack([value.float() for value in metrics.values()]).tolist(), strict=True))
     return vector_loss + contact_loss, metrics

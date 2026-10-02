@@ -484,3 +484,58 @@ def test_reset_contacts_are_reused_only_for_an_unchanged_body_state(monkeypatch)
     solver._update_states(state, "reset-contacts", None)
     solver._update_states(state, "step-contacts", None)
     assert updates == ["step-contacts"]
+
+
+def test_control_step_mode_folds_decimation_into_one_prediction(monkeypatch) -> None:
+    from isaaclab.physics import PhysicsManager
+
+    monkeypatch.setattr(NewtonManager, "handles_decimation", classmethod(lambda cls: False))
+    for active, step_mode, expected in (
+        (True, "control_step", True),
+        (True, "physics_frame", False),
+        (False, "control_step", False),
+    ):
+        monkeypatch.setattr(NewtonNerdManager, "_nerd_active", active)
+        monkeypatch.setattr(NewtonNerdManager, "_solver", SimpleNamespace(step_mode=step_mode))
+        assert NewtonNerdManager.handles_decimation() is expected
+
+    # The eager path advances one physics frame; the control-step prediction accounts for the rest.
+    calls = []
+    monkeypatch.setattr(NewtonNerdManager, "_nerd_active", True)
+    monkeypatch.setattr(NewtonNerdManager, "_solver", SimpleNamespace(step_mode="control_step"))
+    monkeypatch.setattr(NewtonNerdManager, "_decimation", 4, raising=False)
+    monkeypatch.setattr(NewtonNerdManager, "_solver_dt", 0.01, raising=False)
+    monkeypatch.setattr(NewtonNerdManager, "_num_substeps", 1, raising=False)
+    monkeypatch.setattr(PhysicsManager, "_sim_time", 0.0)
+    for name in ("_prepare_nerd_contacts", "_overlay_applied_effort_into_joint_f", "_update_sensors"):
+        monkeypatch.setattr(NewtonNerdManager, name, classmethod(lambda cls, *args, _name=name: calls.append(_name)))
+    monkeypatch.setattr(
+        NewtonNerdManager, "_run_solver_substeps", classmethod(lambda cls, contacts: calls.append("solve"))
+    )
+    monkeypatch.setattr(NewtonNerdManager, "_sync_upstream_newton_state", classmethod(lambda cls: None))
+    monkeypatch.setattr(NewtonNerdManager, "_post_step_callbacks", [], raising=False)
+    NewtonNerdManager._simulate_physics_only()
+    assert calls.count("solve") == 1
+    assert PhysicsManager._sim_time == pytest.approx(0.03)
+
+
+def test_joint_target_offset_is_relative_to_current_joint_coordinates() -> None:
+    import numpy as np
+
+    solver = NeuralSolver.__new__(NeuralSolver)
+    solver.dof_q_per_env = 2
+    solver.states_frame = "world"
+    solver.states_embedding_type = None
+    solver.is_continuous_dof = np.zeros(4, dtype=bool)
+    states = torch.tensor([[[1.0, 2.0, 3.0, 4.0]]])
+    inputs = {
+        "root_body_q": torch.zeros(1, 1, 7),
+        "states": states.clone(),
+        "states_embedding": torch.zeros(1, 1, 4),
+        "joint_target_q": torch.tensor([[[1.5, 1.0]]]),
+        "gravity_dir": torch.zeros(1, 1, 3),
+    }
+    processed = solver.process_neural_model_inputs(inputs)
+    assert "joint_target_q" not in processed
+    torch.testing.assert_close(processed["joint_target_offset"], torch.tensor([[[0.5, -1.0]]]))
+    torch.testing.assert_close(processed["states"], states)

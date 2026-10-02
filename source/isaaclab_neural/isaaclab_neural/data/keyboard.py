@@ -23,6 +23,17 @@ KEYBOARD_SCHEMA = "so101_keyboard_fixed_v2"
 KEYBOARD_TASK = "IsaacContrib-Keyboard-SO101"
 KEYBOARD_REPLAY_LAYOUT = "synchronous_world_timeline_v1"
 KEYBOARD_MJW_MODEL_FIELDS = ("actuator_acc0", "body_invweight0", "dof_invweight0", "jnt_solref", "stat.meaninertia")
+KEYBOARD_STEP_MODES = ("physics_frame", "control_step")
+
+
+def keyboard_step_mode(metadata: Mapping[str, Any]) -> str:
+    """Return the record time span of a keyboard dataset (physics frames unless recorded per control step)."""
+    return str(metadata.get("step_mode", "physics_frame"))
+
+
+def keyboard_record_stride(metadata: Mapping[str, Any]) -> int:
+    """Records per control step: ``decimation`` physics-frame records, or one control-step record."""
+    return 1 if keyboard_step_mode(metadata) == "control_step" else int(metadata["decimation"])
 
 
 def fixed_root_poses_from_scene(scene: Any) -> dict[str, list[float]]:
@@ -177,6 +188,8 @@ def validate_keyboard_metadata(metadata: Mapping[str, Any]) -> None:
         raise ValueError("Incompatible keyboard dataset contract.")
     if float(metadata["physics_dt"]) <= 0 or int(metadata["decimation"]) <= 0:
         raise ValueError("Keyboard timing must be positive.")
+    if keyboard_step_mode(metadata) not in KEYBOARD_STEP_MODES:
+        raise ValueError("Unsupported keyboard record step mode.")
     names = metadata["force_body_names"]
     if not names or len(set(names)) != len(names):
         raise ValueError("Force body names must be non-empty and unique.")
@@ -194,7 +207,7 @@ def validate_keyboard_replay(
     """Validate the synchronous world timeline and its exact correspondence to training clips."""
     frames, contexts = replay["frames"], replay["contexts"]
     worlds, length = frames["states"].shape[:2]
-    decimation = int(metadata["decimation"])
+    decimation = keyboard_record_stride(metadata)
     if worlds != metadata["source_num_envs"] or length <= 0 or length % decimation:
         raise ValueError("Invalid synchronous replay timeline dimensions.")
     if "articulation_root_pose" not in frames:
@@ -255,11 +268,14 @@ def write_keyboard_dataset(
     metadata: Mapping[str, Any],
     *,
     replay: Mapping[str, Any] | None = None,
+    native_contact_precision: str = "full",
 ) -> None:
     """Publish a validated dataset atomically without overwriting an existing file.
 
-    State, force, action and key labels use the common ``[clips, frames, ...]``
-    layout. Contact pairs use the existing untruncated native CSR representation.
+    State, force, action and key labels use the common ``[clips, records, ...]``
+    layout, where a record is one physics frame or, for ``step_mode="control_step"``,
+    one control step. Contact pairs use the existing untruncated native CSR representation,
+    optionally stored at ``native_contact_precision="compact_v1"``.
     Normal-force labels cover the robot sensor bodies, not all articulated bodies.
     """
     path = Path(path).expanduser()
@@ -279,6 +295,8 @@ def write_keyboard_dataset(
         "trajectory_context",
         "articulation_root_pose",
     }
+    if keyboard_step_mode(metadata) == "control_step":
+        required.add("joint_target_q")
     if missing := required - rollouts.keys():
         raise ValueError(f"Missing keyboard rollout fields: {sorted(missing)}.")
     validate_fixed_root_poses(rollouts["articulation_root_pose"], metadata)
@@ -296,6 +314,8 @@ def write_keyboard_dataset(
         "terminated": prefix,
         "truncated": prefix,
     }
+    if "joint_target_q" in rollouts:
+        expected_shapes["joint_target_q"] = (*prefix, metadata["num_q"])
     for name, shape in expected_shapes.items():
         if tuple(rollouts[name].shape) != tuple(shape):
             raise ValueError(f"Invalid {name} shape: expected {shape}.")
@@ -309,7 +329,7 @@ def write_keyboard_dataset(
     done = rollouts["terminated"] | rollouts["truncated"]
     if bool(done[:, :-1].any()):
         raise ValueError("A keyboard training clip must not cross an episode reset.")
-    keyboard_clip_indices(done, horizon=prefix[1], decimation=int(metadata["decimation"]))
+    keyboard_clip_indices(done, horizon=prefix[1], decimation=keyboard_record_stride(metadata))
     if metadata.get("replay_layout") is not None or replay is not None:
         if metadata.get("replay_layout") != KEYBOARD_REPLAY_LAYOUT or replay is None:
             raise ValueError("Synchronous replay timeline and metadata must be provided together.")
@@ -318,7 +338,9 @@ def write_keyboard_dataset(
     with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".hdf5", delete=False) as stream:
         temporary = Path(stream.name)
     try:
-        write_rollouts_to_hdf5(temporary, rollouts, "SO101-Keyboard-Fixed")
+        write_rollouts_to_hdf5(
+            temporary, rollouts, "SO101-Keyboard-Fixed", native_contact_precision=native_contact_precision
+        )
         with h5py.File(temporary, "a") as file:
             file["data"].attrs["keyboard_contract"] = json.dumps(dict(metadata), sort_keys=True, allow_nan=False)
             if replay is not None:
@@ -357,6 +379,8 @@ def validate_keyboard_training_contracts(
             "contact_fixed_body_slots"
         ) != reference.get("contact_fixed_body_slots"):
             raise ValueError("Keyboard dataset contact filter or mobility contract mismatch.")
+        if keyboard_step_mode(metadata) != keyboard_step_mode(reference):
+            raise ValueError("Keyboard dataset contract mismatch: step_mode.")
         for key in (
             "schema",
             "task",
