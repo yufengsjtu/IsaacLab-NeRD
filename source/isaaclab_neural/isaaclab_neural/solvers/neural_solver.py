@@ -44,6 +44,28 @@ def _tf32_matmul() -> Iterator[None]:
         torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = previous
 
 
+def contact_tokens_to_model_frame(
+    contact_tokens: torch.Tensor, frame_q: torch.Tensor, translation_only: bool, per_owner: bool
+) -> torch.Tensor:
+    """Transform world-frame contact-token geometry into the model frame.
+
+    Args:
+        contact_tokens: Packed tokens, shape ``[B, T, K, D]``.
+        frame_q: Primary-body poses ``[B, T, P, 7]`` when ``per_owner`` (each token uses its owner body), otherwise
+            one shared pose per frame ``[B, T, 7]``.
+        translation_only: Whether to remove only the frame translation.
+        per_owner: Whether ``frame_q`` holds per-primary-body poses.
+    """
+    from isaaclab_neural.contacts.contact_set_encoder import (
+        gather_owner_body_q,
+        transform_contact_tokens_to_body_frame,
+    )
+
+    if per_owner:
+        frame_q = gather_owner_body_q(frame_q, contact_tokens)
+    return transform_contact_tokens_to_body_frame(contact_tokens, frame_q, translation_only=translation_only)
+
+
 if TYPE_CHECKING:
     from isaaclab_neural.models.models import ModelMixedInputOutput
 
@@ -108,8 +130,8 @@ class NeuralSolver(SolverBase):
                 ``"owner"``. Defaults to ``"root"``.
             inference_precision: Matmul precision of online model inference on CUDA; one of
                 ``"fp32"``, ``"tf32"``, ``"fp16"`` or ``"bf16"`` (autocast). Defaults to ``"fp32"``.
-            inference_compile: Compile fixed-shape steady-state model steps with ``torch.compile`` where the
-                solver supports it (streaming frame-cached transformers). Defaults to False.
+            inference_compile: Compile fixed-shape steady-state inference steps with ``torch.compile`` where the
+                solver supports it (frame-cached transformers). Defaults to False.
         """
         self.solver_name = name
         if model is None:
@@ -615,12 +637,12 @@ class NeuralSolver(SolverBase):
             "from signed surface separation because inactive padding and touching contacts can both be zero."
         )
 
-    def process_neural_model_inputs(self, model_inputs):
-        from isaaclab_neural.contacts.contact_set_encoder import (
-            gather_owner_body_q,
-            transform_contact_tokens_to_body_frame,
-        )
+    def _contact_token_transform(self):
+        """Return the function mapping world-frame contact tokens into the model frame (see
+        :func:`contact_tokens_to_model_frame`); solvers may substitute a compiled equivalent."""
+        return contact_tokens_to_model_frame
 
+    def process_neural_model_inputs(self, model_inputs):
         # convert frame
         (
             model_inputs["states"],
@@ -660,11 +682,8 @@ class NeuralSolver(SolverBase):
                         "contact_token_frame='owner' requires primary_body_q poses "
                         "[B, T, num_primary_bodies, 7] recorded at collection time."
                     )
-                token_frame_q = gather_owner_body_q(primary_body_q, model_inputs["contact_tokens"])
-                model_inputs["contact_tokens"] = transform_contact_tokens_to_body_frame(
-                    model_inputs["contact_tokens"],
-                    token_frame_q,
-                    translation_only=translation_only,
+                model_inputs["contact_tokens"] = self._contact_token_transform()(
+                    model_inputs["contact_tokens"], primary_body_q, translation_only, True
                 )
             elif self.states_frame != "world":
                 root_body_q = model_inputs["root_body_q"]
@@ -677,10 +696,8 @@ class NeuralSolver(SolverBase):
                     token_frame_q = root_body_q
                 else:
                     raise NotImplementedError(f"Unsupported anchor_frame_step: {self.anchor_frame_step!r}.")
-                model_inputs["contact_tokens"] = transform_contact_tokens_to_body_frame(
-                    model_inputs["contact_tokens"],
-                    token_frame_q,
-                    translation_only=translation_only,
+                model_inputs["contact_tokens"] = self._contact_token_transform()(
+                    model_inputs["contact_tokens"], token_frame_q, translation_only, False
                 )
         model_inputs.pop("primary_body_q", None)
 

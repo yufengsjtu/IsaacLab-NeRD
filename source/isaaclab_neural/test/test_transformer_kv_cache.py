@@ -519,7 +519,15 @@ def test_solver_compiles_only_fixed_shape_steady_stream_steps(monkeypatch):
     model = _mixed_input_model("relative_lag", (3, 2))
     solver = _frame_cache_solver(model, history=4)
     solver.inference_compile = True
-    calls = []
+    calls, transforms = [], []
+
+    def process(model_inputs):
+        # Record which token transform preprocessing would use for this batch.
+        transform = solver._contact_token_transform()
+        transforms.append((model_inputs["observation"].shape[0], getattr(transform, "compiled", False)))
+        return model_inputs
+
+    solver.process_neural_model_inputs = process
 
     def fake_compile(function, dynamic):
         assert dynamic is False
@@ -530,6 +538,7 @@ def test_solver_compiles_only_fixed_shape_steady_stream_steps(monkeypatch):
             )
             return function(*args, **kwargs)
 
+        wrapped.compiled = True
         return wrapped
 
     monkeypatch.setattr(torch, "compile", fake_compile)
@@ -549,8 +558,11 @@ def test_solver_compiles_only_fixed_shape_steady_stream_steps(monkeypatch):
     # The first frame builds the stream eagerly; every later frame runs both compiled callables on full batches.
     assert [name for name, _ in calls] == ["encode_frames", "forward_stream"] * 8
     assert all(shape[0] == 2 and shape[1] == 1 for _, shape in calls)
+    # Newest-frame preprocessing uses the compiled token transform; the reset-row rebuild at frame 6 stays eager.
+    assert [batch for batch, _ in transforms] == [2] * 7 + [1, 2, 2]
+    assert [compiled for _, compiled in transforms] == [True] * 7 + [False, True, True]
     compiled_model, compiled = solver._compiled_inference
-    assert compiled_model is model and len(compiled) == 2
+    assert compiled_model is model and len(compiled) == 3
 
 
 def test_frame_cache_is_exclusive_with_other_caches():

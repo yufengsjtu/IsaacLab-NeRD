@@ -117,9 +117,10 @@ class NerdSolverCfg(NewtonSolverCfg):
     inference_compile: bool = False
     """Whether to compile fixed-shape steady-state model steps with ``torch.compile`` during online inference.
 
-    Supported by streaming frame-cached ``TransformerNeuralSolver`` models. Compiled kernels fuse operations, so
-    predictions match eager inference up to floating-point roundoff; the first steps include compilation time.
-    Training is unaffected.
+    Supported by frame-cached ``TransformerNeuralSolver`` models: the newest frame's contact-token transform is
+    compiled, and streaming models also compile their frame encoding and stream step. Compiled kernels fuse
+    operations, so predictions match eager inference up to floating-point roundoff; the first steps include
+    compilation time. Training is unaffected.
     """
 
     reset_seq_length: int = 1

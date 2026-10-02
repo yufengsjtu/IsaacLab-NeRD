@@ -311,7 +311,7 @@ def main() -> None:
         "--inference-compile",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Override the NeRD inference_compile option (torch.compile of steady-state stream steps).",
+        help="Override the NeRD inference_compile option (torch.compile of fixed-shape steady-state inference steps).",
     )
     env.add_argument("--num-envs", type=int, required=True)
     env.add_argument("--seed", type=int, default=43)

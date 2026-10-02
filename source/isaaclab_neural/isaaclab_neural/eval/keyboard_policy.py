@@ -201,7 +201,7 @@ def main() -> None:
         "--inference-compile",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Override the NeRD inference_compile option (torch.compile of steady-state stream steps).",
+        help="Override the NeRD inference_compile option (torch.compile of fixed-shape steady-state inference steps).",
     )
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--reset-mode", choices=("training", "uniform"), default="uniform")

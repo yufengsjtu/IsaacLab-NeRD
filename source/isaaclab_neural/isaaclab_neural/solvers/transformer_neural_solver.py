@@ -254,7 +254,13 @@ class TransformerNeuralSolver(NeuralSolver):
 
         history = tuple(self.states_history)
         if getattr(self, "use_frame_cache", False):
-            return self.process_neural_model_inputs({key: value.unsqueeze(1) for key, value in history[-1].items()})
+            # The newest frame always has the full fixed batch shape, so its token transform may run compiled;
+            # reset-row rebuilds and training preprocessing stay eager.
+            self._compile_token_transform = True
+            try:
+                return self.process_neural_model_inputs({key: value.unsqueeze(1) for key, value in history[-1].items()})
+            finally:
+                self._compile_token_transform = False
         if self.use_kv_cache:
             latest_inputs = {key: value.unsqueeze(1) for key, value in history[-1].items()}
             rebuild_env_ids = self.kv_cache_rebuild_env_ids
@@ -376,6 +382,12 @@ class TransformerNeuralSolver(NeuralSolver):
         tokens = torch.stack([select(frame[0]) for frame in frames], dim=1)
         keys = None if frames[0][1] is None else torch.stack([select(frame[1]) for frame in frames], dim=1)
         return tokens, keys
+
+    def _contact_token_transform(self):
+        transform = super()._contact_token_transform()
+        if not getattr(self, "_compile_token_transform", False):
+            return transform
+        return self._inference_callable("contact_tokens_to_model_frame", self._require_neural_model(), transform)
 
     def _inference_callable(self, name: str, neural_model, function):
         """Return ``function``, or its ``torch.compile`` version when ``inference_compile`` is enabled.

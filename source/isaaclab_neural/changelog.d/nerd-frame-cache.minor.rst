@@ -31,9 +31,12 @@ Changed
   worlds fell from about 84 to 34 ms on a shared GPU. ``native_contact_pairs()`` raises in this mode; data
   collection keeps the default ``True``.
 * Added ``NerdSolverCfg.inference_compile`` (``--inference-compile`` in the keyboard evaluation and benchmark
-  tools). Streaming frame-cached transformers compile their fixed-shape steady-state frame encoding and stream
-  step with ``torch.compile``; window builds and reset-row rebuilds stay eager. Mean closed-loop FP16 error
-  against an FP32 reference stayed at FP16 level (state 1.3e-5, force 7.2e-5 N); model time per control step at
-  8192 SO101 worlds fell by about 35%. The first steps include compilation time. Defaults to False.
+  tools). Frame-cached transformers compile the newest frame's contact-token transform, and streaming models
+  also compile their fixed-shape steady-state frame encoding and stream step, with ``torch.compile``; window
+  builds, reset-row rebuilds and training preprocessing stay eager. FP32 compiled inference matched eager
+  inference up to roundoff (state 1.1e-5, force 2.6e-4 N max) and mean FP16 error against an FP32 reference
+  stayed at FP16 level. On an idle GPU at 8192 SO101 worlds, FP16 throughput rose from 59.7k to 69.7k control
+  steps/s (MJWarp: 53.0k); 6-seed closed-loop success was 94.9% versus 95.2% before the stage-1 changes. The
+  first steps include compilation time. Defaults to False.
 * Changed streaming frame-cached steps to stack only the key-feature frames the key head reads and to gather
   reset rows before stacking, instead of materializing the whole history window every frame.
