@@ -51,10 +51,16 @@ class TransformerNeuralSolver(NeuralSolver):
         use_feature_cache: bool = False,
         use_kv_cache: bool = False,
         use_frame_cache: bool = False,
+        reset_history: str = "replicate",
         **kwargs,
     ):
         if sum((use_feature_cache, use_kv_cache, use_frame_cache)) > 1:
             raise ValueError("use_feature_cache, use_kv_cache and use_frame_cache are mutually exclusive.")
+        if reset_history not in ("replicate", "episode_start"):
+            raise ValueError(f"reset_history must be 'replicate' or 'episode_start', got {reset_history!r}.")
+        if reset_history == "episode_start" and not use_frame_cache:
+            raise ValueError("reset_history='episode_start' requires frame-cached streaming inference.")
+        self.reset_history = reset_history
         self.num_states_history = num_states_history
         self.use_feature_cache = use_feature_cache
         self.use_kv_cache = use_kv_cache
@@ -351,6 +357,8 @@ class TransformerNeuralSolver(NeuralSolver):
             spans = neural_model.transformer_model.config.attention_spans
             if sum(span - 1 for span in spans) + 1 > self.num_states_history:
                 raise ValueError("Streaming inference requires a receptive field within num_states_history.")
+        elif getattr(self, "reset_history", "replicate") == "episode_start":
+            raise ValueError("reset_history='episode_start' requires a relative_lag streaming model.")
         if len(self.frame_cache) != len(self.states_history):
             stream_cache = None
             # Externally loaded history (e.g. preload_states_history): re-encode the complete window.
@@ -371,6 +379,8 @@ class TransformerNeuralSolver(NeuralSolver):
             output = neural_model.forward_encoded(*self._frame_window())
         elif stream_cache is None:
             output, self.stream_cache = neural_model.build_stream(*self._frame_window())
+            if getattr(self, "reset_history", "replicate") == "replicate":
+                rebuild_env_ids = None
         else:
             # Each layer attends only to its cached cone; the key head reads only its recent key frames.
             key_head = getattr(neural_model, "key_head", None)
@@ -379,13 +389,18 @@ class TransformerNeuralSolver(NeuralSolver):
             if steady:
                 forward_stream = self._inference_callable("forward_stream", neural_model, forward_stream)
             output = forward_stream(tokens, recent, stream_cache)
-            if rebuild_env_ids is not None and rebuild_env_ids.numel() > 0:
-                # Reset rows rebuild their cone from the window.
-                row_output, row_cache = neural_model.build_stream(*self._frame_window(rows=rebuild_env_ids))
-                stream_cache.copy_rows_from(row_cache, rebuild_env_ids)
-                output.state_prediction.index_copy_(0, rebuild_env_ids, row_output.state_prediction)
-                for name, value in output.auxiliary_predictions.items():
-                    value.index_copy_(0, rebuild_env_ids, row_output.auxiliary_predictions[name])
+        if streaming and rebuild_env_ids is not None and rebuild_env_ids.numel() > 0:
+            # Reset rows rebuild their cone from the window, or restart it at the newest (first post-reset)
+            # frame; the key head then repeats that frame for earlier lags, as at a training episode start.
+            window = self._frame_window(rows=rebuild_env_ids)
+            if getattr(self, "reset_history", "replicate") == "episode_start":
+                window = (window[0][:, -1:], None if window[1] is None else window[1][:, -1:])
+            row_output, row_cache = neural_model.build_stream(*window)
+            assert self.stream_cache is not None
+            self.stream_cache.copy_rows_from(row_cache, rebuild_env_ids)
+            output.state_prediction.index_copy_(0, rebuild_env_ids, row_output.state_prediction)
+            for name, value in output.auxiliary_predictions.items():
+                value.index_copy_(0, rebuild_env_ids, row_output.auxiliary_predictions[name])
         self._publish_auxiliary_predictions(output)
         return output.state_prediction
 

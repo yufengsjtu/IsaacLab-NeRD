@@ -130,6 +130,14 @@ class NerdSolverCfg(NewtonSolverCfg):
     on joint type], read after actuators update the targets of the current step.
     """
 
+    reset_history: str = "replicate"
+    """History seen by streaming Transformer models after a partial reset: ``"replicate"`` or ``"episode_start"``.
+
+    ``"replicate"`` attends over copies of the post-reset inputs that fill the history window. These copies still
+    hold the previous episode's actuator inputs (e.g. joint targets). ``"episode_start"`` restarts the stream from
+    the first post-reset frame, as training windows do at an episode start. Requires ``relative_lag`` streaming.
+    """
+
     inference_compile: bool = False
     """Whether to compile fixed-shape steady-state model steps with ``torch.compile`` during online inference.
 

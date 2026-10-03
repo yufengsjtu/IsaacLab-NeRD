@@ -17,6 +17,10 @@ Added
   recordings stay on the training GPU, optionally with FP16 fields (``resident_float16_keys``). Native pairs stay raw:
   filter-rejected pairs are dropped when loading and the rest are converted to contact tokens per batch with the
   shared projector, matching the eager loader exactly.
+* Added ``NerdSolverCfg.reset_history``. The default ``"replicate"`` keeps the previous behavior: streaming
+  models attend over copies of the post-reset inputs. ``"episode_start"`` restarts a reset row's stream at its
+  first post-reset frame, matching training windows at episode starts. The control-step recipe uses it; evaluate
+  earlier control-step checkpoints with ``keyboard_policy --reset-history episode_start``.
 * Added ``algorithm.precision`` (``fp32``, ``bf16`` or ``fp16`` with loss scaling) for the training forward pass and
   ``algorithm.optimizer.fused`` for Adam.
 * Added the ``SO101/transformer_keyboard_control_step.yaml`` recipe and the ``so101_keyboard_control_step`` OSMO

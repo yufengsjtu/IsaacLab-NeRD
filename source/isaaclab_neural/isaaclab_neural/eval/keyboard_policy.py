@@ -203,6 +203,11 @@ def main() -> None:
         default=None,
         help="Override the NeRD inference_compile option (torch.compile of fixed-shape steady-state inference steps).",
     )
+    parser.add_argument(
+        "--reset-history",
+        choices=("replicate", "episode_start"),
+        help="Override the checkpoint's NeRD history after partial resets (see NerdSolverCfg.reset_history).",
+    )
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--reset-mode", choices=("training", "uniform"), default="uniform")
     parser.add_argument("--reset_ik_iters", type=int, help="Override reset IK iterations for a diagnostic comparison.")
@@ -290,6 +295,8 @@ def main() -> None:
             solver_cfg.inference_precision = args.inference_precision
         if args.inference_compile is not None:
             solver_cfg.inference_compile = args.inference_compile
+        if args.reset_history is not None:
+            solver_cfg.reset_history = args.reset_history
         solver_cfg.neural_model_path = str(args.nerd_checkpoint.resolve())
         teacher = cfg.sim.physics
         cfg.sim.physics = NerdNewtonCfg(

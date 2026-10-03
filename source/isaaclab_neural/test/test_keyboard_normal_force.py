@@ -247,8 +247,12 @@ def test_key_head_single_step_and_encoded_paths_match_the_full_window(steps, joi
             torch.testing.assert_close(value, full.auxiliary_predictions[name][:, -1:], atol=1e-6, rtol=1e-5)
 
 
-def test_streaming_key_head_solver_matches_full_window_through_growth_eviction_and_row_rebuild():
-    """The streamed key head reads only its recent key frames, yet must match the full-window prediction."""
+@pytest.mark.parametrize("reset_history", ["replicate", "episode_start"])
+def test_streaming_key_head_solver_matches_full_window_through_growth_eviction_and_row_rebuild(reset_history):
+    """The streamed key head reads only its recent key frames, yet must match the full-window prediction.
+
+    With ``episode_start``, a reset row must instead match a window that starts at its first post-reset frame.
+    """
     from collections import deque
 
     from isaaclab_neural.solvers.transformer_neural_solver import TransformerNeuralSolver
@@ -268,8 +272,10 @@ def test_streaming_key_head_solver_matches_full_window_through_growth_eviction_a
     solver.feature_cache_rebuild_env_ids = solver.kv_cache_rebuild_env_ids = None
     solver.frame_cache, solver.frame_cache_rebuild_env_ids, solver.stream_cache = deque(maxlen=history), None, None
     solver.states_history = deque(maxlen=history)
+    solver.reset_history = reset_history
 
     torch.manual_seed(1)
+    since_reset: list[dict] = []
     with torch.inference_mode():
         for step in range(9):
             frame = {name: value[:, step % 4].clone() for name, value in inputs.items()}
@@ -282,8 +288,13 @@ def test_streaming_key_head_solver_matches_full_window_through_growth_eviction_a
                     for name, value in frame.items():
                         entry[name][0] = value[0]
                 solver._mark_history_rows_for_rebuild(torch.tensor([0]))
+            if step >= 6:
+                since_reset.append({name: value[:1].clone() for name, value in frame.items()})
             window = {name: torch.stack([entry[name] for entry in solver.states_history], dim=1) for name in inputs}
             expected = model(window, single_step=True)
+            if reset_history == "episode_start" and since_reset:
+                fresh = {name: torch.stack([entry[name] for entry in since_reset], dim=1) for name in inputs}
+                expected[:1] = model(fresh, single_step=True)
             actual = solver._model_forward(solver.get_neural_model_inputs())
             torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
     assert solver.stream_cache is not None

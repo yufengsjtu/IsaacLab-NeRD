@@ -18,6 +18,9 @@ env:
     # One prediction spans a 40 ms control step (four 10 ms physics frames); history covers 10 control steps.
     step_mode: control_step
     joint_target_input: true
+    # After a reset, stream from the first post-reset frame as training windows do at an episode start; the
+    # replicated post-reset history keeps the previous episode's joint targets and broke closed-loop starts.
+    reset_history: episode_start
     num_states_history: 10
     use_frame_cache: true
     # Validated closed loop against FP32 (95.3% vs 95.5% success); training stays FP32.
