@@ -155,6 +155,8 @@ def benchmark_env(args: argparse.Namespace, launcher_args: argparse.Namespace) -
             solver_cfg.inference_precision = args.inference_precision
         if args.inference_compile is not None:
             solver_cfg.inference_compile = args.inference_compile
+        if args.reset_history is not None:
+            solver_cfg.reset_history = args.reset_history
         solver_cfg.neural_model_path = str(args.nerd_checkpoint.resolve())
         teacher = cfg.sim.physics
         cfg.sim.physics = NerdNewtonCfg(
@@ -312,6 +314,11 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Override the NeRD inference_compile option (torch.compile of fixed-shape steady-state inference steps).",
+    )
+    env.add_argument(
+        "--reset-history",
+        choices=("replicate", "episode_start"),
+        help="Override the checkpoint's NeRD history after partial resets (see NerdSolverCfg.reset_history).",
     )
     env.add_argument("--num-envs", type=int, required=True)
     env.add_argument("--seed", type=int, default=43)

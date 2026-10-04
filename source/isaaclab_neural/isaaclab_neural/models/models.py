@@ -264,6 +264,8 @@ class ModelMixedInput(nn.Module):
 
         if "contact_set" in input_cfg:
             contact_cfg = input_cfg["contact_set"]
+            # Ablation: keep the contact encoder but present every frame as contact-free.
+            self.mask_all_contacts = bool(contact_cfg.get("mask_all", False))
             contact_dim = int(contact_cfg.get("dim", input_sample["contact_tokens"].shape[-1]))
             encoder_type = contact_cfg.get("encoder_type", "global_attention")
             if encoder_type == "global_attention":
@@ -442,7 +444,10 @@ class ModelMixedInput(nn.Module):
         if getattr(self, "use_contact_token_set", False) and "contact_tokens" in input_dict:
             from isaaclab_neural.contacts.contact_set_encoder import mask_invalid_contact_tokens
 
-            input_dict["contact_tokens"] = mask_invalid_contact_tokens(input_dict["contact_tokens"])
+            if getattr(self, "mask_all_contacts", False):
+                input_dict["contact_tokens"] = torch.zeros_like(input_dict["contact_tokens"])
+            else:
+                input_dict["contact_tokens"] = mask_invalid_contact_tokens(input_dict["contact_tokens"])
         return input_dict
 
     def _process_output(self, output):

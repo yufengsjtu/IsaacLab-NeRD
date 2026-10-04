@@ -1,0 +1,80 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+workflow:
+  base_name: so101-keyboard-control-step-no-contact
+  dataset_subdir: so101-keyboard-control-step-v1
+  image: docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095
+  nucleus_credential: so101-nucleus-8ed03716ea4e49d1833fe66f2e5e2dc2
+resources:
+  num_gpu: 8
+  num_cpu: 80
+  memory: 512Gi
+  storage: 512Gi
+  platform: ovx-l40
+experiment:
+  training_only: false
+  dataset_profile: so101_keyboard
+  dataset_capacity_unit: unique_transition
+  training_sequence_length: 10
+  training_window_sampling: sliding
+  collection:
+    checkpoint: ./pretrained/control_policy/so101_keyboard/model_14999.pt
+    validation_mode: basic
+    # Control-step records are not replayed, so collection runs non-deterministic MJWarp with CUDA graphs.
+    deterministic_physics: false
+    record_control_steps: true
+    native_contact_precision: compact_v1
+    persistent_workers: true
+    gpu_indices: [0, 1, 2, 3, 4, 5, 6, 7]
+    chunk_control_steps: 32
+    max_chunks_per_group: 512
+    seed_stride: 1000
+    timeout_seconds: 1200
+    device: cuda:0
+  require_keyboard_replay: false
+  collection_mode: policy
+  env_name: SO101-Keyboard-Fixed
+  robot_name: SO101-Keyboard-Fixed
+  dataset_dir: ./data/datasets/so101-keyboard-control-step-v1
+  train_task: IsaacContrib-Keyboard-SO101-NeRD
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/SO101/transformer_keyboard_control_step_no_contact.yaml
+  train_seed: 42
+  num_gpus: 8
+  train_num_envs: 64
+  data_gen_num_envs: 1024
+  # Clips of 16 control steps span the same 0.64 s as the 64-frame physics clips.
+  trajectory_length: 16
+  minimum_unique_transitions:
+    train: 6000000
+    valid: 1000000
+  contact_mode: newton_native
+  contact_representation: contact_tokens
+  contact_token_frame: owner
+  contact_filter: solver_active_movable
+  num_contacts_per_env: 128
+  max_contact_tokens: 128
+  num_primary_bodies: 116
+  contact_packing_policy: body_round_robin_pair_atomic
+  update_dataset_statistics: true
+  eval_interval: 5
+  save_interval: 100
+  headless: true
+  no_time_stamp: true
+  runtime_versions:
+    newton: "1.6.0"
+    mujoco-warp: "3.12.0"
+    warp-lang: "1.17.0"
+    torch: "2.12.0+cu130"
+    rsl-rl-lib: "5.5.1"
+  dataset_specs:
+    - filename: seed42_variant00.hdf5
+      seed: 42
+      split: train
+      num_transitions: 6000000
+    - filename: seed43_variant00.hdf5
+      seed: 43
+      split: valid
+      num_transitions: 1000000

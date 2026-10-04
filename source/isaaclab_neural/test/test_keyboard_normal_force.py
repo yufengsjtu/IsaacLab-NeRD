@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import copy
 from types import SimpleNamespace
 
 import h5py
@@ -204,6 +205,32 @@ def test_key_head_assembles_robot_and_pooled_key_outputs_in_original_order():
     torch.testing.assert_close(state[..., robot], mean[robot].expand_as(state[..., robot]))
     for keys in ([2, 3, 4], [7, 8, 9]):
         torch.testing.assert_close(state[..., keys], mean[keys].mean().expand_as(state[..., keys]))
+
+
+def test_masked_contact_inputs_make_predictions_contact_independent():
+    from isaaclab_neural.contacts.contact_set_schema import CONTACT_TOKEN_VALID_INDEX
+
+    model, inputs, input_cfg, network = make_key_head_model()
+    with torch.no_grad():
+        # Untrained encoders may start contact-independent; give them weight so masking is observable.
+        for parameter in model.contact_set_encoder.parameters():
+            parameter.normal_(0.0, 0.5)
+        # Identity token statistics keep the valid flag intact, as the categorical-channel statistics do in training.
+        model.input_rms["contact_tokens"].mean.zero_()
+        model.input_rms["contact_tokens"].var.fill_(1.0)
+    masked_cfg = {**input_cfg, "contact_set": {**input_cfg["contact_set"], "mask_all": True}}
+    assert ModelMixedInput(inputs, 10, masked_cfg, network, device="cpu", num_bodies=6).mask_all_contacts
+    masked = copy.deepcopy(model)
+    masked.mask_all_contacts = True
+    without = {**inputs, "contact_tokens": torch.zeros_like(inputs["contact_tokens"])}
+    shifted = {**inputs, "contact_tokens": inputs["contact_tokens"] + 3.0}
+    shifted["contact_tokens"][..., CONTACT_TOKEN_VALID_INDEX] = 1.0
+    with torch.no_grad():
+        reference = model({k: v.clone() for k, v in without.items()})
+        for variant in (inputs, shifted):
+            torch.testing.assert_close(masked({k: v.clone() for k, v in variant.items()}), reference)
+        # The unmasked model does use the contacts.
+        assert not torch.allclose(model({k: v.clone() for k, v in inputs.items()}), reference)
 
 
 def test_key_head_uses_robot_joint_target_offsets_only():

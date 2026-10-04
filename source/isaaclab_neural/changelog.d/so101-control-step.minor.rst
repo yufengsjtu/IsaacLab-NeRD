@@ -21,6 +21,9 @@ Added
   models attend over copies of the post-reset inputs. ``"episode_start"`` restarts a reset row's stream at its
   first post-reset frame, matching training windows at episode starts. The control-step recipe uses it; evaluate
   earlier control-step checkpoints with ``keyboard_policy --reset-history episode_start``.
+* Added ``inputs.contact_set.mask_all`` to train and run a model with every contact token masked, for
+  contact-input ablations, plus the ``SO101/transformer_keyboard_control_step_no_contact.yaml`` recipe and the
+  ``so101_keyboard_control_step_no_contact`` preset. Added ``--reset-history`` to ``keyboard_benchmark``.
 * Added ``algorithm.precision`` (``fp32``, ``bf16`` or ``fp16`` with loss scaling) for the training forward pass and
   ``algorithm.optimizer.fused`` for Adam.
 * Added the ``SO101/transformer_keyboard_control_step.yaml`` recipe and the ``so101_keyboard_control_step`` OSMO
