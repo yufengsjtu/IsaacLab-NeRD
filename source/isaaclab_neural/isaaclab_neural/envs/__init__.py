@@ -27,7 +27,7 @@ from .franka_reach_nerd_env import (
     NerdFrankaReachEnv,
     NerdFrankaReachEnvCfg,
 )
-from .keyboard_nerd_env import NerdSO101KeyboardEnv, NerdSO101KeyboardEnvCfg
+from .keyboard_nerd_env import NerdSO101KeyboardEnv, NerdSO101KeyboardEnvCfg, NerdSO101KeyboardRandomizedEnvCfg
 from .neural_env_wrapper import NerdManagerBasedRLEnv, NeuralEnvAdapter
 
 gym.register(
@@ -163,10 +163,22 @@ gym.register(
     },
 )
 
+gym.register(
+    id="IsaacContrib-Keyboard-SO101-NeRD-Randomized",
+    entry_point=f"{NerdSO101KeyboardEnv.__module__}:NerdSO101KeyboardEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{NerdSO101KeyboardRandomizedEnvCfg.__module__}:NerdSO101KeyboardRandomizedEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.contrib.keyboard.agents.rsl_rl_ppo_cfg:SO101PPORunnerCfg",
+        "default_agent": "rsl_rl",
+    },
+)
+
 
 __all__ = [
     "NerdSO101KeyboardEnv",
     "NerdSO101KeyboardEnvCfg",
+    "NerdSO101KeyboardRandomizedEnvCfg",
     "AnymalCDatasetGenFlatEnvCfg",
     "AnymalCDatasetGenRoughEnvCfg",
     "FrankaLiftCubeDatasetGenEnvCfg",

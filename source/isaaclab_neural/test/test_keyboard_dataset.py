@@ -212,7 +212,9 @@ def test_collection_scene_is_fixed_and_replay_rejects_other_variants():
 
     from isaaclab_neural.generate.keyboard_dataset import _resolve_scene
 
-    args = Namespace(num_envs=32, keyboard_variant=None, seed=42, device="cpu", deterministic_physics=None)
+    args = Namespace(
+        num_envs=32, keyboard_variant=None, keyboard_scene="fixed", seed=42, device="cpu", deterministic_physics=None
+    )
     cfg, _, variant, play_mode = _resolve_scene(args, None)
     assert variant == 0 and play_mode
     assert [item.seed for item in cfg.scene.keyboard.spawn.assets_cfg] == [0]
@@ -229,6 +231,43 @@ def test_collection_scene_is_fixed_and_replay_rejects_other_variants():
         _resolve_scene(args, saved)
 
 
+def test_randomized_scene_keeps_original_variation():
+    from argparse import Namespace
+
+    from isaaclab_neural.envs.keyboard_nerd_env import NerdSO101KeyboardRandomizedEnvCfg
+    from isaaclab_neural.generate.keyboard_dataset import _resolve_scene, configure_keyboard_scene
+
+    original = resolve_presets(SO101KeyboardEnvCfg(), {"newton_mjwarp"})
+    randomized = configure_keyboard_scene(original, "randomized")
+    assert randomized is not original
+    assert randomized.to_dict() == original.to_dict()
+    with pytest.raises(ValueError, match="scene"):
+        configure_keyboard_scene(original, "original")
+    args = Namespace(
+        num_envs=64,
+        keyboard_variant=None,
+        keyboard_scene="randomized",
+        seed=42,
+        device="cpu",
+        deterministic_physics=None,
+    )
+    cfg, *_ = _resolve_scene(args, None)
+    assert [item.seed for item in cfg.scene.keyboard.spawn.assets_cfg] == list(range(32))
+    assert cfg.events.reset_keyboard.params["pose_range"]["roll"] == [0.0, 0.75]
+    assert cfg.commands.typing.reset.pre_solve_reset.params["pose_range"]["z"] == [0.015, 0.05]
+    args.keyboard_variant = 0
+    with pytest.raises(ValueError, match="every variant"):
+        _resolve_scene(args, None)
+    args.keyboard_variant = None
+    saved = {"source_num_envs": 64, "source_seed": 42, "keyboard_variant": 0, "deterministic": True, "scene": "fixed"}
+    with pytest.raises(ValueError, match="scene differs"):
+        _resolve_scene(args, saved)
+    nerd = NerdSO101KeyboardRandomizedEnvCfg()
+    assert nerd.keyboard_scene == "randomized"
+    assert len(nerd.scene.keyboard.spawn.assets_cfg) == 32
+    assert nerd.events.reset_keyboard.params["pose_range"]["yaw"] == [-0.1, 0.1]
+
+
 def test_replay_video_preserves_physics_and_records_complete_control_timeline(tmp_path):
     from argparse import Namespace
 
@@ -238,6 +277,7 @@ def test_replay_video_preserves_physics_and_records_complete_control_timeline(tm
     args = Namespace(
         num_envs=8,
         keyboard_variant=None,
+        keyboard_scene="fixed",
         seed=42,
         device="cpu",
         deterministic_physics=True,
@@ -746,6 +786,78 @@ def test_training_contract_requires_one_fixed_keyboard_and_independent_seeds():
     original["schema"] = "so101_keyboard_original_v1"
     with pytest.raises(ValueError, match="schema"):
         validate_keyboard_training_contracts({"a": original}, {"valid": valid})
+
+
+def randomized_sample():
+    rollout, metadata = sample()
+    metadata.update(
+        scene="randomized",
+        keyboard_variant="all",
+        keyboard_variant_count=32,
+        keyboard_reset={"params": {"pose_range": {"z": [0.015, 0.05]}, "velocity_range": {"z": [0.0, 0.0]}}},
+        typing_reset={
+            "pre_solve_reset": {"params": {"pose_range": {"roll": [0.0, 0.75]}, "velocity_range": {"z": [0.0, 0.0]}}}
+        },
+    )
+    # Each frame has its own keyboard root pose: raised and tilted about the body x axis.
+    angle = torch.linspace(0.0, 0.75, 8)
+    keyboard = rollout["articulation_root_pose"][:, :, 1]
+    keyboard[..., 2] += torch.linspace(0.015, 0.05, 8)
+    keyboard[..., 3:] = torch.stack(
+        [torch.sin(angle / 2), torch.zeros(8), torch.zeros(8), torch.cos(angle / 2)], dim=-1
+    )
+    return rollout, metadata
+
+
+@pytest.mark.parametrize("fault", [None, "robot_pose", "zero_reset", "quaternion", "variant"])
+def test_randomized_scene_accepts_random_keyboard_poses_only(tmp_path, fault):
+    rollout, metadata = randomized_sample()
+    if fault == "robot_pose":
+        rollout["articulation_root_pose"][0, 3, 0, 0] += 0.01
+    elif fault == "zero_reset":
+        metadata["keyboard_reset"]["params"]["pose_range"]["z"] = [0.0, 0.0]
+        metadata["typing_reset"]["pre_solve_reset"]["params"]["pose_range"]["roll"] = [0.0, 0.0]
+    elif fault == "quaternion":
+        rollout["articulation_root_pose"][0, 2, 1, 3:] *= 2.0
+    elif fault == "variant":
+        metadata["keyboard_variant"] = 0
+    path = tmp_path / "randomized.hdf5"
+    if fault is None:
+        write_keyboard_dataset(path, rollout, metadata)
+        assert read_keyboard_metadata(path)["scene"] == "randomized"
+        return
+    with pytest.raises(ValueError, match="root poses|random root-pose|unit quaternions|every keyboard variant"):
+        write_keyboard_dataset(path, rollout, metadata)
+
+
+def test_randomized_runtime_binds_physics_per_variant_and_training_rejects_scene_mix():
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    from isaaclab_neural.data.keyboard import validate_keyboard_runtime, validate_keyboard_training_contracts
+
+    _, metadata = randomized_sample()
+    metadata.update(keyboard_variant_count=2, physics_parameters={"body_mass": [[1.0], [2.0]]})
+
+    class Scene(dict):
+        num_envs = 4
+
+    scene = Scene(
+        {
+            name: SimpleNamespace(cfg=SimpleNamespace(init_state=SimpleNamespace(pos=pose[:3], rot=pose[3:])))
+            for name, pose in metadata["fixed_root_poses"].items()
+        }
+    )
+    # Sequential cloning: world w uses variant w % 2.
+    validate_keyboard_runtime(metadata, scene, SimpleNamespace(body_mass=torch.tensor([1.0, 2.0, 1.0, 2.0])))
+    with pytest.raises(ValueError, match="physics differs"):
+        validate_keyboard_runtime(metadata, scene, SimpleNamespace(body_mass=torch.tensor([1.0, 1.0, 1.0, 1.0])))
+    metadata.update(source_num_envs=4, source_seed=42)
+    _, fixed = sample()
+    fixed.update(source_num_envs=4, source_seed=43, physics_parameters={"body_mass": [1.0]})
+    validate_keyboard_training_contracts({"a": metadata}, {"valid": {**deepcopy(metadata), "source_seed": 43}})
+    with pytest.raises(ValueError, match="scene"):
+        validate_keyboard_training_contracts({"a": metadata}, {"valid": fixed})
 
 
 @pytest.mark.parametrize("fault", ["reset", "pre_solve", "pose_tensor", "declared_pose", "legacy"])

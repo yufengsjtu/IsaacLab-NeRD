@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 from collections.abc import Mapping
@@ -41,14 +42,28 @@ def fixed_root_poses_from_scene(scene: Any) -> dict[str, list[float]]:
     return {name: [*scene[name].cfg.init_state.pos, *scene[name].cfg.init_state.rot] for name in ("robot", "keyboard")}
 
 
+def keyboard_scene(metadata: Mapping[str, Any]) -> str:
+    """Return the recorded keyboard scene: ``"fixed"`` or ``"randomized"``."""
+    return str(metadata.get("scene", "fixed"))
+
+
 def validate_fixed_root_poses(poses: torch.Tensor, metadata: Mapping[str, Any]) -> None:
-    """Require every recorded root pose [m, xyzw] to match the fixed domain within 1e-5."""
+    """Require recorded root poses [m, xyzw] to match the fixed domain within 1e-5.
+
+    In the randomized scene only the robot root is fixed; keyboard roots must be finite unit-quaternion poses.
+    """
     poses = poses.to(torch.float64)
     expected = torch.tensor(
         [metadata["fixed_root_poses"][name] for name in metadata["asset_order"]], dtype=poses.dtype, device=poses.device
     )
     if poses.shape[-2:] != expected.shape or not torch.isfinite(poses).all():
         raise ValueError("Invalid fixed root pose layout or nonfinite poses.")
+    if keyboard_scene(metadata) == "randomized":
+        keyboard = metadata["asset_order"].index("keyboard")
+        if not torch.allclose(poses[..., keyboard, 3:].norm(dim=-1), poses.new_ones(()), atol=1e-4):
+            raise ValueError("Recorded keyboard root orientations must be unit quaternions.")
+        fixed = [index for index in range(expected.shape[0]) if index != keyboard]
+        poses, expected = poses[..., fixed, :], expected[fixed]
     position = (poses[..., :3] - expected[..., :3]).abs().amax()
     rotation = torch.minimum(
         (poses[..., 3:] - expected[..., 3:]).abs().amax(-1), (poses[..., 3:] + expected[..., 3:]).abs().amax(-1)
@@ -62,19 +77,22 @@ def validate_keyboard_runtime(metadata: Mapping[str, Any], scene: Any, model: An
     validate_keyboard_metadata(metadata)
     live = fixed_root_poses_from_scene(scene)
     validate_fixed_root_poses(torch.tensor([live[name] for name in metadata["asset_order"]]), metadata)
+    variants = int(metadata.get("keyboard_variant_count", 1))
     for name, expected in metadata["physics_parameters"].items():
         field = getattr(model, name, None)
         if field is None:
             raise ValueError(f"Runtime lacks recorded physics parameter: {name}.")
         values = torch.as_tensor(field.numpy())
+        # Randomized scenes record one entry per keyboard variant; world w was cloned from variant w % variants.
         reference = torch.as_tensor(expected, dtype=values.dtype)
-        if values.numel() != scene.num_envs * reference.numel() or not torch.allclose(
-            values.reshape(scene.num_envs, *reference.shape),
-            reference.expand(scene.num_envs, *reference.shape),
-            rtol=1e-6,
-            atol=1e-7,
+        if variants > 1:
+            reference = reference[torch.arange(scene.num_envs) % variants]
+        else:
+            reference = reference.expand(scene.num_envs, *reference.shape)
+        if values.numel() != reference.numel() or not torch.allclose(
+            values.reshape(reference.shape), reference, rtol=1e-6, atol=1e-7
         ):
-            raise ValueError(f"Runtime physics differs from the fixed recording: {name}.")
+            raise ValueError(f"Runtime physics differs from the recording: {name}.")
 
 
 def keyboard_clip_indices(done: torch.Tensor, *, horizon: int, decimation: int) -> list[tuple[int, int]]:
@@ -142,13 +160,20 @@ def validate_keyboard_metadata(metadata: Mapping[str, Any]) -> None:
     """Reject incompatible timing, task, coordinate, and force-label conventions."""
     if metadata.get("schema") != KEYBOARD_SCHEMA:
         raise ValueError("Incompatible keyboard dataset schema.")
-    if metadata.get("scene") != "fixed" or metadata.get("keyboard_variant") != 0:
-        raise ValueError("Fixed keyboard data requires matching variants: scene=fixed and variant 0.")
+    scene = metadata.get("scene")
+    if scene == "fixed":
+        if metadata.get("keyboard_variant") != 0 or int(metadata.get("keyboard_variant_count", 1)) != 1:
+            raise ValueError("Fixed keyboard data requires matching variants: scene=fixed and variant 0.")
+    elif scene == "randomized":
+        if metadata.get("keyboard_variant") != "all" or int(metadata.get("keyboard_variant_count", 0)) < 2:
+            raise ValueError("Randomized keyboard data requires every keyboard variant.")
+    else:
+        raise ValueError("Keyboard data requires scene=fixed or scene=randomized.")
     if set(metadata.get("fixed_root_poses", {})) != {"robot", "keyboard"} or metadata.get("asset_order") != [
         "robot",
         "keyboard",
     ]:
-        raise ValueError("Fixed scene requires recorded robot and keyboard root poses.")
+        raise ValueError("Keyboard scene requires recorded robot and keyboard nominal root poses.")
     poses = torch.tensor([metadata["fixed_root_poses"][name] for name in metadata["asset_order"]], dtype=torch.float64)
     if (
         poses.shape != (2, 7)
@@ -159,13 +184,18 @@ def validate_keyboard_metadata(metadata: Mapping[str, Any]) -> None:
     reset_terms = (metadata.get("keyboard_reset"), (metadata.get("typing_reset") or {}).get("pre_solve_reset"))
     for term in reset_terms:
         params = (term or {}).get("params", {})
-        if not params.get("pose_range") or any(
-            float(value) != 0.0
+        offsets = [
+            float(value)
             for field in ("pose_range", "velocity_range")
             for bounds in params.get(field, {}).values()
             for value in bounds
-        ):
+        ]
+        if not params.get("pose_range") or not all(map(math.isfinite, offsets)):
+            raise ValueError("Keyboard reset paths require finite pose ranges.")
+        if scene == "fixed" and any(offsets):
             raise ValueError("Fixed keyboard reset pose/velocity offsets must be zero in both reset paths.")
+        if scene == "randomized" and not any(offsets):
+            raise ValueError("Randomized keyboard data requires the original random root-pose resets.")
     contact_filter = metadata.get("contact_filter", "none")
     if contact_filter not in ("none", "solver_active", "solver_active_movable"):
         raise ValueError("Unsupported recorded contact filter.")
@@ -384,6 +414,8 @@ def validate_keyboard_training_contracts(
         for key in (
             "schema",
             "task",
+            "scene",
+            "keyboard_variant_count",
             "physics_dt",
             "decimation",
             "num_q",
@@ -403,7 +435,7 @@ def validate_keyboard_training_contracts(
             metadata["keyboard_variant"] != reference["keyboard_variant"]
             or metadata["physics_parameters"] != reference["physics_parameters"]
         ):
-            raise ValueError("Fixed keyboard training requires matching variants and physics parameters.")
+            raise ValueError("Keyboard training requires matching variants and physics parameters.")
 
 
 def read_keyboard_metadata(path: str | Path) -> dict[str, Any]:

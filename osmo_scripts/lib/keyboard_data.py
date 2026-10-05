@@ -290,9 +290,11 @@ def validate_basic_recordings(root: Path, experiment: dict[str, Any], records: d
         if record["sha256"] != file_sha256(path) or record["collect_sha256"] != file_sha256(receipt):
             raise ValueError(f"Keyboard data/collection report hash mismatch: {name}.")
         metadata = read_keyboard_metadata(path)
+        scene = experiment["collection"].get("keyboard_scene", "fixed")
         if (
             metadata["schema"] != KEYBOARD_SCHEMA
-            or metadata["keyboard_variant"] != 0
+            or metadata.get("scene", "fixed") != scene
+            or metadata["keyboard_variant"] != (0 if scene == "fixed" else "all")
             or metadata["source_seed"] != spec["seed"]
             or metadata["source_num_envs"] != experiment["data_gen_num_envs"]
             or metadata.get("collection_mode") != experiment.get("collection_mode", "policy")
@@ -794,6 +796,8 @@ def _collect_part(
             command.append("--bounded-deterministic-workspace")
         if collection.get("record_control_steps", False):
             command.append("--record-control-steps")
+        if collection.get("keyboard_scene", "fixed") != "fixed":
+            command += ["--keyboard-scene", collection["keyboard_scene"]]
         if collection.get("native_contact_precision", "full") != "full":
             command += ["--native-contact-precision", collection["native_contact_precision"]]
         if worker is None:

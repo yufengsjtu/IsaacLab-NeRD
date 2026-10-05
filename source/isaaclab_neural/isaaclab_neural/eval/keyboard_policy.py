@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 from isaaclab_neural.data.keyboard import KEYBOARD_TASK
 from isaaclab_neural.eval.eval import build_policy_env, load_saved_agent_cfg_for_policy, reset_policy
-from isaaclab_neural.generate.keyboard_dataset import configure_fixed_keyboard
+from isaaclab_neural.generate.keyboard_dataset import KEYBOARD_SCENES, configure_keyboard_scene
 
 if TYPE_CHECKING:
     from isaaclab.envs.manager_based_rl_env import ManagerBasedRLEnv
@@ -208,6 +208,12 @@ def main() -> None:
         choices=("replicate", "episode_start"),
         help="Override the checkpoint's NeRD history after partial resets (see NerdSolverCfg.reset_history).",
     )
+    parser.add_argument(
+        "--keyboard-scene",
+        choices=KEYBOARD_SCENES,
+        default="fixed",
+        help="fixed: variant 0 at its authored pose; randomized: the original task's variants and random poses.",
+    )
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--reset-mode", choices=("training", "uniform"), default="uniform")
     parser.add_argument("--reset_ik_iters", type=int, help="Override reset IK iterations for a diagnostic comparison.")
@@ -235,7 +241,7 @@ def main() -> None:
     sys.argv = [sys.argv[0]]
     cfg, _ = resolve_task_config(KEYBOARD_TASK, "rsl_rl_cfg_entry_point")
     cfg = cast("SO101KeyboardEnvCfg", resolve_presets(cfg, {"newton_mjwarp"}))
-    cfg = configure_fixed_keyboard(cfg, variant=0)
+    cfg = configure_keyboard_scene(cfg, args.keyboard_scene)
     if args.reset_mode == "uniform":
         cfg.commands.typing.reset.enabled = False
     if args.reset_ik_iters is not None:
@@ -286,6 +292,11 @@ def main() -> None:
         from isaaclab_neural.utils.checkpoint import load_checkpoint
 
         nerd = load_checkpoint(args.nerd_checkpoint, device="cpu")
+        trained_scene = nerd["cfg"].get("keyboard_dataset_contracts", {}).get("train", {}).get("scene", "fixed")
+        if trained_scene != args.keyboard_scene:
+            parser.error(
+                f"the NeRD checkpoint was trained on the {trained_scene} keyboard scene; pass --keyboard-scene"
+            )
         launch_cfg = copy.deepcopy(cfg)
         launch_cfg.sim.physics.use_cuda_graph = False
         solver_cfg = NerdSolverCfg(**nerd["cfg"]["env"]["neural_solver_cfg"])
@@ -355,7 +366,7 @@ def main() -> None:
         "checkpoint": str(args.checkpoint.resolve()),
         "dynamics": "native_mjwarp" if nerd_provenance is None else "nerd",
         "nerd": nerd_provenance,
-        "scene": "fixed",
+        "scene": args.keyboard_scene,
         "reset_mode": args.reset_mode,
         "seed": args.seed,
         "num_envs": args.num_envs,

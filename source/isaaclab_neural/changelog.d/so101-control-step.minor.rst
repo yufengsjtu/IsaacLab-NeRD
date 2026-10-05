@@ -24,6 +24,11 @@ Added
 * Added ``inputs.contact_set.mask_all`` to train and run a model with every contact token masked, for
   contact-input ablations, plus the ``SO101/transformer_keyboard_control_step_no_contact.yaml`` recipe and the
   ``so101_keyboard_control_step_no_contact`` preset. Added ``--reset-history`` to ``keyboard_benchmark``.
+* Added the randomized SO101 Keyboard scene for NeRD: ``--keyboard-scene randomized`` in the collector and
+  ``keyboard_policy``, the ``IsaacContrib-Keyboard-SO101-NeRD-Randomized`` task, the
+  ``SO101/transformer_keyboard_control_step_randomized*.yaml`` recipes and ``so101_keyboard_randomized*``
+  presets. Randomized recordings keep all keyboard variants and random root poses, record per-variant physical
+  parameters and are rejected by fixed-scene training and evaluation.
 * Added ``algorithm.precision`` (``fp32``, ``bf16`` or ``fp16`` with loss scaling) for the training forward pass and
   ``algorithm.optimizer.fused`` for Adam.
 * Added the ``SO101/transformer_keyboard_control_step.yaml`` recipe and the ``so101_keyboard_control_step`` OSMO

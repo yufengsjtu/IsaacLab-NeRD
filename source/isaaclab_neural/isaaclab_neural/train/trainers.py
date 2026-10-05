@@ -1007,7 +1007,7 @@ class VanillaTrainer:
         if self._checkpoint is not None:
             previous = self._checkpoint.get("cfg", {}).get("keyboard_dataset_contracts", {}).get("train")
             if previous is None:
-                raise ValueError("Checkpoint lacks a verified fixed scene contract; start a fresh model.")
+                raise ValueError("Checkpoint lacks a verified keyboard scene contract; start a fresh model.")
             validate_keyboard_runtime(previous, scene, self.neural_solver.model)
         if getattr(self.neural_solver, "contact_filter", "none") == "solver_active_movable":
             fixed_slots = getattr(self.neural_solver.contact_adapter, "fixed_body_slots", None)
@@ -1030,7 +1030,10 @@ class VanillaTrainer:
             or reference["num_qd"] != self.neural_solver.dof_qd_per_env
         ):
             raise ValueError("Keyboard dataset state dimensions differ from the training solver.")
-        if reference["keyboard_variant"] != self.cfg["env"].get("keyboard_variant", 0):
+        runtime_scene = getattr(self.neural_env.neural_adapter.isaaclab_env.cfg, "keyboard_scene", "fixed")
+        if reference.get("scene") != runtime_scene:
+            raise ValueError(f"Keyboard data scene {reference.get('scene')!r} differs from the training environment.")
+        if runtime_scene == "fixed" and reference["keyboard_variant"] != self.cfg["env"].get("keyboard_variant", 0):
             raise ValueError("Keyboard variant differs from the fixed training environment.")
         key_head = getattr(self.neural_model_unwrapped, "key_head", None)
         if key_head is not None:

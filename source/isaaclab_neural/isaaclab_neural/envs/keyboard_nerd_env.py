@@ -3,14 +3,14 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Fixed-variant SO101 keyboard prototype with neural dynamics and robot normal forces."""
+"""SO101 keyboard NeRD environments (fixed or randomized keyboard scene) with robot normal forces."""
 
 from isaaclab.sim import UsdFileCfg
 from isaaclab.utils.configclass import configclass
 
 from isaaclab_tasks.contrib.keyboard.so101_env_cfg import KeyboardAssetCfg, PhysicsCfg, SO101KeyboardEnvCfg
 
-from isaaclab_neural.generate.keyboard_dataset import apply_fixed_keyboard
+from isaaclab_neural.generate.keyboard_dataset import apply_keyboard_scene
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 
 from .neural_env_wrapper import NerdManagerBasedRLEnv
@@ -18,7 +18,7 @@ from .neural_env_wrapper import NerdManagerBasedRLEnv
 
 @configclass
 class NerdSO101KeyboardEnvCfg(SO101KeyboardEnvCfg):
-    """Keep the native task contract, fixing keyboard variant 0 and its authored pose.
+    """Keep the native task contract; by default fix keyboard variant 0 and its authored pose.
 
     One learned step predicts one 0.01 s physics frame. The native teacher uses
     two 0.005 s internal substeps; control still runs every four physics frames.
@@ -26,6 +26,8 @@ class NerdSO101KeyboardEnvCfg(SO101KeyboardEnvCfg):
     """
 
     robot_normal_force_sensor: str = "robot_contact"
+    keyboard_scene: str = "fixed"
+    """``"fixed"`` (variant 0, authored pose) or ``"randomized"`` (all variants, random root-pose resets)."""
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -41,7 +43,7 @@ class NerdSO101KeyboardEnvCfg(SO101KeyboardEnvCfg):
             raise TypeError("SO101 robot requires a Physics variant mapping.")
         self.scene.keyboard = keyboard.newton_mjwarp.copy()
         robot_spawn.variants["Physics"] = "physics"
-        apply_fixed_keyboard(self, variant=0)
+        apply_keyboard_scene(self, self.keyboard_scene, variant=0)
         teacher = physics.newton_mjwarp
         nerd = NerdNewtonCfg(
             solver_cfg=NerdSolverCfg(
@@ -64,6 +66,16 @@ class NerdSO101KeyboardEnvCfg(SO101KeyboardEnvCfg):
         )
         self.sim.physics = nerd
         self.scene.num_envs = 8
+
+
+@configclass
+class NerdSO101KeyboardRandomizedEnvCfg(NerdSO101KeyboardEnvCfg):
+    """The original randomized scene: every keyboard variant (round-robin over worlds) and random root poses.
+
+    The model receives no keyboard pose or variant input; keyboard geometry reaches it only through contacts.
+    """
+
+    keyboard_scene: str = "randomized"
 
 
 class NerdSO101KeyboardEnv(NerdManagerBasedRLEnv):

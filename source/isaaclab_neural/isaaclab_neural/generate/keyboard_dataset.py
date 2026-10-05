@@ -102,6 +102,38 @@ def _restore_mjwarp_model_context(
     manager._solver._invalidate_contact_fast_path()
 
 
+KEYBOARD_SCENES = ("fixed", "randomized")
+
+
+def configure_keyboard_scene(env_cfg: Any, scene: str = "fixed", *, variant: int = 0) -> Any:
+    """Copy a resolved native config for one keyboard scene.
+
+    ``"fixed"`` freezes keyboard ``variant`` at its authored pose (see :func:`apply_fixed_keyboard`).
+    ``"randomized"`` keeps the original task: every procedural keyboard variant, assigned to worlds round-robin
+    (world ``w`` uses variant ``w % num_variants``), and both random keyboard root-pose reset paths.
+    """
+    if scene not in KEYBOARD_SCENES:
+        raise ValueError(f"keyboard scene must be one of {KEYBOARD_SCENES}, got {scene!r}.")
+    if scene == "fixed":
+        return configure_fixed_keyboard(env_cfg, variant=variant)
+    cfg = env_cfg.copy()
+    apply_keyboard_scene(cfg, scene)
+    return cfg
+
+
+def apply_keyboard_scene(cfg: Any, scene: str, *, variant: int = 0) -> None:
+    """Apply a keyboard scene in place; ``"randomized"`` leaves the original task variation unchanged."""
+    if scene == "fixed":
+        apply_fixed_keyboard(cfg, variant=variant)
+    elif scene != "randomized":
+        raise ValueError(f"keyboard scene must be one of {KEYBOARD_SCENES}, got {scene!r}.")
+
+
+def keyboard_variant_count(cfg: Any) -> int:
+    """Number of keyboard variants spawned by a resolved config."""
+    return len(cfg.scene.keyboard.spawn.assets_cfg)
+
+
 def configure_fixed_keyboard(env_cfg: Any, *, variant: int = 0) -> Any:
     """Copy a resolved native config, freezing only keyboard variation and root pose.
 
@@ -192,6 +224,10 @@ def _context(env: Any, adapter: DataGenerationAdapter) -> dict[str, torch.Tensor
     }
     for name in ("state_world_id", "root_world_id", "contact_world_id"):
         result[name] = torch.arange(env.num_envs)
+    variants = keyboard_variant_count(env.cfg)
+    if variants > 1:
+        # Sequential cloning assigns keyboard variants round-robin over worlds.
+        result["keyboard_variant_id"] = torch.arange(env.num_envs) % variants
     for name in COMMAND_FIELDS:
         value = getattr(command, name, None)
         if isinstance(value, torch.Tensor):
@@ -208,7 +244,7 @@ def _context(env: Any, adapter: DataGenerationAdapter) -> dict[str, torch.Tensor
     return result
 
 
-def runtime_metadata(env: Any, adapter: DataGenerationAdapter, variant: int) -> dict[str, Any]:
+def runtime_metadata(env: Any, adapter: DataGenerationAdapter, variant: int, scene: str = "fixed") -> dict[str, Any]:
     """Describe actual imported physics, mappings, and SI label conventions."""
     from isaaclab.utils.dict import replace_slices_with_strings
 
@@ -228,6 +264,9 @@ def runtime_metadata(env: Any, adapter: DataGenerationAdapter, variant: int) -> 
             raise ValueError("Keyboard keys must have one position coordinate each.")
         indices.append(int(starts[joint]))
     parameters = {}
+    variants = keyboard_variant_count(env.cfg)
+    if env.num_envs < variants or (scene == "fixed") != (variants == 1):
+        raise ValueError("Keyboard scene, variant count and world count are inconsistent.")
     for name in (
         "body_mass",
         "body_inertia",
@@ -246,12 +285,18 @@ def runtime_metadata(env: Any, adapter: DataGenerationAdapter, variant: int) -> 
             values = array.numpy()
             if values.shape[0] % env.num_envs:
                 raise ValueError(f"Non-uniform physics parameter layout: {name}.")
-            parameters[name] = values[: values.shape[0] // env.num_envs].tolist()
+            per_world = values.reshape(env.num_envs, -1, *values.shape[1:])
+            # One entry per keyboard variant; every world must equal the variant it was cloned from.
+            by_variant = per_world[:variants]
+            if not np.array_equal(per_world, by_variant[np.arange(env.num_envs) % variants]):
+                raise ValueError(f"Physics parameters do not follow the round-robin keyboard variants: {name}.")
+            parameters[name] = by_variant[0].tolist() if variants == 1 else by_variant.tolist()
     sensor = env.scene.sensors["robot_contact"]
     result = {
         "schema": KEYBOARD_SCHEMA,
         "task": KEYBOARD_TASK,
-        "keyboard_variant": variant,
+        "keyboard_variant": variant if scene == "fixed" else "all",
+        "keyboard_variant_count": variants,
         "physics_dt": env.physics_dt,
         "decimation": env.cfg.decimation,
         "num_substeps": env.cfg.sim.physics.num_substeps,
@@ -276,7 +321,7 @@ def runtime_metadata(env: Any, adapter: DataGenerationAdapter, variant: int) -> 
         "typing_after_contract": "post_env_step_at_control_boundaries; ignore_after_terminal_reset",
         "source_num_envs": env.num_envs,
         "source_seed": env.cfg.seed,
-        "scene": "fixed",
+        "scene": scene,
         "fixed_root_poses": fixed_root_poses_from_scene(env.scene),
         "versions": {name: version(name) for name in ("newton", "mujoco-warp", "torch", "rsl-rl-lib")},
         "robot_asset": env.cfg.scene.robot.spawn.to_dict(),
@@ -886,9 +931,14 @@ def _resolve_scene(args: argparse.Namespace, saved: dict[str, Any] | None) -> tu
         args.num_envs = int(saved["source_num_envs"]) if saved else 8
     if saved and args.num_envs != saved["source_num_envs"]:
         raise ValueError("Replay requires the original source_num_envs to preserve world layout.")
+    scene = saved.get("scene", "fixed") if saved else args.keyboard_scene
+    if saved and args.keyboard_scene != scene:
+        raise ValueError("Keyboard scene differs from the recording.")
     variant = saved["keyboard_variant"] if saved else (args.keyboard_variant or 0)
     if args.keyboard_variant is not None and args.keyboard_variant != variant:
         raise ValueError("Keyboard variant differs from the recording.")
+    if scene == "randomized" and args.keyboard_variant is not None:
+        raise ValueError("The randomized keyboard scene uses every variant; omit --keyboard-variant.")
     if args.seed is None:
         args.seed = int(saved["source_seed"]) if saved else 0
     if saved and args.seed != saved["source_seed"]:
@@ -897,7 +947,7 @@ def _resolve_scene(args: argparse.Namespace, saved: dict[str, Any] | None) -> tu
     cfg, agent = resolve_task_config(
         KEYBOARD_TASK, "rsl_rl_cfg_entry_point", play_mode=play_mode, overrides=["physics=newton_mjwarp"]
     )
-    cfg = configure_fixed_keyboard(cfg, variant=variant)
+    cfg = configure_keyboard_scene(cfg, scene, variant=variant if scene == "fixed" else 0)
     cfg.scene.num_envs = args.num_envs
     cfg.sim.device = args.device or "cuda:0"
     cfg.seed = args.seed
@@ -1185,6 +1235,12 @@ def main() -> None:
     parser.add_argument("--deterministic-physics", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--bounded-deterministic-workspace", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--keyboard-variant", type=int, choices=(0,), default=None)
+    parser.add_argument(
+        "--keyboard-scene",
+        choices=KEYBOARD_SCENES,
+        default="fixed",
+        help="fixed: variant 0 at its authored pose; randomized: the original task's variants and random poses.",
+    )
     parser.add_argument("--control-steps", type=int, default=140)
     parser.add_argument("--horizon", type=int, default=64, help="Records per stored clip.")
     parser.add_argument(
@@ -1276,7 +1332,7 @@ def main() -> None:
                         joint_target_input=bool(args.record_control_steps),
                     ),
                 )
-                metadata = runtime_metadata(env, adapter, variant)
+                metadata = runtime_metadata(env, adapter, variant, scene=args.keyboard_scene)
                 metadata["max_contact_tokens"] = max_contact_tokens
                 if args.record_control_steps:
                     metadata["step_mode"] = "control_step"
