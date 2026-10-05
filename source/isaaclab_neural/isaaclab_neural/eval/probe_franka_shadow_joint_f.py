@@ -347,7 +347,7 @@ def main(env_cfg, agent_cfg) -> None:
         )
         env_wrapped, policy, runner = build_policy_env(env, agent_cfg, args_cli.policy_checkpoint, args_cli.device)
         unwrapped = env_wrapped.unwrapped
-        control = NewtonManager._control
+        control = NewtonManager.get_control()
         robot = unwrapped.scene["robot"]
         joint_names = list(robot.joint_names)
         print(

@@ -132,7 +132,7 @@ def main(env_cfg, agent_cfg=None) -> None:
         )
         adapter = DataGenerationAdapter(env, solver_cfg)
         robot = env.scene["robot"]
-        control = NewtonManager._control
+        control = NewtonManager.get_control()
         num_envs = int(env.num_envs)
         joint_names = list(robot.joint_names)
         print(f"[wiring] task={args_cli.task} num_envs={num_envs} steps={args_cli.num_steps} joints={joint_names}")

@@ -183,10 +183,10 @@ def test_training_eval_joint_f_step_skips_applied_effort_overlay(monkeypatch) ->
     from isaaclab_neural.eval.training_evaluator import TrainingRolloutEvaluator
 
     seen: list[bool] = []
+    assigned: list[torch.Tensor] = []
     monkeypatch.setattr("isaaclab_neural.eval.training_evaluator.wp.from_torch", lambda value: value)
-    monkeypatch.setattr(
-        NewtonNerdManager, "_control", SimpleNamespace(joint_f=SimpleNamespace(assign=lambda _value: None))
-    )
+    control = SimpleNamespace(joint_f=SimpleNamespace(assign=assigned.append))
+    monkeypatch.setattr(NewtonNerdManager, "get_control", classmethod(lambda cls: control))
     monkeypatch.setattr(
         NewtonNerdManager,
         "_simulate_physics_only",
@@ -202,10 +202,13 @@ def test_training_eval_joint_f_step_skips_applied_effort_overlay(monkeypatch) ->
             states_torch=torch.zeros(2, 3),
         )
     )
+    joint_f = torch.arange(6, dtype=torch.float32).reshape(2, 3)
     try:
-        evaluator._step_joint_f(torch.zeros(2, 3))
+        evaluator._step_joint_f(joint_f)
     finally:
         NewtonNerdManager._skip_applied_effort_overlay = False
 
+    assert len(assigned) == 1
+    torch.testing.assert_close(assigned[0], joint_f.reshape(-1))
     assert seen == [True]
     assert NewtonNerdManager._skip_applied_effort_overlay is False

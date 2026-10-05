@@ -853,7 +853,7 @@ class TrainingRolloutEvaluator:
         adapter = self.neural_env.neural_adapter
         manager = adapter.manager
         joint_f = joint_f.to(device=self.device, dtype=torch.float32)
-        manager._control.joint_f.assign(wp.from_torch(joint_f.reshape(-1)))
+        manager.get_control().joint_f.assign(wp.from_torch(joint_f.reshape(-1)))
         skip_overlay = getattr(manager, "without_applied_effort_overlay", None)
         if callable(skip_overlay):
             with skip_overlay():

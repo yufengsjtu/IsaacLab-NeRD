@@ -900,7 +900,7 @@ def compare_diagnostic_batch(
     restore_terrain_patch(env, dataset_raw, required=args.require_terrain_context)
     adapter.reset(initial_states=dataset_raw["states"][:, -1])
     manager = adapter.manager
-    manager._control.joint_f.assign(wp.from_torch(dataset_raw["joint_f"][:, -1].reshape(-1)))
+    manager.get_control().joint_f.assign(wp.from_torch(dataset_raw["joint_f"][:, -1].reshape(-1)))
     adapter.sync(update_history=False)
     runtime_current = NeuralSolver.get_raw_neural_model_inputs(solver)
     runtime_raw = clone_batch(dataset_raw)
