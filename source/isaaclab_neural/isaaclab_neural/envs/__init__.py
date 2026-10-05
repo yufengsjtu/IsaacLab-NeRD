@@ -11,8 +11,15 @@ from isaaclab_tasks.contrib.velocity.config.anymal_c import agents as anymal_c_a
 from isaaclab_tasks.core.cartpole import agents as cartpole_agents
 from isaaclab_tasks.core.lift.config.franka import agents as franka_lift_agents
 from isaaclab_tasks.core.reach.config.franka import agents as franka_reach_agents
+from isaaclab_tasks.core.reorient.config.allegro_hand import agents as allegro_reorient_agents
 
 from .agents import anymal_c_nerd_rsl_rl_ppo_cfg as anymal_c_nerd_agents
+from .allegro_reorient_nerd_env import (
+    AllegroReorientDatasetGenEnvCfg,
+    AllegroReorientPolicyEnvCfg,
+    NerdAllegroReorientEnv,
+    NerdAllegroReorientEnvCfg,
+)
 from .anymal_c_dataset_gen_cfg import AnymalCDatasetGenFlatEnvCfg, AnymalCDatasetGenRoughEnvCfg
 from .anymal_nerd_env import NerdAnymalCFlatEnv, NerdAnymalCFlatEnvCfg, NerdAnymalCRoughEnv, NerdAnymalCRoughEnvCfg
 from .cartpole_nerd_env import NerdCartpoleEnv, NerdCartpoleEnvCfg
@@ -151,6 +158,41 @@ gym.register(
     },
 )
 
+_ALLEGRO_REORIENT_RSL_RL_CFG = f"{allegro_reorient_agents.__name__}.rsl_rl_ppo_cfg:AllegroHandManagerPPORunnerCfg"
+
+gym.register(
+    id="Isaac-Reorient-Cube-Allegro-Policy-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{AllegroReorientPolicyEnvCfg.__module__}:AllegroReorientPolicyEnvCfg",
+        "rsl_rl_cfg_entry_point": _ALLEGRO_REORIENT_RSL_RL_CFG,
+        "default_agent": "rsl_rl",
+    },
+)
+
+gym.register(
+    id="Isaac-Reorient-Cube-Allegro-Dataset-Gen-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{AllegroReorientDatasetGenEnvCfg.__module__}:AllegroReorientDatasetGenEnvCfg",
+        "rsl_rl_cfg_entry_point": _ALLEGRO_REORIENT_RSL_RL_CFG,
+        "default_agent": "rsl_rl",
+    },
+)
+
+gym.register(
+    id="Isaac-Reorient-Cube-Allegro-NeRD-v0",
+    entry_point=f"{NerdAllegroReorientEnv.__module__}:NerdAllegroReorientEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{NerdAllegroReorientEnvCfg.__module__}:NerdAllegroReorientEnvCfg",
+        "rsl_rl_cfg_entry_point": _ALLEGRO_REORIENT_RSL_RL_CFG,
+        "default_agent": "rsl_rl",
+    },
+)
+
 
 gym.register(
     id="IsaacContrib-Keyboard-SO101-NeRD",
@@ -176,6 +218,10 @@ gym.register(
 
 
 __all__ = [
+    "AllegroReorientDatasetGenEnvCfg",
+    "AllegroReorientPolicyEnvCfg",
+    "NerdAllegroReorientEnv",
+    "NerdAllegroReorientEnvCfg",
     "NerdSO101KeyboardEnv",
     "NerdSO101KeyboardEnvCfg",
     "NerdSO101KeyboardRandomizedEnvCfg",
