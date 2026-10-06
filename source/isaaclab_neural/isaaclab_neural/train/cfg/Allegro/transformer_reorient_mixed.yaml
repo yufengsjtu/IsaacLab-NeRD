@@ -6,7 +6,7 @@
 # Allegro hand + free DexCube predicted together (16 hand joints, one FREE cube joint).
 env:
   env_name: Allegro-Reorient
-  num_envs: 1024
+  num_envs: 256
   neural_solver_cfg:
     name: TransformerNeuralSolver
     states_frame: body
@@ -64,13 +64,13 @@ algorithm:
     num_data_workers: 0
 
   eval:
-    mode: dataset
-    action_mode: joint_f
-    rollout_horizon: 10
-    num_rollouts: 1024
-    preserve_source_origins: True
-    contact_context_validation: strict
-    dataset_path: ./data/datasets/allegro-reorient-newton-contacts-v1/Allegro-Reorient/dataset_policy_valid.hdf5
+    # Closed-loop reorientation with the collection policy in the training environment (rank 0, current
+    # weights), as for SO101 Keyboard. The OSMO pipeline overrides policy_checkpoint with its teacher.
+    interval: 5
+    mode: allegro_policy
+    policy_checkpoint: ./pretrained/control_policy/allegro_reorient/model.pt
+    control_steps: 600
+    seed: 43
 
 inputs:
   low_dim: [

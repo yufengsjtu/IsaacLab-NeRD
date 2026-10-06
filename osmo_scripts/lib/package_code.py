@@ -49,6 +49,8 @@ FORCE_INCLUDED_GLOBS = (
     "pretrained/control_policy/franka_reach/**/*",
     "pretrained/control_policy/franka_reach_menagerie/**/*",
     "pretrained/control_policy/so101_keyboard/*.pt",
+    # Optional staged Allegro teacher (checkpoint plus params/agent.yaml); the preset trains one otherwise.
+    "pretrained/control_policy/allegro_reorient/**/*",
     "pretrained/official/**/*",
 )
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,32 @@ def summarize_reorient_episodes(episodes: list[dict[str, Any]]) -> dict[str, Any
         "drops": drops,
         "drop_rate": drops / count if count else None,
     }
+
+
+def load_allegro_reorient_policy(env: Any, checkpoint: Path, *, device: str, seed: int):
+    """Wrap ``env`` and load the RSL-RL policy, preferring the agent config saved beside the checkpoint.
+
+    Returns:
+        The wrapped environment, the inference policy and its runner.
+    """
+    from isaaclab_tasks.utils.hydra import resolve_presets
+    from isaaclab_tasks.utils.parse_cfg import resolve_task_config
+
+    # Explicit empty overrides keep the caller's command line (e.g. training arguments) out of Hydra.
+    _, agent = resolve_task_config(ALLEGRO_REORIENT_POLICY_TASK, "rsl_rl_cfg_entry_point", overrides=[])
+    agent = resolve_presets(agent, {"newton_mjwarp"})
+    runner_cfg = load_saved_agent_cfg_for_policy(str(checkpoint), agent, device=device, seed=seed)
+    # During DDP NeRD training the policy runs on rank 0 only. RSL-RL infers distributed mode from
+    # WORLD_SIZE and would initialize the already-initialized default process group a second time.
+    world_size = os.environ.get("WORLD_SIZE")
+    os.environ["WORLD_SIZE"] = "1"
+    try:
+        return build_policy_env(env, runner_cfg, str(checkpoint), device)
+    finally:
+        if world_size is None:
+            os.environ.pop("WORLD_SIZE", None)
+        else:
+            os.environ["WORLD_SIZE"] = world_size
 
 
 def rollout_reorient_policy(env: Any, wrapped: Any, policy: Any, runner: Any, control_steps: int) -> dict[str, Any]:
@@ -132,9 +159,8 @@ def main() -> None:
     if args.report.exists():
         raise FileExistsError(args.report)
     sys.argv = [sys.argv[0]]
-    cfg, agent_cfg = resolve_task_config(ALLEGRO_REORIENT_POLICY_TASK, "rsl_rl_cfg_entry_point", overrides=[])
+    cfg, _ = resolve_task_config(ALLEGRO_REORIENT_POLICY_TASK, "rsl_rl_cfg_entry_point", overrides=[])
     cfg = resolve_presets(cfg, {"newton_mjwarp"})
-    agent_cfg = resolve_presets(agent_cfg, {"newton_mjwarp"})
     cfg.scene.num_envs = args.num_envs
     cfg.sim.device = args.device or "cuda:0"
     cfg.seed = args.seed
@@ -178,10 +204,9 @@ def main() -> None:
 
             env = NerdAllegroReorientEnv(cfg=cfg)
         try:
-            runner_cfg = load_saved_agent_cfg_for_policy(
-                str(args.checkpoint), agent_cfg, device=cfg.sim.device, seed=args.seed
+            wrapped, policy, runner = load_allegro_reorient_policy(
+                env, args.checkpoint, device=cfg.sim.device, seed=args.seed
             )
-            wrapped, policy, runner = build_policy_env(env, runner_cfg, str(args.checkpoint), cfg.sim.device)
             with torch.inference_mode():
                 rollout = rollout_reorient_policy(env, wrapped, policy, runner, args.control_steps)
         finally:

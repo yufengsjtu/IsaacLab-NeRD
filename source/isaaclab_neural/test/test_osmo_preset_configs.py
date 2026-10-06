@@ -1513,3 +1513,117 @@ def test_dataset_spec_rejects_noise_without_policy() -> None:
     experiment = {"dataset_specs": [{"filename": "x.hdf5", "seed": 0, "policy_action_noise_std": 0.1}]}
     with __import__("pytest").raises(ValueError, match="use_policy is false"):
         parse_dataset_specs(experiment)
+
+
+def test_allegro_preset_matches_training_recipe_and_closed_loop_eval() -> None:
+    preset = _load_yaml(PRESET_DIR / "allegro_reorient_mixed.yaml")
+    experiment = preset["experiment"]
+    train_config = _load_yaml(REPOSITORY_ROOT / experiment["train_cfg"])
+    dataset_config = train_config["algorithm"]["dataset"]
+    specs = experiment["dataset_specs"]
+
+    train_files = {Path(source["path"]).name for source in dataset_config["train_datasets"].values()}
+    valid_files = {Path(path).name for path in dataset_config["valid_datasets"].values()}
+    assert train_files == {item["filename"] for item in specs if item["split"] == "train"}
+    assert valid_files == {item["filename"] for item in specs if item["split"] == "valid"}
+    for path in [
+        *(s["path"] for s in dataset_config["train_datasets"].values()),
+        *dataset_config["valid_datasets"].values(),
+    ]:
+        assert Path(path).parent.name == experiment["env_name"]
+        assert Path(path).parent.parent == Path(experiment["dataset_dir"])
+    train = [item for item in specs if item["split"] == "train"]
+    assert sum(item["num_transitions"] for item in train) == experiment["train_transitions"]
+    assert {item["seed"] for item in train}.isdisjoint(item["seed"] for item in specs if item["split"] == "valid")
+    solver_cfg = train_config["env"]["neural_solver_cfg"]
+    for key in ("num_contacts_per_env", "max_contact_tokens", "contact_representation", "contact_packing_policy"):
+        assert solver_cfg[key] == experiment[key], key
+    eval_cfg = train_config["algorithm"]["eval"]
+    assert eval_cfg["mode"] == "allegro_policy"
+    assert experiment["teacher_policy"]["closed_loop_training_eval"] is True
+    assert experiment["teacher_policy"]["task"] == "Isaac-Reorient-Cube-Allegro-Policy-v0"
+    assert preset["workflow"]["image"] == "docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095"
+
+
+def _fake_teacher_run(monkeypatch, tmp_path, mean_goals: float) -> list[list[str]]:
+    import json
+    import subprocess
+
+    commands: list[list[str]] = []
+
+    def fake_run(command, check):
+        commands.append([str(item) for item in command])
+        if "--report" in command:
+            report = Path(command[command.index("--report") + 1])
+            report.write_text(json.dumps({"mean_goals_per_episode": mean_goals, "drop_rate": 0.1}))
+            return
+        run_name = command[command.index("--run_name") + 1]
+        run_dir = tmp_path / "logs" / "rsl_rl" / "teacher" / f"2026-01-01_00-00-00_{run_name}"
+        (run_dir / "params").mkdir(parents=True)
+        for iteration in (50, 200, 9):
+            (run_dir / f"model_{iteration}.pt").write_bytes(b"")
+        (run_dir / "params" / "agent.yaml").write_text("{}")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return commands
+
+
+def _teacher_experiment(tmp_path, minimum: float = 1.0) -> dict:
+    return {
+        "policy_checkpoint": str(tmp_path / "missing.pt"),
+        "teacher_policy": {
+            "task": "Isaac-Reorient-Cube-Allegro-Policy-v0",
+            "experiment_name": "teacher",
+            "num_gpus": 8,
+            "num_envs": 4096,
+            "max_iterations": 201,
+            "closed_loop_training_eval": True,
+            "evaluation": {"module": "eval_module", "min_mean_goals_per_episode": minimum},
+        },
+    }
+
+
+def test_teacher_stage_trains_distributed_copies_latest_checkpoint_and_overrides_eval(tmp_path, monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import run_experiment
+
+    commands = _fake_teacher_run(monkeypatch, tmp_path, mean_goals=3.0)
+    experiment = _teacher_experiment(tmp_path)
+
+    assert run_experiment.train_teacher_policy(experiment, tmp_path / "output") is True
+
+    train_command = commands[0]
+    assert train_command[1:3] == ["-m", "torch.distributed.run"]
+    assert train_command[train_command.index("--nproc_per_node") + 1] == "8"
+    assert "isaaclab_neural.train.train_control_policy" in train_command
+    assert train_command[-1] == "--distributed"
+    checkpoint = Path(experiment["policy_checkpoint"])
+    assert checkpoint.name == "model_200.pt"
+    assert checkpoint.is_relative_to(tmp_path / "output" / "teacher_policy")
+    assert (checkpoint.parent / "params" / "agent.yaml").is_file()
+    assert commands[1][commands[1].index("--checkpoint") + 1] == str(checkpoint)
+
+    captured: list[list[str]] = []
+    monkeypatch.setattr(run_experiment.subprocess, "run", lambda command, check: captured.append(command))
+    experiment.update(train_task="task", train_cfg="cfg.yaml", env_name="Allegro-Reorient", train_num_envs=8)
+    run_experiment.run_training(experiment, tmp_path / "output", Namespace(enable_wandb=False))
+    overrides = captured[0][captured[0].index("--cfg-overrides") + 1]
+    assert overrides == f"algorithm.eval.policy_checkpoint {checkpoint}"
+
+
+def test_teacher_stage_reuses_existing_checkpoint_and_gates_baseline(tmp_path, monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import run_experiment
+
+    commands = _fake_teacher_run(monkeypatch, tmp_path, mean_goals=0.5)
+    staged = tmp_path / "staged.pt"
+    staged.write_bytes(b"")
+    experiment = _teacher_experiment(tmp_path)
+    experiment["policy_checkpoint"] = str(staged)
+
+    with pytest.raises(RuntimeError, match="below the preset minimum"):
+        run_experiment.train_teacher_policy(experiment, tmp_path / "output")
+
+    assert len(commands) == 1 and "--report" in commands[0]
+    assert experiment["policy_checkpoint"] == str(staged)

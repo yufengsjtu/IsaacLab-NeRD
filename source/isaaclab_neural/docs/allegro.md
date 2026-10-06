@@ -35,13 +35,13 @@ NeRD agree, but it is not the physical DexCube inertia.
 ## Teacher policy
 
 No pretrained Allegro checkpoint exists. Train one on the policy task so its
-contact pipeline matches data collection. The tasks are registered by
-`isaaclab_neural.envs`, so import it before the RSL-RL entry point:
+contact pipeline matches data collection. `isaaclab_neural.train.train_control_policy`
+registers the NeRD tasks and forwards the `isaaclab train` RSL-RL arguments; it
+also runs under `torch.distributed.run` with `--distributed`:
 
 ```bash
 export PYTHONPATH="$PWD/source/isaaclab_neural${PYTHONPATH:+:$PYTHONPATH}"
-uv run --no-sync python -c "import sys, isaaclab_neural.envs; \
-from isaaclab_rl.entrypoints.backends.train_rsl_rl import run; run(sys.argv[1:])" \
+uv run --no-sync python -m isaaclab_neural.train.train_control_policy \
   --task Isaac-Reorient-Cube-Allegro-Policy-v0 --num_envs 4096
 ```
 
@@ -64,8 +64,9 @@ $SCRIPT --sample-mode action --zero-actions \
 ```
 
 Repeat each command with a new seed, a smaller transition count and the
-corresponding `*_valid.hdf5` name. Training-time rollout evaluation preserves
-source origins, so `env.num_envs` must equal the collection world count.
+corresponding `*_valid.hdf5` name. The core action term rescales actions to the
+joint limits, so zero actions hold the hand at the middle of its joint ranges,
+not at the default pose.
 
 ## Training
 
@@ -73,13 +74,41 @@ source origins, so `env.num_envs` must equal the collection world count.
 uv run --no-sync python -m isaaclab_neural.train.train \
   --task Isaac-Reorient-Cube-Allegro-NeRD-v0 \
   --cfg source/isaaclab_neural/isaaclab_neural/train/cfg/Allegro/transformer_reorient_mixed.yaml \
-  --num-envs 1024 --device cuda:0 --visualizer none
+  --cfg-overrides "algorithm.eval.policy_checkpoint $POLICY" \
+  --num-envs 256 --device cuda:0 --visualizer none
 ```
 
-The recipe uses the Franka Lift model and losses with the SO101 streaming trunk
-(`relative_lag` attention spans and the frame cache). It has no object-specific
-head yet; the SO101 Keyboard result (94.7% with the key head versus 4.2% without)
-suggests evaluating a cube head if closed-loop results are poor.
+The recipe uses the Franka Lift model, losses and weighted mixed-source loading
+with the SO101 streaming trunk (`relative_lag` attention spans and the frame
+cache). As for SO101 Keyboard, `algorithm.eval.mode: allegro_policy` replaces
+dataset rollouts: every fifth epoch rank 0 runs the teacher closed loop in the
+training environment with the current weights, logs
+`eval_closed_loop/mean_goals_per_episode` and `drop_rate`, and saves
+`best_eval_model.pt` for the most goals per episode. Pass `--eval-interval 0` when
+no teacher checkpoint is available. Keyboard's unique-transition sliding windows
+and key head are not used. The SO101 Keyboard result (94.7% with the key head
+versus 4.2% without) suggests evaluating a cube head if closed-loop results are
+poor.
+
+## OSMO pipeline
+
+`osmo_scripts/presets/allegro_reorient_mixed.yaml` runs everything in one
+eight-GPU workflow:
+
+1. If `policy_checkpoint` (`pretrained/control_policy/allegro_reorient/model.pt`,
+   with `params/agent.yaml` beside it) is absent, `teacher_policy` trains the RSL-RL
+   teacher with `torch.distributed.run` (8 ranks x 4096 worlds, 5000 iterations) and
+   copies the run to `teacher_policy/` in the workflow output.
+2. The teacher is evaluated closed loop on MJWarp (`teacher_policy/baseline.json`).
+   Fewer than `min_mean_goals_per_episode` (2.0) goals per episode stops the workflow
+   before data collection.
+3. A newly trained teacher always regenerates the six datasets instead of reading
+   the cache, because cached data may come from another policy.
+4. NeRD trains on eight GPUs with closed-loop evaluation against the same teacher.
+
+```bash
+./osmo_scripts/start.sh --preset allegro_reorient_mixed --pool <osmo-pool>
+```
 
 ## Closed-loop evaluation
 
@@ -97,6 +126,8 @@ uv run --no-sync python -m isaaclab_neural.eval.allegro_reorient_policy \
 Episodes still running after `--control-steps` are not counted. Select NeRD
 checkpoints by this closed-loop comparison rather than validation loss.
 
-**Validation status:** dataset generation, training, training-time rollout
-evaluation and both evaluator backends ran end to end on small smoke runs only.
-No teacher policy, dataset or NeRD checkpoint has been qualified yet.
+**Validation status:** teacher training (also through a one-rank
+`torch.distributed.run`), the teacher baseline gate, policy/noisy/zero-action
+collection, NeRD training with closed-loop evaluation and both evaluator backends
+ran end to end on small single-GPU smoke runs. The eight-GPU OSMO workflow has not
+run, and no teacher policy, dataset or NeRD checkpoint has been qualified yet.

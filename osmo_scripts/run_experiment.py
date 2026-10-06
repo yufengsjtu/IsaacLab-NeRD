@@ -651,6 +651,109 @@ def generate_all_datasets(experiment: dict, specs: list[DatasetSpec], dataset_di
             subprocess.run([sys.executable, *args], check=True)
 
 
+def latest_rsl_rl_checkpoint(run_dir: Path) -> Path:
+    """Return the highest-iteration ``model_<iteration>.pt`` in an RSL-RL run directory."""
+    checkpoints = [path for path in run_dir.glob("model_*.pt") if path.stem.split("_", 1)[1].isdigit()]
+    if not checkpoints:
+        raise FileNotFoundError(f"No RSL-RL checkpoint found in {run_dir}.")
+    return max(checkpoints, key=lambda path: int(path.stem.split("_", 1)[1]))
+
+
+def evaluate_teacher_policy(teacher: dict, checkpoint: Path, report: Path) -> dict:
+    """Run the preset's closed-loop teacher evaluation and enforce its minimum goals per episode."""
+    evaluation = teacher["evaluation"]
+    command = [
+        sys.executable,
+        "-m",
+        str(evaluation["module"]),
+        "--checkpoint",
+        str(checkpoint),
+        "--report",
+        str(report),
+        "--num-envs",
+        str(evaluation.get("num_envs", 256)),
+        "--control-steps",
+        str(evaluation.get("control_steps", 1500)),
+        "--seed",
+        str(evaluation.get("seed", 100)),
+    ]
+    subprocess.run(command, check=True)
+    result = json.loads(report.read_text())
+    minimum = evaluation.get("min_mean_goals_per_episode")
+    mean_goals = result.get("mean_goals_per_episode")
+    if minimum is not None and (mean_goals is None or mean_goals < float(minimum)):
+        raise RuntimeError(
+            f"Teacher policy reached {mean_goals} goals per episode, below the preset minimum {minimum}; "
+            "refusing to collect NeRD data with it."
+        )
+    return result
+
+
+def train_teacher_policy(experiment: dict, output_root: Path) -> bool:
+    """Train the preset's RSL-RL teacher unless ``policy_checkpoint`` already exists, then evaluate it.
+
+    A trained teacher replaces ``experiment["policy_checkpoint"]`` with its final checkpoint, copied
+    under ``output_root/teacher_policy`` so the workflow output keeps it with its saved agent config.
+
+    Returns:
+        Whether a new teacher was trained in this run.
+    """
+    teacher = experiment.get("teacher_policy")
+    if not teacher:
+        return False
+    teacher_root = output_root / "teacher_policy"
+    existing = str(experiment.get("policy_checkpoint", "") or "")
+    trained = not (existing and Path(existing).is_file())
+    if trained:
+        experiment_name = str(teacher.get("experiment_name", "teacher_policy"))
+        run_name = f"osmo_{int(time.time())}"
+        args = [
+            "-m",
+            "isaaclab_neural.train.train_control_policy",
+            "--task",
+            str(teacher["task"]),
+            "--num_envs",
+            str(teacher["num_envs"]),
+            "--max_iterations",
+            str(teacher["max_iterations"]),
+            "--seed",
+            str(teacher.get("seed", 42)),
+            "--experiment_name",
+            experiment_name,
+            "--run_name",
+            run_name,
+        ]
+        num_gpus = int(teacher.get("num_gpus", 1))
+        if num_gpus > 1:
+            command = [
+                sys.executable,
+                "-m",
+                "torch.distributed.run",
+                "--standalone",
+                "--nproc_per_node",
+                str(num_gpus),
+                *args,
+                "--distributed",
+            ]
+        else:
+            command = [sys.executable, *args]
+        subprocess.run(command, check=True)
+        runs = sorted((Path.cwd() / "logs" / "rsl_rl" / experiment_name).glob(f"*_{run_name}"))
+        if len(runs) != 1:
+            raise RuntimeError(f"Expected one teacher run named {run_name!r}, found {[str(run) for run in runs]}.")
+        run_dir = teacher_root / runs[0].name
+        shutil.copytree(runs[0], run_dir)
+        experiment["policy_checkpoint"] = str(latest_rsl_rl_checkpoint(run_dir))
+        print(f"Trained teacher policy: {experiment['policy_checkpoint']}")
+    else:
+        print(f"Reusing teacher policy {existing}; skipping teacher training.")
+    if teacher.get("evaluation"):
+        teacher_root.mkdir(parents=True, exist_ok=True)
+        result = evaluate_teacher_policy(teacher, Path(experiment["policy_checkpoint"]), teacher_root / "baseline.json")
+        print(f"Teacher baseline: goals/episode={result['mean_goals_per_episode']}, drop_rate={result['drop_rate']}")
+    return trained
+
+
 def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Namespace):
     train_args = [
         "--task",
@@ -678,6 +781,11 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
             train_args += [flag, str(experiment[key])]
     if experiment.get("update_dataset_statistics"):
         train_args.append("--update-dataset-statistics")
+    cfg_overrides = str(experiment.get("train_cfg_overrides", "") or "").split()
+    if (experiment.get("teacher_policy") or {}).get("closed_loop_training_eval"):
+        cfg_overrides += ["algorithm.eval.policy_checkpoint", str(experiment["policy_checkpoint"])]
+    if cfg_overrides:
+        train_args += ["--cfg-overrides", " ".join(cfg_overrides)]
     if experiment.get("train_preset"):
         train_args.append(f"presets={experiment['train_preset']}")
     if wandb_args.enable_wandb:
@@ -1144,6 +1252,9 @@ def run(args: argparse.Namespace):
         print(f"Validated runtime: {validate_runtime(experiment)}")
     specs = parse_dataset_specs(experiment)
     output_root = Path(args.output_root)
+    teacher_trained = train_teacher_policy(experiment, output_root)
+    if teacher_trained and args.dataset_cache_mode == "require":
+        raise RuntimeError("A newly trained teacher cannot reuse cached datasets recorded with another policy.")
     dataset_dir = Path(args.dataset_dir or experiment.get("dataset_dir", "./data/datasets"))
     local_env_dir = dataset_dir / str(experiment["env_name"])
     required_files = required_dataset_files(experiment, specs)
@@ -1156,7 +1267,9 @@ def run(args: argparse.Namespace):
     print(f"Training config: {experiment['train_cfg']}")
 
     datasets_available = False
-    if args.dataset_cache_mode != "off" and args.dataset_input_path:
+    if teacher_trained:
+        print("Teacher policy was trained in this run; regenerating its datasets instead of reading the cache.")
+    elif args.dataset_cache_mode != "off" and args.dataset_input_path:
         datasets_available = load_dataset_cache_from_input(
             input_root=Path(args.dataset_input_path),
             dataset_subdir=args.dataset_subdir,

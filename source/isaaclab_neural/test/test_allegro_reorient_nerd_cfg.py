@@ -92,3 +92,22 @@ def test_summarize_reorient_episodes_counts_goals_and_drops() -> None:
         "drops": 0,
         "drop_rate": None,
     }
+
+
+def test_allegro_training_eval_uses_closed_loop_policy_mode(tmp_path) -> None:
+    from isaaclab_neural.train.trainers import VanillaTrainer
+
+    trainer = object.__new__(VanillaTrainer)
+    with pytest.raises(FileNotFoundError):
+        trainer._init_evaluator(
+            {"eval": {"interval": 5, "mode": "allegro_policy", "policy_checkpoint": str(tmp_path / "missing.pt")}}, {}
+        )
+    policy = tmp_path / "policy.pt"
+    policy.touch()
+    trainer._init_evaluator(
+        {"eval": {"mode": "allegro_policy", "policy_checkpoint": str(policy)}}, {"eval_interval": 5}
+    )
+    assert trainer.eval_interval == 5 and trainer.evaluator is None and trainer.keyboard_policy_eval is None
+    assert trainer.allegro_policy_eval == {"checkpoint": policy, "control_steps": 600, "seed": 43}
+    trainer._init_evaluator({"eval": {"interval": 5, "mode": "allegro_policy"}}, {"eval_interval": 0})
+    assert trainer.allegro_policy_eval is None

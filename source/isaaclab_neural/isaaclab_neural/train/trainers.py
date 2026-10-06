@@ -860,6 +860,21 @@ class VanillaTrainer:
         self.eval_interval = eval_cfg.get("interval", 0) if cli_eval_interval is None else cli_eval_interval
         self.evaluator = None
         self.keyboard_policy_eval = None
+        self.allegro_policy_eval = None
+        if eval_cfg.get("mode") == "allegro_policy" and self.eval_interval > 0:
+            checkpoint = Path(eval_cfg["policy_checkpoint"])
+            if not checkpoint.is_file():
+                raise FileNotFoundError(f"Allegro evaluation policy checkpoint not found: {checkpoint}")
+            control_steps = int(eval_cfg.get("control_steps", 600))
+            if control_steps <= 0:
+                raise ValueError("algorithm.eval.control_steps must be positive.")
+            self.allegro_policy_eval = {
+                "checkpoint": checkpoint,
+                "control_steps": control_steps,
+                "seed": int(eval_cfg.get("seed", 43)),
+            }
+            self._allegro_policy = None
+            return
         if getattr(self, "robot_force_head_enabled", False) and self.eval_interval > 0:
             if eval_cfg.get("mode") != "keyboard_policy":
                 raise ValueError(
@@ -1918,10 +1933,59 @@ class VanillaTrainer:
                 fp.write(f"{epoch}\n")
             print_ok(f"Save Best Eval Model at Epoch {epoch} with closed-loop success rate {success_rate:.4f}.")
 
+    def _eval_allegro_policy(self, epoch: int) -> None:
+        """Run the cube-reorientation policy closed loop in the training environment with the current weights.
+
+        As for Keyboard, the training environment's NeRD solver shares the trained module and each evaluation
+        reseeds a forked RNG from ``seed + epoch``. The most goals per completed episode select
+        ``best_eval_model``.
+        """
+        from isaaclab_neural.eval.allegro_reorient_policy import (
+            load_allegro_reorient_policy,
+            rollout_reorient_policy,
+            summarize_reorient_episodes,
+        )
+
+        settings = cast(dict[str, Any], self.allegro_policy_eval)
+        env = self.neural_env.neural_adapter.isaaclab_env
+        if self._allegro_policy is None:
+            self._allegro_policy = load_allegro_reorient_policy(
+                env, settings["checkpoint"], device=str(env.device), seed=settings["seed"]
+            )
+        wrapped, policy, runner = self._allegro_policy
+        self.neural_model_unwrapped.eval()
+        devices = [torch.device(self.device)] if torch.device(self.device).type == "cuda" else []
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(settings["seed"] + epoch)
+            with torch.inference_mode():
+                rollout = rollout_reorient_policy(env, wrapped, policy, runner, settings["control_steps"])
+        summary = summarize_reorient_episodes(rollout["episodes"])
+        episodes, mean_goals = summary["episodes"], summary["mean_goals_per_episode"]
+        prefix = "eval_closed_loop"
+        self.logger.add_scalar(f"{prefix}/episodes/epoch", episodes, epoch)
+        self.logger.add_scalar(f"{prefix}/finite/epoch", float(rollout["finite"]), epoch)
+        if episodes:
+            self.logger.add_scalar(f"{prefix}/mean_goals_per_episode/epoch", mean_goals, epoch)
+            self.logger.add_scalar(f"{prefix}/drop_rate/epoch", summary["drop_rate"], epoch)
+        print_info(
+            f"[Evaluate] closed-loop reorientation: episodes = {episodes}, goals/episode = {mean_goals}, "
+            f"drop rate = {summary['drop_rate']}, finite = {rollout['finite']}"
+        )
+        eval_error = -mean_goals if rollout["finite"] and episodes else np.inf
+        if eval_error < self.best_eval_error:
+            self.best_eval_error = eval_error
+            self.save_model("best_eval_model")
+            with open(os.path.join(self.model_log_dir, "saved_best_eval_model_epochs.txt"), "a") as fp:
+                fp.write(f"{epoch}\n")
+            print_ok(f"Save Best Eval Model at Epoch {epoch} with {mean_goals:.4f} goals per episode.")
+
     @torch.no_grad()
     def eval(self, epoch: int) -> None:
         if getattr(self, "keyboard_policy_eval", None) is not None:
             self._eval_keyboard_policy(epoch)
+            return
+        if getattr(self, "allegro_policy_eval", None) is not None:
+            self._eval_allegro_policy(epoch)
             return
         if self.evaluator is None:
             return
