@@ -177,8 +177,11 @@ uv run --no-sync python -m isaaclab_neural.eval.allegro_reorient_policy \
 Episodes still running after `--control-steps` are not counted. Select NeRD
 checkpoints by this closed-loop comparison rather than validation loss.
 
-**Validation status:** the teacher stage (with offline W&B checkpoint upload),
-policy/noisy/zero-action collection, NeRD training with closed-loop evaluation and
-both evaluator backends ran end to end on small single-GPU smoke runs. Neither OSMO
-workflow has run, and no teacher policy, dataset or NeRD checkpoint has been qualified
-yet.
+**Validation status:** on OSMO (`isaac-lab-l40-07`, L40), `allegro_reorient_teacher_smoke`
+trained, uploaded its checkpoints to W&B and evaluated the teacher; after staging its
+`model_29.pt`, `allegro_reorient_mixed_smoke` ran the gate, eight-shard collection over two
+GPUs, two-GPU DDP training with closed-loop evaluation and all throughput benchmarks. At its
+256 worlds both NeRD variants ran about 3.3k control steps/s against 18.7k (Newton contacts)
+and 15.6k (MuJoCo contacts) for MJWarp; this small, untrained case is launch-bound and does
+not represent the formal 1024/8192-world comparison. No teacher, dataset or NeRD checkpoint
+has been qualified yet.
