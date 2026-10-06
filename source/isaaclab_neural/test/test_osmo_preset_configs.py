@@ -1777,6 +1777,7 @@ def test_allegro_control_step_preset_follows_so101_control_step_recipe() -> None
     }
     train = sum(spec["num_transitions"] for spec in specs if spec["split"] == "train")
     assert train == experiment["train_transitions"] == dataset["max_capacity"]
+    assert sum(source["max_capacity"] for source in dataset["train_datasets"].values()) == dataset["max_capacity"]
     assert experiment["parallel_collection_gpus"] == len(specs) == preset["resources"]["num_gpu"]
 
 

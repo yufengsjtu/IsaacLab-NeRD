@@ -53,7 +53,7 @@ experiment:
   update_dataset_statistics: true
   eval_interval: 1
   save_interval: 1
-  train_cfg_overrides: algorithm.num_epochs 2 algorithm.num_iters_per_epoch 20 algorithm.num_valid_batches 4 algorithm.dataset.max_capacity 150000 algorithm.dataset.valid_max_capacity 30000 algorithm.eval.control_steps 300 algorithm.eval.policy_checkpoint ./pretrained/control_policy/allegro_reorient/smoke/model_29.pt
+  train_cfg_overrides: algorithm.num_epochs 2 algorithm.num_iters_per_epoch 20 algorithm.num_valid_batches 4 algorithm.dataset.valid_max_capacity 30000 algorithm.eval.control_steps 300 algorithm.eval.policy_checkpoint ./pretrained/control_policy/allegro_reorient/smoke/model_29.pt
   policy_checkpoint: ./pretrained/control_policy/allegro_reorient/smoke/model_29.pt
   require_packaged_policy: true
   policy_evaluation:

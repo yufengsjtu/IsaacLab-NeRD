@@ -62,23 +62,29 @@ algorithm:
     fused: true
 
   dataset:
-    # Five equal shards (one collection GPU each): 60% clean policy, 20% noisy, 20% zero action.
+    # Five equal shards (one collection GPU each): 60% clean policy, 20% noisy, 20% zero action. Unique mixtures
+    # need per-source budgets that sum to at most max_capacity.
     train_datasets:
       policy_a:
         path: ./data/datasets/allegro-reorient-control-step-v1/Allegro-Reorient/dataset_policy_a_train.hdf5
         weight: 0.2
+        max_capacity: 1200000
       policy_b:
         path: ./data/datasets/allegro-reorient-control-step-v1/Allegro-Reorient/dataset_policy_b_train.hdf5
         weight: 0.2
+        max_capacity: 1200000
       policy_c:
         path: ./data/datasets/allegro-reorient-control-step-v1/Allegro-Reorient/dataset_policy_c_train.hdf5
         weight: 0.2
+        max_capacity: 1200000
       policy_noisy:
         path: ./data/datasets/allegro-reorient-control-step-v1/Allegro-Reorient/dataset_policy_noisy_train.hdf5
         weight: 0.2
+        max_capacity: 1200000
       zero_action:
         path: ./data/datasets/allegro-reorient-control-step-v1/Allegro-Reorient/dataset_zero_action_train.hdf5
         weight: 0.2
+        max_capacity: 1200000
     valid_datasets:
       policy: ./data/datasets/allegro-reorient-control-step-v1/Allegro-Reorient/dataset_policy_valid.hdf5
       policy_noisy: ./data/datasets/allegro-reorient-control-step-v1/Allegro-Reorient/dataset_policy_noisy_valid.hdf5
