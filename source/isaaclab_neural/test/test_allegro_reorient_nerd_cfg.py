@@ -111,3 +111,52 @@ def test_allegro_training_eval_uses_closed_loop_policy_mode(tmp_path) -> None:
     assert trainer.allegro_policy_eval == {"checkpoint": policy, "control_steps": 600, "seed": 43}
     trainer._init_evaluator({"eval": {"interval": 5, "mode": "allegro_policy"}}, {"eval_interval": 0})
     assert trainer.allegro_policy_eval is None
+
+
+def _recording(path, contract=None):
+    import json
+
+    import h5py
+
+    with h5py.File(path, "w") as file:
+        group = file.create_group("data")
+        if contract is not None:
+            group.attrs["recording_contract"] = json.dumps(contract)
+    return str(path)
+
+
+def test_recording_contract_binds_mobility_and_step_mode(tmp_path):
+    from types import SimpleNamespace
+
+    import h5py
+    from isaaclab_neural.data.native_contacts import read_contact_mobility
+    from isaaclab_neural.generate.allegro_dataset import RECORDING_CONTRACT_ATTR
+    from isaaclab_neural.train.trainers import VanillaTrainer
+
+    contract = {"step_mode": "control_step", "contact_filter": "solver_active_movable", "contact_fixed_body_slots": [0]}
+    recorded = _recording(tmp_path / "recorded.hdf5", contract)
+    assert RECORDING_CONTRACT_ATTR == "recording_contract"
+    with h5py.File(recorded, "r") as file:
+        assert read_contact_mobility(file["data"], "solver_active_movable") == (0,)
+
+    def trainer(**solver):
+        solver = {"step_mode": "control_step", "joint_target_input": True, "contact_filter": "none", **solver}
+        return SimpleNamespace(neural_solver=SimpleNamespace(contact_adapter=SimpleNamespace(), **solver))
+
+    validate = VanillaTrainer._validate_recording_contracts
+    generic = _recording(tmp_path / "generic.hdf5")
+    cfg = {"train_datasets": {"a": {"path": recorded}}, "valid_datasets": {"v": generic}}
+    validate(trainer(), cfg)
+    with pytest.raises(ValueError, match="predicts 'physics_frame'"):
+        validate(trainer(step_mode="physics_frame"), cfg)
+    with pytest.raises(ValueError, match="joint_target_input"):
+        validate(trainer(joint_target_input=False), cfg)
+    movable = {"contact_filter": "solver_active_movable"}
+    with pytest.raises(ValueError, match="body mobility"):
+        validate(SimpleNamespace(neural_solver=SimpleNamespace(**{**vars(trainer().neural_solver), **movable})), cfg)
+    solver = SimpleNamespace(
+        **{**vars(trainer().neural_solver), **movable, "contact_adapter": SimpleNamespace(fixed_body_slots=(0,))}
+    )
+    validate(SimpleNamespace(neural_solver=solver), cfg)
+    # Recordings without a contract (generic generator, Keyboard) are left to their own validators.
+    validate(trainer(step_mode="physics_frame"), {"train_dataset_path": generic})

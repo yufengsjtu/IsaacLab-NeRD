@@ -134,6 +134,34 @@ model-only sweep. Reports are in `throughput/`; a failed benchmark is recorded i
 exercise the same stages; stage the smoke teacher's `model_29.pt` under
 `pretrained/control_policy/allegro_reorient/smoke/` before submitting the second one.
 
+## Control-step pipeline (SO101 direction B)
+
+`allegro_reorient_control_step` follows the SO101 control-step recipe with the same
+packaged teacher:
+
+- `isaaclab_neural.generate.allegro_dataset` steps the native policy task with its own
+  actions, rewards, terminations and auto-resets and cuts reset-safe 32-record clips, so a
+  dropped cube ends its episode instead of filling a trajectory. With
+  `--record-control-steps` each record spans one 30 Hz control step: boundary state, body
+  poses and native pairs plus the first frame's applied effort and joint targets as inputs,
+  the last frame's state as the label. Modes are `policy` (optionally noisy), `zero` and
+  `random`; chunks are appended to one file per shard with a `recording_contract`
+  (recording identity, step mode, timing, fixed-body slots).
+- `transformer_reorient_control_step.yaml` predicts once per control step
+  (`step_mode: control_step`, `joint_target_input`, `reset_history: episode_start`),
+  filters tokens with `solver_active_movable` in the owner frame, and trains on
+  unique-transition sliding windows from GPU-resident data with FP16 autocast.
+  Training rejects recordings whose step mode or body mobility differs from the solver.
+- Eight shards (3 x 1.2M clean policy, 1.2M noisy, 1.2M zero action; three 333k
+  validation shards) are collected concurrently; the same gate, closed-loop evaluation
+  and throughput stage as `allegro_reorient_mixed` follow.
+
+```bash
+./osmo_scripts/start.sh --preset allegro_reorient_control_step --pool <osmo-pool>
+```
+
+`allegro_reorient_control_step_smoke` runs the same stages on two GPUs with the smoke teacher.
+
 ## Throughput comparison
 
 `eval/allegro_benchmark.py` mirrors `keyboard_benchmark`. Run each configuration on an

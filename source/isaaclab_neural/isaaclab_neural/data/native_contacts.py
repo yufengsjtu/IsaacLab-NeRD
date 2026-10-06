@@ -279,7 +279,8 @@ def read_contact_mobility(data_group: h5py.Group, contact_filter: str) -> tuple[
     """Read the verified recording contract required for movable-only token filtering."""
     if contact_filter != "solver_active_movable":
         return None
-    metadata = json.loads(data_group.attrs.get("keyboard_contract", "{}"))
+    attrs = data_group.attrs
+    metadata = json.loads(attrs.get("keyboard_contract", attrs.get("recording_contract", "{}")))
     values = metadata.get("contact_fixed_body_slots")
     if not isinstance(values, list) or any(type(value) is not int or value < 0 for value in values):
         raise ValueError("Movable filtering requires recorded fixed body slots (mobility metadata).")

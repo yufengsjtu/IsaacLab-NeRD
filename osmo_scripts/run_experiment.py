@@ -563,6 +563,48 @@ def contact_args(experiment: dict) -> list[str]:
     return args
 
 
+def build_allegro_collector_args(
+    experiment: dict, spec: DatasetSpec, dataset_dir: Path, task: str, transitions: int, policy_checkpoint: str
+) -> list[str]:
+    """Arguments for the env-driven Allegro collector, which records reset-safe clips with a recording contract.
+
+    Policy specs drive the teacher (optionally noisy), ``zero_actions`` specs hold zero actions and other specs hold
+    uniform random actions.
+    """
+    mode = "policy" if spec.use_policy else "zero" if spec.zero_actions else "random"
+    args = [
+        "-m",
+        "isaaclab_neural.generate.allegro_dataset",
+        "--task",
+        task,
+        "--dataset",
+        str(dataset_dir / str(experiment["env_name"]) / spec.filename),
+        "--collection-mode",
+        mode,
+        "--num-envs",
+        str(experiment["data_gen_num_envs"]),
+        "--num-transitions",
+        str(transitions),
+        "--horizon",
+        str(experiment["trajectory_length"]),
+        "--chunk-control-steps",
+        str(experiment.get("collection_chunk_control_steps", 64)),
+        "--seed",
+        str(spec.seed),
+        "--max-contact-tokens",
+        str(experiment.get("max_contact_tokens", 128)),
+        "--contact-filter",
+        str(experiment.get("contact_filter", "none")),
+    ]
+    if experiment.get("record_control_steps"):
+        args.append("--record-control-steps")
+    if spec.use_policy:
+        args += ["--checkpoint", policy_checkpoint]
+        if spec.policy_action_noise_std > 0.0:
+            args += ["--policy-action-noise-std", str(spec.policy_action_noise_std)]
+    return args
+
+
 def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -> list[str] | None:
     if experiment.get("training_only"):
         raise ValueError("Keyboard training-only presets cannot use the generic dataset generator.")
@@ -581,6 +623,8 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
 
     transitions = resolve_spec_transitions(experiment, spec)
     task = experiment.get("deployment_task") if spec.task_kind == "deployment" else experiment.get("data_gen_task")
+    if experiment.get("dataset_collector") == "allegro_reorient":
+        return build_allegro_collector_args(experiment, spec, dataset_dir, str(task), transitions, policy_checkpoint)
 
     args = [
         "-m",

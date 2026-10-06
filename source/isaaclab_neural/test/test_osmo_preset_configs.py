@@ -1738,3 +1738,67 @@ def test_allegro_smoke_presets_mirror_formal_pipeline() -> None:
     assert smoke_preset["workflow"]["dataset_subdir"] != "allegro-reorient-newton-contacts-v1"
     assert smoke["parallel_collection_gpus"] == smoke["num_gpus"] == smoke_preset["resources"]["num_gpu"]
     assert formal["parallel_collection_gpus"] == len(formal["dataset_specs"]) == 8
+
+
+def test_allegro_control_step_preset_follows_so101_control_step_recipe() -> None:
+    preset = _load_yaml(PRESET_DIR / "allegro_reorient_control_step.yaml")
+    experiment = preset["experiment"]
+    config = _load_yaml(REPOSITORY_ROOT / experiment["train_cfg"])
+    so101 = _load_yaml(
+        REPOSITORY_ROOT
+        / "source/isaaclab_neural/isaaclab_neural/train/cfg/SO101/transformer_keyboard_control_step.yaml"
+    )
+    solver, so101_solver = config["env"]["neural_solver_cfg"], so101["env"]["neural_solver_cfg"]
+    for key in (
+        "step_mode",
+        "joint_target_input",
+        "reset_history",
+        "use_frame_cache",
+        "inference_precision",
+        "inference_compile",
+        "contact_filter",
+        "contact_token_frame",
+        "num_states_history",
+    ):
+        assert solver[key] == so101_solver[key], key
+    dataset, so101_dataset = config["algorithm"]["dataset"], so101["algorithm"]["dataset"]
+    for key in ("capacity_unit", "capacity_scope", "window_sampling", "load_mode"):
+        assert dataset[key] == so101_dataset[key], key
+    assert config["algorithm"]["precision"] == so101["algorithm"]["precision"]
+    assert config["inputs"]["low_dim"] == so101["inputs"]["low_dim"]
+    assert experiment["record_control_steps"] is True and experiment["contact_filter"] == solver["contact_filter"]
+    specs = experiment["dataset_specs"]
+    root = Path(experiment["dataset_dir"]) / experiment["env_name"]
+    assert {Path(source["path"]) for source in dataset["train_datasets"].values()} == {
+        root / spec["filename"] for spec in specs if spec["split"] == "train"
+    }
+    assert {Path(path) for path in dataset["valid_datasets"].values()} == {
+        root / spec["filename"] for spec in specs if spec["split"] == "valid"
+    }
+    train = sum(spec["num_transitions"] for spec in specs if spec["split"] == "train")
+    assert train == experiment["train_transitions"] == dataset["max_capacity"]
+    assert experiment["parallel_collection_gpus"] == len(specs) == preset["resources"]["num_gpu"]
+
+
+def test_allegro_collector_args_map_specs_to_collection_modes(tmp_path, monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import run_experiment
+
+    experiment = dict(_load_yaml(PRESET_DIR / "allegro_reorient_control_step.yaml")["experiment"])
+    teacher = tmp_path / "model.pt"
+    teacher.write_bytes(b"")
+    experiment["policy_checkpoint"] = str(teacher)
+    specs = run_experiment.parse_dataset_specs(experiment)
+    commands = {spec.filename: run_experiment.build_dataset_args(experiment, spec, tmp_path) for spec in specs}
+    for spec in specs:
+        command = commands[spec.filename]
+        assert command[:2] == ["-m", "isaaclab_neural.generate.allegro_dataset"]
+        assert "--record-control-steps" in command
+        assert command[command.index("--dataset") + 1] == str(tmp_path / "Allegro-Reorient" / spec.filename)
+        assert command[command.index("--contact-filter") + 1] == "solver_active_movable"
+        assert command[command.index("--horizon") + 1] == str(experiment["trajectory_length"])
+        mode = command[command.index("--collection-mode") + 1]
+        assert mode == ("policy" if spec.use_policy else "zero" if spec.zero_actions else "random")
+        assert ("--checkpoint" in command) == spec.use_policy
+        noisy = "--policy-action-noise-std" in command
+        assert noisy == (spec.policy_action_noise_std > 0.0)

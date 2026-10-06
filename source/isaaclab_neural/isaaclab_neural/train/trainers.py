@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import json
 import os
 import shutil
 import time
@@ -16,6 +17,7 @@ import traceback
 from pathlib import Path
 from typing import Any, cast
 
+import h5py
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -522,6 +524,7 @@ class VanillaTrainer:
             dataset_cfg.get("train_datasets"),
         )
         self._validate_force_label_datasets()
+        self._validate_recording_contracts(dataset_cfg)
         print(
             f"[Stage timing] rank={self.rank} stage=dataset_initialization event=end "
             f"seconds={time.perf_counter() - dataset_started:.3f}",
@@ -1054,6 +1057,31 @@ class VanillaTrainer:
         if key_head is not None:
             validate_keyboard_key_head_layout(key_head, reference)
         self.cfg["keyboard_dataset_contracts"] = {"train": reference, "train_sources": train, "valid_sources": valid}
+
+    def _validate_recording_contracts(self, dataset_cfg: dict[str, Any]) -> None:
+        """Match env-driven ``recording_contract`` datasets (e.g. Allegro) to the solver's step mode and mobility.
+
+        Datasets without that attribute, including Keyboard and generic generator recordings, are not checked here.
+        """
+        paths = [dataset_cfg.get("train_dataset_path")]
+        paths += [source["path"] for source in (dataset_cfg.get("train_datasets") or {}).values()]
+        paths += list((dataset_cfg.get("valid_datasets") or {}).values())
+        solver = self.neural_solver
+        for path in filter(None, paths):
+            with h5py.File(path, "r") as file:
+                encoded = file["data"].attrs.get("recording_contract")
+            if encoded is None:
+                continue
+            contract = json.loads(encoded)
+            step_mode = getattr(solver, "step_mode", "physics_frame")
+            if contract.get("step_mode", "physics_frame") != step_mode:
+                raise ValueError(f"{path} records {contract.get('step_mode')!r} but the solver predicts {step_mode!r}.")
+            if step_mode == "control_step" and not getattr(solver, "joint_target_input", False):
+                raise ValueError("Control-step recordings require joint_target_input like their runtime.")
+            if getattr(solver, "contact_filter", "none") == "solver_active_movable":
+                fixed = getattr(solver.contact_adapter, "fixed_body_slots", None)
+                if fixed is None or list(fixed) != contract.get("contact_fixed_body_slots"):
+                    raise ValueError(f"{path} body mobility differs from the training runtime contact filter.")
 
     def _validate_force_label_datasets(self) -> None:
         """Require force labels in every dataset when the auxiliary head is enabled."""

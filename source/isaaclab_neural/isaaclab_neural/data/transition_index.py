@@ -70,7 +70,9 @@ def _dataset(file: h5py.File, name: str) -> h5py.Dataset:
 
 
 def _metadata(file: h5py.File) -> dict:
-    value = json.loads(file["data"].attrs.get("keyboard_contract", "{}"))
+    # Keyboard recordings use ``keyboard_contract``; other env-driven recordings use ``recording_contract``.
+    attrs = file["data"].attrs
+    value = json.loads(attrs.get("keyboard_contract", attrs.get("recording_contract", "{}")))
     if not isinstance(value, dict):
         raise ValueError("Recording metadata must be a mapping.")
     return value

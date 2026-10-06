@@ -18,3 +18,9 @@ Added
 * Added Allegro concurrent shard collection, a post-training throughput benchmark stage
   with a MuJoCo-contact MJWarp baseline, and teacher/pipeline smoke presets. The recipe
   now filters native pairs to penetrating contacts and uses fused Adam.
+* Added :mod:`isaaclab_neural.generate.allegro_dataset`, an env-driven Allegro collector of
+  reset-safe physics-frame or control-step clips with a ``recording_contract``, and the
+  SO101-style control-step recipe and presets. Unique-transition indexing and movable
+  contact filtering read ``recording_contract`` when ``keyboard_contract`` is absent, and
+  training rejects such recordings when their step mode or body mobility differs from the
+  solver.
