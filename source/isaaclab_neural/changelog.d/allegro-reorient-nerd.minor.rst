@@ -11,3 +11,7 @@ Added
   per episode.
 * Added :mod:`isaaclab_neural.train.train_control_policy` to train RSL-RL teachers on
   tasks registered by :mod:`isaaclab_neural.envs`, including distributed runs.
+* Added :mod:`isaaclab_neural.eval.allegro_benchmark` for model-only and end-to-end
+  MJWarp/NeRD throughput comparisons, and made the
+  :mod:`isaaclab_neural.eval.keyboard_benchmark` model and environment timers reusable
+  for other model widths and decimations.

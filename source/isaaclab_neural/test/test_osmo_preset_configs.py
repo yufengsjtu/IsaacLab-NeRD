@@ -1524,7 +1524,8 @@ def test_allegro_presets_split_default_teacher_from_packaged_nerd_pipeline() -> 
     assert teacher_preset["resources"]["num_gpu"] == teacher["num_gpus"] == 1
     # The core RSL-RL configuration and task world count are used unchanged.
     assert not {"num_envs", "max_iterations"} & set(teacher)
-    assert (teacher["wandb_entity"], teacher["wandb_project"]) == ("rl", "allegro")
+    assert "wandb_entity" not in teacher
+    assert (teacher["wandb_project"], teacher["wandb_run_id_prefix"]) == ("rl", "allegro")
 
     experiment = preset["experiment"]
     assert "teacher_policy" not in experiment
@@ -1549,6 +1550,14 @@ def test_allegro_presets_split_default_teacher_from_packaged_nerd_pipeline() -> 
     eval_cfg = train_config["algorithm"]["eval"]
     assert eval_cfg["mode"] == "allegro_policy"
     assert eval_cfg["policy_checkpoint"] == experiment["policy_checkpoint"]
+    keyboard = _load_yaml(
+        REPOSITORY_ROOT / _load_yaml(PRESET_DIR / "so101_keyboard_resident_unique.yaml")["experiment"]["train_cfg"]
+    )
+    keyboard_solver = keyboard["env"]["neural_solver_cfg"]
+    for key in ("use_frame_cache", "inference_precision", "inference_compile", "num_states_history"):
+        assert solver_cfg[key] == keyboard_solver[key], key
+    for key in ("position_encoding", "attention_spans"):
+        assert train_config["network"]["transformer"][key] == keyboard["network"]["transformer"][key], key
     for item in (teacher_preset, preset):
         assert item["workflow"]["image"] == "docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095"
 
@@ -1573,6 +1582,9 @@ def _fake_policy_subprocesses(monkeypatch, tmp_path, mean_goals: float) -> list[
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("WANDB_ENTITY", "")
+    monkeypatch.delenv("WANDB_USERNAME", raising=False)
+    monkeypatch.delenv("WANDB_RUN_ID", raising=False)
     return calls
 
 
@@ -1582,8 +1594,8 @@ def _teacher_preset() -> dict:
         "teacher_policy": {
             "task": "Isaac-Reorient-Cube-Allegro-Policy-v0",
             "experiment_name": "teacher",
-            "wandb_entity": "rl",
-            "wandb_project": "allegro",
+            "wandb_project": "rl",
+            "wandb_run_id_prefix": "allegro",
             "evaluation": {"module": "eval_module"},
         },
     }
@@ -1606,9 +1618,9 @@ def test_teacher_preset_trains_default_config_uploads_to_wandb_and_stops(tmp_pat
     assert command[:3] == [sys.executable, "-m", "isaaclab_neural.train.train_control_policy"]
     assert "--num_envs" not in command and "--max_iterations" not in command and "--distributed" not in command
     assert command[command.index("--logger") + 1] == "wandb"
-    assert command[command.index("--log_project_name") + 1] == "allegro"
-    assert env["WANDB_USERNAME"] == env["WANDB_ENTITY"] == "rl"
-    assert env["WANDB_RUN_ID"]
+    assert command[command.index("--log_project_name") + 1] == "rl"
+    assert "WANDB_USERNAME" not in env and "WANDB_ENTITY" not in env
+    assert env["WANDB_RUN_ID"].startswith("allegro-")
     checkpoint = Path(calls[1][0][calls[1][0].index("--checkpoint") + 1])
     assert checkpoint.name == "model_4999.pt"
     assert checkpoint.is_relative_to(tmp_path / "output" / "teacher_policy")

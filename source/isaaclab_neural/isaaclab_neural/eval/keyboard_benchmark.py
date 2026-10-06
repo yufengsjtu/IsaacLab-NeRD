@@ -28,9 +28,33 @@ import torch
 PHYSICS_FRAMES_PER_CONTROL_STEP = 4
 """SO101 Keyboard decimation: 100 Hz physics frames per 25 Hz control step."""
 
+KEYBOARD_INPUT_DIMS = {"states_embedding": 228, "joint_f": 114}
+"""SO101 Keyboard low-dimensional model input widths."""
 
-def synthetic_model_inputs(cfg: dict[str, Any], batch: int, valid_tokens: int, device: str) -> dict[str, torch.Tensor]:
-    """Build normalized-scale model inputs with ``valid_tokens`` owner-frame contact rows per world."""
+KEYBOARD_NUM_BODIES = 116
+"""SO101 Keyboard primary contact bodies (robot and keys)."""
+
+
+def synthetic_model_inputs(
+    cfg: dict[str, Any],
+    batch: int,
+    valid_tokens: int,
+    device: str,
+    *,
+    input_dims: dict[str, int] | None = None,
+    num_bodies: int = KEYBOARD_NUM_BODIES,
+) -> dict[str, torch.Tensor]:
+    """Build normalized-scale model inputs with ``valid_tokens`` contact rows per world.
+
+    Args:
+        cfg: Checkpoint training configuration.
+        batch: Number of worlds.
+        valid_tokens: Valid contact rows per world and frame.
+        device: Torch device.
+        input_dims: Widths of ``states_embedding`` and ``joint_f``; defaults to SO101 Keyboard.
+        num_bodies: Primary contact body slots sampled for the token owners.
+    """
+    input_dims = input_dims or KEYBOARD_INPUT_DIMS
     from isaaclab_neural.contacts.contact_set_schema import (
         CONTACT_TOKEN_BODY_SLOT_INDEX,
         CONTACT_TOKEN_OTHER_BODY_SLOT_INDEX,
@@ -46,35 +70,52 @@ def synthetic_model_inputs(cfg: dict[str, Any], batch: int, valid_tokens: int, d
     tokens = torch.randn((*shape, capacity, 17), generator=generator, device=device)
     tokens[..., CONTACT_TOKEN_VALID_INDEX] = (torch.arange(capacity, device=device) < valid_tokens).float()
     tokens[..., CONTACT_TOKEN_BODY_SLOT_INDEX] = torch.randint(
-        0, 116, (*shape, capacity), generator=generator, device=device
+        0, num_bodies, (*shape, capacity), generator=generator, device=device
     ).float()
     tokens[..., CONTACT_TOKEN_OTHER_BODY_SLOT_INDEX] = -1.0
     return {
-        "states_embedding": torch.randn((*shape, 228), generator=generator, device=device),
-        "joint_f": torch.randn((*shape, 114), generator=generator, device=device),
+        "states_embedding": torch.randn((*shape, input_dims["states_embedding"]), generator=generator, device=device),
+        "joint_f": torch.randn((*shape, input_dims["joint_f"]), generator=generator, device=device),
         "gravity_dir": torch.randn((*shape, 3), generator=generator, device=device),
         "contact_tokens": tokens,
     }
 
 
-def benchmark_model(args: argparse.Namespace) -> dict[str, Any]:
-    """Time full-window NeRD model calls exactly as the solver issues them (``return_aux``, eval mode)."""
+def benchmark_model(
+    args: argparse.Namespace,
+    *,
+    input_dims: dict[str, int] | None = None,
+    prediction_dim: int = 228,
+    num_bodies: int = KEYBOARD_NUM_BODIES,
+    frames_per_control_step: int = PHYSICS_FRAMES_PER_CONTROL_STEP,
+) -> dict[str, Any]:
+    """Time full-window NeRD model calls exactly as the solver issues them (``return_aux``, eval mode).
+
+    The keyword arguments default to SO101 Keyboard and describe the model's input widths, prediction width,
+    primary contact bodies and physics frames per control step.
+    """
     from isaaclab_neural.utils.checkpoint import load_checkpoint, reconstruct_model_from_checkpoint
 
     checkpoint = load_checkpoint(args.nerd_checkpoint, device="cpu")
     cfg = checkpoint["cfg"]
-    sample = synthetic_model_inputs(cfg, 1, args.valid_tokens, args.device)
+
+    def inputs_for(batch: int) -> dict[str, torch.Tensor]:
+        return synthetic_model_inputs(
+            cfg, batch, args.valid_tokens, args.device, input_dims=input_dims, num_bodies=num_bodies
+        )
+
+    sample = inputs_for(1)
     solver = SimpleNamespace(
         get_neural_model_inputs=lambda: sample,
-        prediction_dim=228,
+        prediction_dim=prediction_dim,
         contact_mode="newton_native",
-        num_contact_bodies_per_env=116,
+        num_contact_bodies_per_env=num_bodies,
     )
     model = reconstruct_model_from_checkpoint(checkpoint, solver, device=args.device)
     dtype = {"fp32": None, "fp16": torch.float16, "bf16": torch.bfloat16}[args.autocast]
     rows = []
     for batch in args.batch_sizes:
-        inputs = synthetic_model_inputs(cfg, batch, args.valid_tokens, args.device)
+        inputs = inputs_for(batch)
         try:
             with (
                 torch.inference_mode(),
@@ -102,7 +143,7 @@ def benchmark_model(args: argparse.Namespace) -> dict[str, Any]:
                 "model_call_ms": ms,
                 "model_calls_per_s": 1000.0 / ms,
                 "physics_frames_per_s": batch * 1000.0 / ms,
-                "control_steps_per_s_model_only": batch * 1000.0 / (ms * PHYSICS_FRAMES_PER_CONTROL_STEP),
+                "control_steps_per_s_model_only": batch * 1000.0 / (ms * frames_per_control_step),
                 "peak_torch_allocated_gib": torch.cuda.max_memory_allocated() / 2**30,
             }
         )
@@ -190,7 +231,7 @@ def benchmark_env(args: argparse.Namespace, launcher_args: argparse.Namespace) -
                 env = NerdSO101KeyboardEnv(cfg=cfg)
             try:
                 wrapped, policy, runner = load_keyboard_policy(env, args.checkpoint, device=args.device, seed=args.seed)
-                result.update(_time_env(env, wrapped, policy, runner, args))
+                result.update(time_policy_env(env, wrapped, policy, runner, args))
                 from isaaclab_newton.physics.newton_manager import NewtonManager
 
                 result["cuda_graph_active"] = NewtonManager._graph is not None
@@ -201,9 +242,18 @@ def benchmark_env(args: argparse.Namespace, launcher_args: argparse.Namespace) -
     return result
 
 
-def _time_env(env: Any, wrapped: Any, policy: Any, runner: Any, args: argparse.Namespace) -> dict[str, Any]:
+def time_policy_env(env: Any, wrapped: Any, policy: Any, runner: Any, args: argparse.Namespace) -> dict[str, Any]:
+    """Time policy-driven control steps of ``env`` after ``args.warmup`` steps.
+
+    Reads ``args.steps``, ``args.breakdown_steps``, ``args.profile_steps``, ``args.num_envs`` and
+    ``args.nerd_checkpoint``. Physics frames per control step come from the environment's decimation.
+
+    Returns:
+        Throughput, the physics/non-physics split of a control step and the optional NeRD step profile.
+    """
     from isaaclab_neural.eval.eval import reset_policy
 
+    frames_per_control_step = int(env.cfg.decimation)
     with torch.inference_mode():
         env.reset()
         obs = wrapped.get_observations()
@@ -270,8 +320,8 @@ def _time_env(env: Any, wrapped: Any, policy: Any, runner: Any, args: argparse.N
         "policy_ms": 1000 * policy_s / args.steps,
         "env_control_steps_per_s": control_steps / step_s,
         "env_control_steps_per_s_with_policy": control_steps / (step_s + policy_s),
-        "physics_frames_per_s": control_steps * PHYSICS_FRAMES_PER_CONTROL_STEP / step_s,
-        "realtime_factor": control_steps * PHYSICS_FRAMES_PER_CONTROL_STEP * env.physics_dt / step_s,
+        "physics_frames_per_s": control_steps * frames_per_control_step / step_s,
+        "realtime_factor": control_steps * frames_per_control_step * env.physics_dt / step_s,
         "resets_during_timing": resets,
         "breakdown_env_step_ms": 1000 * total_s / args.breakdown_steps,
         "breakdown_physics_ms_per_control_step": 1000 * physics_s[0] / args.breakdown_steps,

@@ -722,12 +722,18 @@ def run_teacher_training(experiment: dict, output_root: Path, wandb_args: argpar
     env = os.environ.copy()
     if wandb_project:
         args += ["--logger", "wandb", "--log_project_name", str(wandb_project)]
-        # RSL-RL's W&B writer reads WANDB_USERNAME; Isaac Lab's printed run reference prefers WANDB_ENTITY.
+        # Without an explicit entity the API key's default entity is used. RSL-RL's W&B writer reads
+        # WANDB_USERNAME; Isaac Lab's printed run reference prefers WANDB_ENTITY.
         entity = teacher.get("wandb_entity") or wandb_args.wandb_entity
         if entity:
             env["WANDB_USERNAME"] = env["WANDB_ENTITY"] = str(entity)
+        for key in ("WANDB_ENTITY", "WANDB_USERNAME"):
+            # The workflow template exports empty values; drop them so W&B falls back to the default entity.
+            if not env.get(key):
+                env.pop(key, None)
         # Isaac Lab otherwise draws the id from wandb.util.generate_id(), which wandb 0.30 (init.sh) removed.
-        env.setdefault("WANDB_RUN_ID", uuid.uuid4().hex[:8])
+        prefix = str(teacher.get("wandb_run_id_prefix", "") or "")
+        env.setdefault("WANDB_RUN_ID", f"{prefix}-{uuid.uuid4().hex[:8]}" if prefix else uuid.uuid4().hex[:8])
         print(f"Teacher W&B run: wandb:{entity or '<default-entity>'}/{wandb_project}/{env['WANDB_RUN_ID']}")
     num_gpus = int(teacher.get("num_gpus", 1))
     if num_gpus > 1:

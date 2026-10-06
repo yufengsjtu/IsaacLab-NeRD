@@ -79,8 +79,9 @@ uv run --no-sync python -m isaaclab_neural.train.train \
 ```
 
 The recipe uses the Franka Lift model, losses and weighted mixed-source loading
-with the SO101 streaming trunk (`relative_lag` attention spans and the frame
-cache). As for SO101 Keyboard, `algorithm.eval.mode: allegro_policy` replaces
+with the SO101 throughput settings: the streaming trunk (`relative_lag` attention
+spans), the frame cache, FP16 online inference, `inference_compile` and pinned,
+non-blocking batch transfers. Training stays FP32. As for SO101 Keyboard, `algorithm.eval.mode: allegro_policy` replaces
 dataset rollouts: every fifth epoch rank 0 runs the teacher closed loop in the
 training environment with the current weights, logs
 `eval_closed_loop/mean_goals_per_episode` and `drop_rate`, and saves
@@ -97,9 +98,10 @@ Two presets separate the teacher from NeRD, as for SO101 Keyboard.
 **1. Teacher** (`allegro_reorient_teacher`, one GPU): the core Isaac Lab RSL-RL
 configuration (8192 worlds, 24 steps per iteration, 5000 iterations) on the
 Newton-contact policy task. RSL-RL uploads every saved checkpoint to the W&B project
-`allegro` of entity `rl`, so submit with `--enable-wandb`. The log prints the run as
-`wandb:rl/allegro/<run_id>`. The workflow output also keeps the run directory and the
-MJWarp baseline `teacher_policy/baseline.json`.
+`rl` of the API key's default entity, so submit with `--enable-wandb`. The run id is
+`allegro-<8 hex digits>`, printed as `Teacher W&B run: wandb:<entity>/rl/allegro-...`;
+set `teacher_policy.wandb_entity` or `--wandb-entity` to use another entity. The workflow
+output also keeps the run directory and the MJWarp baseline `teacher_policy/baseline.json`.
 
 ```bash
 ./osmo_scripts/start.sh --preset allegro_reorient_teacher --enable-wandb --pool <osmo-pool>
@@ -121,6 +123,32 @@ dataset cache) and trains NeRD with closed-loop evaluation against the same teac
 
 Data collection runs the six dataset splits sequentially on one GPU through the generic
 generator; the other ranks are idle until NeRD training starts.
+
+## Throughput comparison
+
+`eval/allegro_benchmark.py` mirrors `keyboard_benchmark`. Run each configuration on an
+otherwise idle GPU and compare the JSON reports:
+
+```bash
+B="uv run --no-sync python -m isaaclab_neural.eval.allegro_benchmark"
+# Model only: one full-window call on synthetic inputs over a batch sweep.
+$B model --nerd-checkpoint "$CHECKPOINT" --autocast fp16 --report logs/allegro_bench/model_fp16.json
+# End to end with the teacher: native MJWarp (CUDA graph), then NeRD.
+$B env --checkpoint "$POLICY" --num-envs 8192 --report logs/allegro_bench/mjwarp_8192.json
+$B env --checkpoint "$POLICY" --nerd-checkpoint "$CHECKPOINT" --num-envs 8192 \
+  --report logs/allegro_bench/nerd_8192.json
+```
+
+`env_control_steps_per_s` and `physics_frames_per_s` are the headline numbers;
+`breakdown_physics_fraction` and `nerd_profile_ms_per_control_step` locate the cost.
+`--inference-precision fp32 --no-inference-compile --no-frame-cache` reproduces the
+unoptimized NeRD path, and `allegro_reorient_policy` accepts the same overrides for the
+matching closed-loop parity check.
+
+A 1024-world smoke run with an untrained model on a GPU shared with other jobs (not a
+valid measurement) showed the NeRD step dominated by native contact handling
+(`adapter_update`, `adapter_encode_tokens`, `contact_prepare`), with the model forward
+pass under a third of the solver time.
 
 ## Closed-loop evaluation
 

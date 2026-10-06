@@ -16,6 +16,10 @@ env:
     orientation_prediction_parameterization: quaternion
     num_states_history: 10
     use_frame_cache: true
+    # Online inference only, as in the SO101 throughput recipe; training stays FP32. Confirm closed-loop parity
+    # against --inference-precision fp32 --no-inference-compile before reporting FPS.
+    inference_precision: fp16
+    inference_compile: true
     min_contact_event_threshold: 0.12
     contact_mode: newton_native
     contact_representation: contact_tokens
@@ -61,6 +65,8 @@ algorithm:
       zero_action_trajectory: ./data/datasets/allegro-reorient-newton-contacts-v1/Allegro-Reorient/dataset_zero_action_valid.hdf5
     max_capacity: 10000000
     load_mode: eager
+    pin_memory: true
+    non_blocking: true
     num_data_workers: 0
 
   eval:

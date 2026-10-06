@@ -125,17 +125,8 @@ def rollout_reorient_policy(env: Any, wrapped: Any, policy: Any, runner: Any, co
     return {"episodes": episodes, "finite": finite, "completed_control_steps": completed, "reward_sum": reward_sum}
 
 
-def main() -> None:
-    import gymnasium as gym
-    import isaaclab_neural.envs  # noqa: F401 - registers the Allegro NeRD tasks
-
-    from isaaclab.app import add_launcher_args, launch_simulation
-
-    from isaaclab_tasks.utils.hydra import resolve_presets
-    from isaaclab_tasks.utils.parse_cfg import resolve_task_config
-
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, required=True, help="RSL-RL policy checkpoint.")
+def add_nerd_override_args(parser: argparse.ArgumentParser) -> None:
+    """Add the NeRD checkpoint and online-inference override options."""
     parser.add_argument("--nerd-checkpoint", type=Path, help="Simulate with this NeRD checkpoint instead of MJWarp.")
     parser.add_argument(
         "--frame-cache",
@@ -148,6 +139,87 @@ def main() -> None:
         choices=("fp32", "tf32", "fp16", "bf16"),
         help="Override the checkpoint's NeRD online inference precision.",
     )
+    parser.add_argument(
+        "--inference-compile",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override the NeRD inference_compile option (torch.compile of fixed-shape steady-state inference steps).",
+    )
+
+
+def build_allegro_reorient_env_cfg(args: argparse.Namespace):
+    """Resolve the policy task for ``args.num_envs`` worlds, swapping in NeRD when ``args.nerd_checkpoint`` is set.
+
+    Returns:
+        The environment config, the config to launch the simulation with and the NeRD provenance (``None`` for
+        native MJWarp).
+    """
+    import copy
+
+    from isaaclab_tasks.utils.hydra import resolve_presets
+    from isaaclab_tasks.utils.parse_cfg import resolve_task_config
+
+    cfg, _ = resolve_task_config(ALLEGRO_REORIENT_POLICY_TASK, "rsl_rl_cfg_entry_point", overrides=[])
+    cfg = resolve_presets(cfg, {"newton_mjwarp"})
+    cfg.scene.num_envs = args.num_envs
+    cfg.sim.device = args.device or "cuda:0"
+    cfg.seed = args.seed
+    if args.nerd_checkpoint is None:
+        return cfg, cfg, None
+    from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
+    from isaaclab_neural.utils.checkpoint import load_checkpoint
+
+    nerd = load_checkpoint(args.nerd_checkpoint, device="cpu")
+    launch_cfg = copy.deepcopy(cfg)
+    launch_cfg.sim.physics.use_cuda_graph = False
+    solver_cfg = NerdSolverCfg(**nerd["cfg"]["env"]["neural_solver_cfg"])
+    for name, value in (
+        ("use_frame_cache", args.frame_cache),
+        ("inference_precision", args.inference_precision),
+        ("inference_compile", args.inference_compile),
+    ):
+        if value is not None:
+            setattr(solver_cfg, name, value)
+    solver_cfg.neural_model_path = str(args.nerd_checkpoint.resolve())
+    teacher = cfg.sim.physics
+    cfg.sim.physics = NerdNewtonCfg(
+        solver_cfg=solver_cfg,
+        collision_cfg=teacher.collision_cfg,
+        default_shape_cfg=teacher.default_shape_cfg,
+        num_substeps=1,
+        use_cuda_graph=False,
+    )
+    with args.nerd_checkpoint.open("rb") as stream:
+        provenance = {
+            "checkpoint": str(args.nerd_checkpoint.resolve()),
+            "sha256": hashlib.file_digest(stream, "sha256").hexdigest(),
+            "epoch": nerd.get("epoch"),
+            "use_frame_cache": solver_cfg.use_frame_cache,
+            "inference_precision": solver_cfg.inference_precision,
+            "inference_compile": solver_cfg.inference_compile,
+        }
+    return cfg, launch_cfg, provenance
+
+
+def make_allegro_reorient_env(cfg, nerd: bool):
+    """Create the native MJWarp policy environment or its NeRD counterpart from a resolved config."""
+    if not nerd:
+        import gymnasium as gym
+
+        return gym.make(ALLEGRO_REORIENT_POLICY_TASK, cfg=cfg).unwrapped
+    from isaaclab_neural.envs.allegro_reorient_nerd_env import NerdAllegroReorientEnv
+
+    return NerdAllegroReorientEnv(cfg=cfg)
+
+
+def main() -> None:
+    import isaaclab_neural.envs  # noqa: F401 - registers the Allegro NeRD tasks
+
+    from isaaclab.app import add_launcher_args, launch_simulation
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", type=Path, required=True, help="RSL-RL policy checkpoint.")
+    add_nerd_override_args(parser)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--control-steps", type=int, default=1500)
@@ -159,50 +231,10 @@ def main() -> None:
     if args.report.exists():
         raise FileExistsError(args.report)
     sys.argv = [sys.argv[0]]
-    cfg, _ = resolve_task_config(ALLEGRO_REORIENT_POLICY_TASK, "rsl_rl_cfg_entry_point", overrides=[])
-    cfg = resolve_presets(cfg, {"newton_mjwarp"})
-    cfg.scene.num_envs = args.num_envs
-    cfg.sim.device = args.device or "cuda:0"
-    cfg.seed = args.seed
-    launch_cfg = cfg
-    nerd_provenance = None
-    if args.nerd_checkpoint is not None:
-        import copy
-
-        from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
-        from isaaclab_neural.utils.checkpoint import load_checkpoint
-
-        nerd = load_checkpoint(args.nerd_checkpoint, device="cpu")
-        launch_cfg = copy.deepcopy(cfg)
-        launch_cfg.sim.physics.use_cuda_graph = False
-        solver_cfg = NerdSolverCfg(**nerd["cfg"]["env"]["neural_solver_cfg"])
-        if args.frame_cache is not None:
-            solver_cfg.use_frame_cache = args.frame_cache
-        if args.inference_precision is not None:
-            solver_cfg.inference_precision = args.inference_precision
-        solver_cfg.neural_model_path = str(args.nerd_checkpoint.resolve())
-        teacher = cfg.sim.physics
-        cfg.sim.physics = NerdNewtonCfg(
-            solver_cfg=solver_cfg,
-            collision_cfg=teacher.collision_cfg,
-            default_shape_cfg=teacher.default_shape_cfg,
-            num_substeps=1,
-            use_cuda_graph=False,
-        )
-        with args.nerd_checkpoint.open("rb") as stream:
-            nerd_provenance = {
-                "checkpoint": str(args.nerd_checkpoint.resolve()),
-                "sha256": hashlib.file_digest(stream, "sha256").hexdigest(),
-                "epoch": nerd.get("epoch"),
-            }
+    cfg, launch_cfg, nerd_provenance = build_allegro_reorient_env_cfg(args)
 
     with launch_simulation(launch_cfg, args):
-        if nerd_provenance is None:
-            env = gym.make(ALLEGRO_REORIENT_POLICY_TASK, cfg=cfg).unwrapped
-        else:
-            from isaaclab_neural.envs.allegro_reorient_nerd_env import NerdAllegroReorientEnv
-
-            env = NerdAllegroReorientEnv(cfg=cfg)
+        env = make_allegro_reorient_env(cfg, nerd_provenance is not None)
         try:
             wrapped, policy, runner = load_allegro_reorient_policy(
                 env, args.checkpoint, device=cfg.sim.device, seed=args.seed

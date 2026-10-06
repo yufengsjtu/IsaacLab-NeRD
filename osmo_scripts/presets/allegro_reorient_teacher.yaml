@@ -5,7 +5,8 @@
 
 # Allegro reorientation teacher: the core Isaac Lab RSL-RL configuration (8192 worlds,
 # 24 steps per iteration, 5000 iterations) on the Newton-contact policy task, one GPU.
-# RSL-RL uploads every saved checkpoint to W&B; submit with --enable-wandb, download
+# RSL-RL uploads every saved checkpoint to the W&B project rl of the API key's default
+# entity under run id allegro-<id>; submit with --enable-wandb, download
 # the final model and stage it under pretrained/control_policy/allegro_reorient/ for
 # allegro_reorient_mixed. The run directory and MJWarp baseline are also in the output.
 
@@ -28,8 +29,8 @@ experiment:
     experiment_name: allegro_reorient_teacher
     num_gpus: 1
     seed: 42
-    wandb_entity: rl
-    wandb_project: allegro
+    wandb_project: rl
+    wandb_run_id_prefix: allegro
     evaluation:
       module: isaaclab_neural.eval.allegro_reorient_policy
       num_envs: 256
