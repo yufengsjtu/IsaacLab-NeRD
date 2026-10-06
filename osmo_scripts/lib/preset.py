@@ -46,28 +46,36 @@ def _print_shell_assignment(name: str, value):
     print(f"{name}={shlex.quote(str(value))}")
 
 
+def _require_packaged_checkpoint(path: str, label: str) -> None:
+    """Reject a policy checkpoint that the repository upload would not include."""
+    if TYPE_CHECKING:
+        from .package_code import collect_packaged_files
+    else:
+        try:
+            from .package_code import collect_packaged_files
+        except ImportError:
+            from package_code import collect_packaged_files
+
+    root = Path(__file__).resolve().parents[2]
+    checkpoint = Path(path)
+    checkpoint = checkpoint.resolve() if checkpoint.is_absolute() else (root / checkpoint).resolve()
+    if (
+        not checkpoint.is_file()
+        or not checkpoint.is_relative_to(root)
+        or checkpoint.relative_to(root) not in collect_packaged_files(root)
+    ):
+        raise ValueError(f"Stage the {label} policy inside the packaged repository before upload/submission.")
+
+
 def resolve_submit(args: argparse.Namespace):
     preset = load_preset(args.preset, args.preset_file)
     workflow = preset.get("workflow", {})
     resources = preset.get("resources", {})
-    if preset.get("experiment", {}).get("dataset_profile") == "so101_keyboard":
-        if TYPE_CHECKING:
-            from .package_code import collect_packaged_files
-        else:
-            try:
-                from .package_code import collect_packaged_files
-            except ImportError:
-                from package_code import collect_packaged_files
-
-        root = Path(__file__).resolve().parents[2]
-        checkpoint = Path(preset["experiment"]["collection"]["checkpoint"])
-        checkpoint = checkpoint.resolve() if checkpoint.is_absolute() else (root / checkpoint).resolve()
-        if (
-            not checkpoint.is_file()
-            or not checkpoint.is_relative_to(root)
-            or checkpoint.relative_to(root) not in collect_packaged_files(root)
-        ):
-            raise ValueError("Stage the SO101 policy inside the packaged repository before upload/submission.")
+    experiment = preset.get("experiment", {})
+    if experiment.get("dataset_profile") == "so101_keyboard":
+        _require_packaged_checkpoint(experiment["collection"]["checkpoint"], "SO101")
+    elif experiment.get("require_packaged_policy"):
+        _require_packaged_checkpoint(experiment["policy_checkpoint"], f"{args.preset} teacher")
 
     workflow_base_name = _value(workflow.get("base_name", args.preset), args.workflow_name)
     dataset_subdir = _value(workflow.get("dataset_subdir", workflow_base_name), args.dataset_subdir)

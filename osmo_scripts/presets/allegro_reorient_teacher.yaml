@@ -1,0 +1,37 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Allegro reorientation teacher: the core Isaac Lab RSL-RL configuration (8192 worlds,
+# 24 steps per iteration, 5000 iterations) on the Newton-contact policy task, one GPU.
+# RSL-RL uploads every saved checkpoint to W&B; submit with --enable-wandb, download
+# the final model and stage it under pretrained/control_policy/allegro_reorient/ for
+# allegro_reorient_mixed. The run directory and MJWarp baseline are also in the output.
+
+workflow:
+  base_name: allegro-reorient-teacher
+  dataset_subdir: allegro-reorient-teacher
+  image: docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095
+
+resources:
+  num_gpu: 1
+  num_cpu: 12
+  memory: 64Gi
+  storage: 128Gi
+  platform: ovx-l40
+
+experiment:
+  teacher_only: true
+  teacher_policy:
+    task: Isaac-Reorient-Cube-Allegro-Policy-v0
+    experiment_name: allegro_reorient_teacher
+    num_gpus: 1
+    seed: 42
+    wandb_entity: rl
+    wandb_project: allegro
+    evaluation:
+      module: isaaclab_neural.eval.allegro_reorient_policy
+      num_envs: 256
+      control_steps: 1500
+      seed: 100

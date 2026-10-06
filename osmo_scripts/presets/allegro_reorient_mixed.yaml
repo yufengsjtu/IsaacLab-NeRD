@@ -3,10 +3,10 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-# Allegro hand + free DexCube NeRD in one workflow: train the RSL-RL teacher on the
-# Newton-contact policy task (skipped when policy_checkpoint already exists), gate it
-# on a closed-loop MJWarp baseline, collect clean/noisy/zero-action data with it and
-# train NeRD with closed-loop reorientation evaluation, as for SO101 Keyboard.
+# Allegro hand + free DexCube NeRD with a packaged teacher, as for SO101 Keyboard: stage
+# the allegro_reorient_teacher checkpoint at policy_checkpoint before submission. The
+# workflow gates it on a closed-loop MJWarp baseline, collects clean/noisy/zero-action
+# data with it and trains NeRD with closed-loop reorientation evaluation.
 
 workflow:
   base_name: allegro-reorient-mixed
@@ -46,21 +46,14 @@ experiment:
   write_chunk_transitions: 614400
   update_dataset_statistics: true
   eval_interval: 5
-  policy_checkpoint: ./pretrained/control_policy/allegro_reorient/model.pt
-  teacher_policy:
-    task: Isaac-Reorient-Cube-Allegro-Policy-v0
-    experiment_name: allegro_reorient_teacher
-    num_gpus: 8
-    num_envs: 4096
-    max_iterations: 5000
-    seed: 42
-    closed_loop_training_eval: true
-    evaluation:
-      module: isaaclab_neural.eval.allegro_reorient_policy
-      num_envs: 256
-      control_steps: 1500
-      seed: 100
-      min_mean_goals_per_episode: 2.0
+  policy_checkpoint: ./pretrained/control_policy/allegro_reorient/model_4999.pt
+  require_packaged_policy: true
+  policy_evaluation:
+    module: isaaclab_neural.eval.allegro_reorient_policy
+    num_envs: 256
+    control_steps: 1500
+    seed: 100
+    min_mean_goals_per_episode: 2.0
   dataset_specs:
     - filename: dataset_policy_train.hdf5
       seed: 0

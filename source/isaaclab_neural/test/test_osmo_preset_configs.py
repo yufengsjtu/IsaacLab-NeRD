@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import sys
 from argparse import Namespace
 from pathlib import Path
 
@@ -1515,23 +1516,30 @@ def test_dataset_spec_rejects_noise_without_policy() -> None:
         parse_dataset_specs(experiment)
 
 
-def test_allegro_preset_matches_training_recipe_and_closed_loop_eval() -> None:
+def test_allegro_presets_split_default_teacher_from_packaged_nerd_pipeline() -> None:
+    teacher_preset = _load_yaml(PRESET_DIR / "allegro_reorient_teacher.yaml")
     preset = _load_yaml(PRESET_DIR / "allegro_reorient_mixed.yaml")
+    teacher = teacher_preset["experiment"]["teacher_policy"]
+    assert teacher_preset["experiment"]["teacher_only"] is True
+    assert teacher_preset["resources"]["num_gpu"] == teacher["num_gpus"] == 1
+    # The core RSL-RL configuration and task world count are used unchanged.
+    assert not {"num_envs", "max_iterations"} & set(teacher)
+    assert (teacher["wandb_entity"], teacher["wandb_project"]) == ("rl", "allegro")
+
     experiment = preset["experiment"]
+    assert "teacher_policy" not in experiment
+    assert experiment["require_packaged_policy"] is True
+    assert Path(experiment["policy_checkpoint"]).parent == Path("pretrained/control_policy/allegro_reorient")
     train_config = _load_yaml(REPOSITORY_ROOT / experiment["train_cfg"])
     dataset_config = train_config["algorithm"]["dataset"]
     specs = experiment["dataset_specs"]
-
-    train_files = {Path(source["path"]).name for source in dataset_config["train_datasets"].values()}
-    valid_files = {Path(path).name for path in dataset_config["valid_datasets"].values()}
-    assert train_files == {item["filename"] for item in specs if item["split"] == "train"}
-    assert valid_files == {item["filename"] for item in specs if item["split"] == "valid"}
-    for path in [
-        *(s["path"] for s in dataset_config["train_datasets"].values()),
-        *dataset_config["valid_datasets"].values(),
-    ]:
-        assert Path(path).parent.name == experiment["env_name"]
-        assert Path(path).parent.parent == Path(experiment["dataset_dir"])
+    train_paths = [source["path"] for source in dataset_config["train_datasets"].values()]
+    assert {Path(path).name for path in train_paths} == {item["filename"] for item in specs if item["split"] == "train"}
+    assert {Path(path).name for path in dataset_config["valid_datasets"].values()} == {
+        item["filename"] for item in specs if item["split"] == "valid"
+    }
+    for path in [*train_paths, *dataset_config["valid_datasets"].values()]:
+        assert Path(path).parent == Path(experiment["dataset_dir"]) / experiment["env_name"]
     train = [item for item in specs if item["split"] == "train"]
     assert sum(item["num_transitions"] for item in train) == experiment["train_transitions"]
     assert {item["seed"] for item in train}.isdisjoint(item["seed"] for item in specs if item["split"] == "valid")
@@ -1540,19 +1548,19 @@ def test_allegro_preset_matches_training_recipe_and_closed_loop_eval() -> None:
         assert solver_cfg[key] == experiment[key], key
     eval_cfg = train_config["algorithm"]["eval"]
     assert eval_cfg["mode"] == "allegro_policy"
-    assert experiment["teacher_policy"]["closed_loop_training_eval"] is True
-    assert experiment["teacher_policy"]["task"] == "Isaac-Reorient-Cube-Allegro-Policy-v0"
-    assert preset["workflow"]["image"] == "docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095"
+    assert eval_cfg["policy_checkpoint"] == experiment["policy_checkpoint"]
+    for item in (teacher_preset, preset):
+        assert item["workflow"]["image"] == "docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095"
 
 
-def _fake_teacher_run(monkeypatch, tmp_path, mean_goals: float) -> list[list[str]]:
+def _fake_policy_subprocesses(monkeypatch, tmp_path, mean_goals: float) -> list[tuple[list[str], dict]]:
     import json
     import subprocess
 
-    commands: list[list[str]] = []
+    calls: list[tuple[list[str], dict]] = []
 
-    def fake_run(command, check):
-        commands.append([str(item) for item in command])
+    def fake_run(command, check, env=None):
+        calls.append(([str(item) for item in command], env or {}))
         if "--report" in command:
             report = Path(command[command.index("--report") + 1])
             report.write_text(json.dumps({"mean_goals_per_episode": mean_goals, "drop_rate": 0.1}))
@@ -1560,70 +1568,95 @@ def _fake_teacher_run(monkeypatch, tmp_path, mean_goals: float) -> list[list[str
         run_name = command[command.index("--run_name") + 1]
         run_dir = tmp_path / "logs" / "rsl_rl" / "teacher" / f"2026-01-01_00-00-00_{run_name}"
         (run_dir / "params").mkdir(parents=True)
-        for iteration in (50, 200, 9):
+        for iteration in (50, 4999, 9):
             (run_dir / f"model_{iteration}.pt").write_bytes(b"")
-        (run_dir / "params" / "agent.yaml").write_text("{}")
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(subprocess, "run", fake_run)
-    return commands
+    return calls
 
 
-def _teacher_experiment(tmp_path, minimum: float = 1.0) -> dict:
+def _teacher_preset() -> dict:
     return {
-        "policy_checkpoint": str(tmp_path / "missing.pt"),
+        "teacher_only": True,
         "teacher_policy": {
             "task": "Isaac-Reorient-Cube-Allegro-Policy-v0",
             "experiment_name": "teacher",
-            "num_gpus": 8,
-            "num_envs": 4096,
-            "max_iterations": 201,
-            "closed_loop_training_eval": True,
-            "evaluation": {"module": "eval_module", "min_mean_goals_per_episode": minimum},
+            "wandb_entity": "rl",
+            "wandb_project": "allegro",
+            "evaluation": {"module": "eval_module"},
         },
     }
 
 
-def test_teacher_stage_trains_distributed_copies_latest_checkpoint_and_overrides_eval(tmp_path, monkeypatch) -> None:
+def test_teacher_preset_trains_default_config_uploads_to_wandb_and_stops(tmp_path, monkeypatch) -> None:
     monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
     import run_experiment
 
-    commands = _fake_teacher_run(monkeypatch, tmp_path, mean_goals=3.0)
-    experiment = _teacher_experiment(tmp_path)
+    calls = _fake_policy_subprocesses(monkeypatch, tmp_path, mean_goals=3.0)
+    monkeypatch.setattr(run_experiment, "load_preset", lambda *args: {"experiment": _teacher_preset()})
+    monkeypatch.setattr(run_experiment, "generate_all_datasets", lambda *args: pytest.fail("must not generate"))
+    monkeypatch.setattr(run_experiment, "run_training", lambda *args: pytest.fail("must not train NeRD"))
+    args = Namespace(preset="teacher", preset_file=None, output_root=str(tmp_path / "output"), enable_wandb=True)
+    args.wandb_entity = ""
 
-    assert run_experiment.train_teacher_policy(experiment, tmp_path / "output") is True
+    run_experiment.run(args)
 
-    train_command = commands[0]
-    assert train_command[1:3] == ["-m", "torch.distributed.run"]
-    assert train_command[train_command.index("--nproc_per_node") + 1] == "8"
-    assert "isaaclab_neural.train.train_control_policy" in train_command
-    assert train_command[-1] == "--distributed"
-    checkpoint = Path(experiment["policy_checkpoint"])
-    assert checkpoint.name == "model_200.pt"
+    command, env = calls[0]
+    assert command[:3] == [sys.executable, "-m", "isaaclab_neural.train.train_control_policy"]
+    assert "--num_envs" not in command and "--max_iterations" not in command and "--distributed" not in command
+    assert command[command.index("--logger") + 1] == "wandb"
+    assert command[command.index("--log_project_name") + 1] == "allegro"
+    assert env["WANDB_USERNAME"] == env["WANDB_ENTITY"] == "rl"
+    assert env["WANDB_RUN_ID"]
+    checkpoint = Path(calls[1][0][calls[1][0].index("--checkpoint") + 1])
+    assert checkpoint.name == "model_4999.pt"
     assert checkpoint.is_relative_to(tmp_path / "output" / "teacher_policy")
-    assert (checkpoint.parent / "params" / "agent.yaml").is_file()
-    assert commands[1][commands[1].index("--checkpoint") + 1] == str(checkpoint)
+    assert (tmp_path / "output" / "teacher_policy" / "baseline.json").is_file()
 
-    captured: list[list[str]] = []
-    monkeypatch.setattr(run_experiment.subprocess, "run", lambda command, check: captured.append(command))
-    experiment.update(train_task="task", train_cfg="cfg.yaml", env_name="Allegro-Reorient", train_num_envs=8)
-    run_experiment.run_training(experiment, tmp_path / "output", Namespace(enable_wandb=False))
-    overrides = captured[0][captured[0].index("--cfg-overrides") + 1]
-    assert overrides == f"algorithm.eval.policy_checkpoint {checkpoint}"
+    args.enable_wandb = False
+    with pytest.raises(ValueError, match="--enable-wandb"):
+        run_experiment.run(args)
 
 
-def test_teacher_stage_reuses_existing_checkpoint_and_gates_baseline(tmp_path, monkeypatch) -> None:
+def test_packaged_teacher_gate_runs_before_collection(tmp_path, monkeypatch) -> None:
     monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
     import run_experiment
 
-    commands = _fake_teacher_run(monkeypatch, tmp_path, mean_goals=0.5)
-    staged = tmp_path / "staged.pt"
+    calls = _fake_policy_subprocesses(monkeypatch, tmp_path, mean_goals=0.5)
+    staged = tmp_path / "model_4999.pt"
     staged.write_bytes(b"")
-    experiment = _teacher_experiment(tmp_path)
+    experiment = dict(_load_yaml(PRESET_DIR / "allegro_reorient_mixed.yaml")["experiment"])
     experiment["policy_checkpoint"] = str(staged)
+    monkeypatch.setattr(run_experiment, "load_preset", lambda *args: {"experiment": experiment})
+    monkeypatch.setattr(run_experiment, "generate_all_datasets", lambda *args: pytest.fail("must not generate"))
+    args = Namespace(
+        preset="allegro_reorient_mixed",
+        preset_file=None,
+        output_root=str(tmp_path / "output"),
+        num_gpus=None,
+        dataset_cache_mode="off",
+    )
+    (tmp_path / "output").mkdir()
 
     with pytest.raises(RuntimeError, match="below the preset minimum"):
-        run_experiment.train_teacher_policy(experiment, tmp_path / "output")
+        run_experiment.run(args)
 
-    assert len(commands) == 1 and "--report" in commands[0]
-    assert experiment["policy_checkpoint"] == str(staged)
+    assert len(calls) == 1 and calls[0][0][calls[0][0].index("--checkpoint") + 1] == str(staged)
+
+
+def test_allegro_submit_requires_packaged_teacher(monkeypatch, capsys) -> None:
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts" / "lib"))
+    import preset as preset_lib
+
+    experiment = dict(_load_yaml(PRESET_DIR / "allegro_reorient_mixed.yaml")["experiment"])
+    experiment["policy_checkpoint"] = "./pretrained/control_policy/allegro_reorient/missing.pt"
+    monkeypatch.setattr(
+        preset_lib, "load_preset", lambda *args: {"workflow": {}, "resources": {}, "experiment": experiment}
+    )
+    args = Namespace(preset="allegro_reorient_mixed", preset_file=None, run_id="1", workflow_name=None)
+    for name in ("dataset_subdir", "num_gpu", "num_cpu", "memory", "storage", "platform", "image"):
+        setattr(args, name, None)
+
+    with pytest.raises(ValueError, match="allegro_reorient_mixed teacher"):
+        preset_lib.resolve_submit(args)

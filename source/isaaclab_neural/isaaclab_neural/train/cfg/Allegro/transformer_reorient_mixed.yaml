@@ -65,10 +65,10 @@ algorithm:
 
   eval:
     # Closed-loop reorientation with the collection policy in the training environment (rank 0, current
-    # weights), as for SO101 Keyboard. The OSMO pipeline overrides policy_checkpoint with its teacher.
+    # weights), as for SO101 Keyboard. This is the packaged allegro_reorient_teacher checkpoint.
     interval: 5
     mode: allegro_policy
-    policy_checkpoint: ./pretrained/control_policy/allegro_reorient/model.pt
+    policy_checkpoint: ./pretrained/control_policy/allegro_reorient/model_4999.pt
     control_steps: 600
     seed: 43
 

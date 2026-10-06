@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import warnings
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
@@ -659,9 +660,8 @@ def latest_rsl_rl_checkpoint(run_dir: Path) -> Path:
     return max(checkpoints, key=lambda path: int(path.stem.split("_", 1)[1]))
 
 
-def evaluate_teacher_policy(teacher: dict, checkpoint: Path, report: Path) -> dict:
-    """Run the preset's closed-loop teacher evaluation and enforce its minimum goals per episode."""
-    evaluation = teacher["evaluation"]
+def evaluate_policy(evaluation: dict, checkpoint: Path, report: Path) -> dict:
+    """Run a closed-loop policy evaluation and enforce its optional minimum goals per episode."""
     command = [
         sys.executable,
         "-m",
@@ -681,77 +681,80 @@ def evaluate_teacher_policy(teacher: dict, checkpoint: Path, report: Path) -> di
     result = json.loads(report.read_text())
     minimum = evaluation.get("min_mean_goals_per_episode")
     mean_goals = result.get("mean_goals_per_episode")
+    print(f"Policy evaluation: goals/episode={mean_goals}, drop_rate={result.get('drop_rate')}")
     if minimum is not None and (mean_goals is None or mean_goals < float(minimum)):
         raise RuntimeError(
-            f"Teacher policy reached {mean_goals} goals per episode, below the preset minimum {minimum}; "
+            f"Policy reached {mean_goals} goals per episode, below the preset minimum {minimum}; "
             "refusing to collect NeRD data with it."
         )
     return result
 
 
-def train_teacher_policy(experiment: dict, output_root: Path) -> bool:
-    """Train the preset's RSL-RL teacher unless ``policy_checkpoint`` already exists, then evaluate it.
+def run_teacher_training(experiment: dict, output_root: Path, wandb_args: argparse.Namespace) -> Path:
+    """Train the preset's RSL-RL teacher, upload its checkpoints to W&B and evaluate it.
 
-    A trained teacher replaces ``experiment["policy_checkpoint"]`` with its final checkpoint, copied
-    under ``output_root/teacher_policy`` so the workflow output keeps it with its saved agent config.
+    Only the options present in ``teacher_policy`` override the task's registered RSL-RL
+    configuration. RSL-RL's W&B writer uploads every saved checkpoint; the run is also
+    copied under ``output_root/teacher_policy`` with its saved agent and environment config.
 
     Returns:
-        Whether a new teacher was trained in this run.
+        The final teacher checkpoint inside ``output_root``.
     """
-    teacher = experiment.get("teacher_policy")
-    if not teacher:
-        return False
-    teacher_root = output_root / "teacher_policy"
-    existing = str(experiment.get("policy_checkpoint", "") or "")
-    trained = not (existing and Path(existing).is_file())
-    if trained:
-        experiment_name = str(teacher.get("experiment_name", "teacher_policy"))
-        run_name = f"osmo_{int(time.time())}"
-        args = [
+    teacher = experiment["teacher_policy"]
+    wandb_project = teacher.get("wandb_project")
+    if wandb_project and not wandb_args.enable_wandb:
+        raise ValueError("This teacher preset uploads its checkpoints to W&B; submit it with --enable-wandb.")
+    experiment_name = str(teacher.get("experiment_name", "teacher_policy"))
+    run_name = f"osmo_{int(time.time())}"
+    args = [
+        "-m",
+        "isaaclab_neural.train.train_control_policy",
+        "--task",
+        str(teacher["task"]),
+        "--experiment_name",
+        experiment_name,
+        "--run_name",
+        run_name,
+    ]
+    for key, flag in (("num_envs", "--num_envs"), ("max_iterations", "--max_iterations"), ("seed", "--seed")):
+        if teacher.get(key) is not None:
+            args += [flag, str(teacher[key])]
+    env = os.environ.copy()
+    if wandb_project:
+        args += ["--logger", "wandb", "--log_project_name", str(wandb_project)]
+        # RSL-RL's W&B writer reads WANDB_USERNAME; Isaac Lab's printed run reference prefers WANDB_ENTITY.
+        entity = teacher.get("wandb_entity") or wandb_args.wandb_entity
+        if entity:
+            env["WANDB_USERNAME"] = env["WANDB_ENTITY"] = str(entity)
+        # Isaac Lab otherwise draws the id from wandb.util.generate_id(), which wandb 0.30 (init.sh) removed.
+        env.setdefault("WANDB_RUN_ID", uuid.uuid4().hex[:8])
+        print(f"Teacher W&B run: wandb:{entity or '<default-entity>'}/{wandb_project}/{env['WANDB_RUN_ID']}")
+    num_gpus = int(teacher.get("num_gpus", 1))
+    if num_gpus > 1:
+        command = [
+            sys.executable,
             "-m",
-            "isaaclab_neural.train.train_control_policy",
-            "--task",
-            str(teacher["task"]),
-            "--num_envs",
-            str(teacher["num_envs"]),
-            "--max_iterations",
-            str(teacher["max_iterations"]),
-            "--seed",
-            str(teacher.get("seed", 42)),
-            "--experiment_name",
-            experiment_name,
-            "--run_name",
-            run_name,
+            "torch.distributed.run",
+            "--standalone",
+            "--nproc_per_node",
+            str(num_gpus),
+            *args,
+            "--distributed",
         ]
-        num_gpus = int(teacher.get("num_gpus", 1))
-        if num_gpus > 1:
-            command = [
-                sys.executable,
-                "-m",
-                "torch.distributed.run",
-                "--standalone",
-                "--nproc_per_node",
-                str(num_gpus),
-                *args,
-                "--distributed",
-            ]
-        else:
-            command = [sys.executable, *args]
-        subprocess.run(command, check=True)
-        runs = sorted((Path.cwd() / "logs" / "rsl_rl" / experiment_name).glob(f"*_{run_name}"))
-        if len(runs) != 1:
-            raise RuntimeError(f"Expected one teacher run named {run_name!r}, found {[str(run) for run in runs]}.")
-        run_dir = teacher_root / runs[0].name
-        shutil.copytree(runs[0], run_dir)
-        experiment["policy_checkpoint"] = str(latest_rsl_rl_checkpoint(run_dir))
-        print(f"Trained teacher policy: {experiment['policy_checkpoint']}")
     else:
-        print(f"Reusing teacher policy {existing}; skipping teacher training.")
+        command = [sys.executable, *args]
+    subprocess.run(command, check=True, env=env)
+    runs = sorted((Path.cwd() / "logs" / "rsl_rl" / experiment_name).glob(f"*_{run_name}"))
+    if len(runs) != 1:
+        raise RuntimeError(f"Expected one teacher run named {run_name!r}, found {[str(run) for run in runs]}.")
+    teacher_root = output_root / "teacher_policy"
+    run_dir = teacher_root / runs[0].name
+    shutil.copytree(runs[0], run_dir)
+    checkpoint = latest_rsl_rl_checkpoint(run_dir)
+    print(f"Trained teacher policy: {checkpoint}")
     if teacher.get("evaluation"):
-        teacher_root.mkdir(parents=True, exist_ok=True)
-        result = evaluate_teacher_policy(teacher, Path(experiment["policy_checkpoint"]), teacher_root / "baseline.json")
-        print(f"Teacher baseline: goals/episode={result['mean_goals_per_episode']}, drop_rate={result['drop_rate']}")
-    return trained
+        evaluate_policy(teacher["evaluation"], checkpoint, teacher_root / "baseline.json")
+    return checkpoint
 
 
 def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Namespace):
@@ -781,11 +784,6 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
             train_args += [flag, str(experiment[key])]
     if experiment.get("update_dataset_statistics"):
         train_args.append("--update-dataset-statistics")
-    cfg_overrides = str(experiment.get("train_cfg_overrides", "") or "").split()
-    if (experiment.get("teacher_policy") or {}).get("closed_loop_training_eval"):
-        cfg_overrides += ["algorithm.eval.policy_checkpoint", str(experiment["policy_checkpoint"])]
-    if cfg_overrides:
-        train_args += ["--cfg-overrides", " ".join(cfg_overrides)]
     if experiment.get("train_preset"):
         train_args.append(f"presets={experiment['train_preset']}")
     if wandb_args.enable_wandb:
@@ -1238,6 +1236,9 @@ def run(args: argparse.Namespace):
         run_keyboard_pipeline(args, preset)
         return
     experiment = dict(preset["experiment"])
+    if experiment.get("teacher_only"):
+        run_teacher_training(experiment, Path(args.output_root), args)
+        return
     if getattr(args, "preflight_only", False) and not experiment.get("training_only"):
         raise ValueError("preflight-only is supported only for training-only presets.")
     if experiment.get("training_only") and args.dataset_cache_mode != "require":
@@ -1252,9 +1253,12 @@ def run(args: argparse.Namespace):
         print(f"Validated runtime: {validate_runtime(experiment)}")
     specs = parse_dataset_specs(experiment)
     output_root = Path(args.output_root)
-    teacher_trained = train_teacher_policy(experiment, output_root)
-    if teacher_trained and args.dataset_cache_mode == "require":
-        raise RuntimeError("A newly trained teacher cannot reuse cached datasets recorded with another policy.")
+    if experiment.get("policy_evaluation"):
+        policy_checkpoint = Path(str(experiment.get("policy_checkpoint", "")))
+        if not policy_checkpoint.is_file():
+            raise FileNotFoundError(f"Policy checkpoint not found: {policy_checkpoint}")
+        report = output_root / "policy_evaluation.json"
+        evaluate_policy(experiment["policy_evaluation"], policy_checkpoint, report)
     dataset_dir = Path(args.dataset_dir or experiment.get("dataset_dir", "./data/datasets"))
     local_env_dir = dataset_dir / str(experiment["env_name"])
     required_files = required_dataset_files(experiment, specs)
@@ -1267,9 +1271,7 @@ def run(args: argparse.Namespace):
     print(f"Training config: {experiment['train_cfg']}")
 
     datasets_available = False
-    if teacher_trained:
-        print("Teacher policy was trained in this run; regenerating its datasets instead of reading the cache.")
-    elif args.dataset_cache_mode != "off" and args.dataset_input_path:
+    if args.dataset_cache_mode != "off" and args.dataset_input_path:
         datasets_available = load_dataset_cache_from_input(
             input_root=Path(args.dataset_input_path),
             dataset_subdir=args.dataset_subdir,

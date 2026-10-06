@@ -92,23 +92,35 @@ poor.
 
 ## OSMO pipeline
 
-`osmo_scripts/presets/allegro_reorient_mixed.yaml` runs everything in one
-eight-GPU workflow:
+Two presets separate the teacher from NeRD, as for SO101 Keyboard.
 
-1. If `policy_checkpoint` (`pretrained/control_policy/allegro_reorient/model.pt`,
-   with `params/agent.yaml` beside it) is absent, `teacher_policy` trains the RSL-RL
-   teacher with `torch.distributed.run` (8 ranks x 4096 worlds, 5000 iterations) and
-   copies the run to `teacher_policy/` in the workflow output.
-2. The teacher is evaluated closed loop on MJWarp (`teacher_policy/baseline.json`).
-   Fewer than `min_mean_goals_per_episode` (2.0) goals per episode stops the workflow
-   before data collection.
-3. A newly trained teacher always regenerates the six datasets instead of reading
-   the cache, because cached data may come from another policy.
-4. NeRD trains on eight GPUs with closed-loop evaluation against the same teacher.
+**1. Teacher** (`allegro_reorient_teacher`, one GPU): the core Isaac Lab RSL-RL
+configuration (8192 worlds, 24 steps per iteration, 5000 iterations) on the
+Newton-contact policy task. RSL-RL uploads every saved checkpoint to the W&B project
+`allegro` of entity `rl`, so submit with `--enable-wandb`. The log prints the run as
+`wandb:rl/allegro/<run_id>`. The workflow output also keeps the run directory and the
+MJWarp baseline `teacher_policy/baseline.json`.
+
+```bash
+./osmo_scripts/start.sh --preset allegro_reorient_teacher --enable-wandb --pool <osmo-pool>
+```
+
+**2. Stage the teacher.** Download the final `model_4999.pt` from W&B to
+`pretrained/control_policy/allegro_reorient/model_4999.pt`. Without `params/agent.yaml`
+beside it, loaders use the registered default RSL-RL configuration, which is the one the
+teacher used. Submission refuses the NeRD preset if this file would not be packaged.
+
+**3. Data and NeRD** (`allegro_reorient_mixed`, eight GPUs): evaluates the packaged
+teacher on MJWarp first (`policy_evaluation.json`) and stops before collection below
+`min_mean_goals_per_episode` (2.0). It then collects the six datasets (or reuses the
+dataset cache) and trains NeRD with closed-loop evaluation against the same teacher.
 
 ```bash
 ./osmo_scripts/start.sh --preset allegro_reorient_mixed --pool <osmo-pool>
 ```
+
+Data collection runs the six dataset splits sequentially on one GPU through the generic
+generator; the other ranks are idle until NeRD training starts.
 
 ## Closed-loop evaluation
 
@@ -126,8 +138,8 @@ uv run --no-sync python -m isaaclab_neural.eval.allegro_reorient_policy \
 Episodes still running after `--control-steps` are not counted. Select NeRD
 checkpoints by this closed-loop comparison rather than validation loss.
 
-**Validation status:** teacher training (also through a one-rank
-`torch.distributed.run`), the teacher baseline gate, policy/noisy/zero-action
-collection, NeRD training with closed-loop evaluation and both evaluator backends
-ran end to end on small single-GPU smoke runs. The eight-GPU OSMO workflow has not
-run, and no teacher policy, dataset or NeRD checkpoint has been qualified yet.
+**Validation status:** the teacher stage (with offline W&B checkpoint upload),
+policy/noisy/zero-action collection, NeRD training with closed-loop evaluation and
+both evaluator backends ran end to end on small single-GPU smoke runs. Neither OSMO
+workflow has run, and no teacher policy, dataset or NeRD checkpoint has been qualified
+yet.
