@@ -23,6 +23,8 @@ env:
     min_contact_event_threshold: 0.12
     contact_mode: newton_native
     contact_representation: contact_tokens
+    # Keep only penetrating pairs, as SO101 does; applied identically to stored native pairs and at runtime.
+    contact_filter: solver_active
     num_contacts_per_env: 128
     max_contact_tokens: 128
     contact_packing_policy: body_round_robin_pair_atomic
@@ -47,12 +49,20 @@ algorithm:
     lr_end: 2e-5
     lr_schedule: linear
     betas: [0.9, 0.999]
+    fused: true
 
   dataset:
+    # Five equal 2M-transition shards (one collection GPU each): 60% clean policy, 20% noisy, 20% zero action.
     train_datasets:
-      policy_trajectory:
-        path: ./data/datasets/allegro-reorient-newton-contacts-v1/Allegro-Reorient/dataset_policy_train.hdf5
-        weight: 0.6
+      policy_a:
+        path: ./data/datasets/allegro-reorient-newton-contacts-v1/Allegro-Reorient/dataset_policy_a_train.hdf5
+        weight: 0.2
+      policy_b:
+        path: ./data/datasets/allegro-reorient-newton-contacts-v1/Allegro-Reorient/dataset_policy_b_train.hdf5
+        weight: 0.2
+      policy_c:
+        path: ./data/datasets/allegro-reorient-newton-contacts-v1/Allegro-Reorient/dataset_policy_c_train.hdf5
+        weight: 0.2
       policy_noisy_trajectory:
         path: ./data/datasets/allegro-reorient-newton-contacts-v1/Allegro-Reorient/dataset_policy_noisy_train.hdf5
         weight: 0.2

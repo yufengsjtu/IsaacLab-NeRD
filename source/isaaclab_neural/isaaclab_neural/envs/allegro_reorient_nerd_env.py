@@ -110,6 +110,7 @@ class NerdAllegroReorientEnvCfg(AllegroReorientPolicyEnvCfg):
                 num_contacts_per_env=ALLEGRO_REORIENT_NUM_CONTACTS,
                 contact_mode="newton_native",
                 contact_representation="contact_tokens",
+                contact_filter="solver_active",
                 max_contact_tokens=ALLEGRO_REORIENT_NUM_CONTACTS,
                 contact_packing_policy="body_round_robin_pair_atomic",
                 states_frame="body",

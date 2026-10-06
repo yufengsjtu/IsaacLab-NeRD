@@ -638,7 +638,51 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
     return args
 
 
-def generate_all_datasets(experiment: dict, specs: list[DatasetSpec], dataset_dir: Path):
+def run_parallel_collection(jobs: list[tuple[str, list[str]]], num_gpus: int, log_dir: Path) -> None:
+    """Run dataset-generation commands concurrently, one process per visible GPU.
+
+    Each job sees a single GPU through ``CUDA_VISIBLE_DEVICES`` and logs to ``log_dir/<name>.log``. The first
+    failure terminates the remaining jobs and raises with the tail of the failed log.
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
+    pending = list(jobs)
+    running: dict[int, tuple[str, subprocess.Popen, TextIO]] = {}
+
+    def stop_all() -> None:
+        for _, process, stream in running.values():
+            process.terminate()
+            process.wait()
+            stream.close()
+
+    try:
+        while pending or running:
+            for gpu in range(num_gpus):
+                if gpu not in running and pending:
+                    name, args = pending.pop(0)
+                    stream = (log_dir / f"{name}.log").open("w", encoding="utf-8")
+                    env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(gpu)}
+                    print(f"[collection] gpu={gpu} start {name}", flush=True)
+                    process = subprocess.Popen(
+                        [sys.executable, *args], stdout=stream, stderr=subprocess.STDOUT, env=env
+                    )
+                    running[gpu] = (name, process, stream)
+            for gpu, (name, process, stream) in list(running.items()):
+                code = process.poll()
+                if code is None:
+                    continue
+                stream.close()
+                del running[gpu]
+                if code != 0:
+                    tail = (log_dir / f"{name}.log").read_text(encoding="utf-8", errors="replace")[-4000:]
+                    raise RuntimeError(f"Dataset generation {name} failed with exit code {code}:\n{tail}")
+                print(f"[collection] gpu={gpu} done {name}", flush=True)
+            time.sleep(5)
+    except BaseException:
+        stop_all()
+        raise
+
+
+def generate_all_datasets(experiment: dict, specs: list[DatasetSpec], dataset_dir: Path, log_dir: Path | None = None):
     if experiment.get("dataset_profile") == "so101_keyboard":
         from lib.keyboard_data import collect_and_validate
 
@@ -646,10 +690,17 @@ def generate_all_datasets(experiment: dict, specs: list[DatasetSpec], dataset_di
             experiment, dataset_dir / experiment["env_name"], Path(experiment["collection_output_root"])
         )
         return
+    jobs = []
     for spec in specs:
         args = build_dataset_args(experiment, spec, dataset_dir)
         if args is not None:
-            subprocess.run([sys.executable, *args], check=True)
+            jobs.append((Path(spec.filename).stem, args))
+    num_gpus = int(experiment.get("parallel_collection_gpus", 0) or 0)
+    if num_gpus > 1:
+        run_parallel_collection(jobs, num_gpus, log_dir or dataset_dir / "collection_logs")
+        return
+    for _, args in jobs:
+        subprocess.run([sys.executable, *args], check=True)
 
 
 def latest_rsl_rl_checkpoint(run_dir: Path) -> Path:
@@ -790,6 +841,10 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
             train_args += [flag, str(experiment[key])]
     if experiment.get("update_dataset_statistics"):
         train_args.append("--update-dataset-statistics")
+    # Keyboard presets write their overrides into the prepared runtime config instead.
+    generic_overrides = str(experiment.get("train_cfg_overrides", "") or "").strip()
+    if generic_overrides and not experiment.get("training_only") and not experiment.get("dataset_profile"):
+        train_args += ["--cfg-overrides", generic_overrides]
     if experiment.get("train_preset"):
         train_args.append(f"presets={experiment['train_preset']}")
     if wandb_args.enable_wandb:
@@ -822,6 +877,48 @@ def run_training(experiment: dict, output_root: Path, wandb_args: argparse.Names
     else:
         command = [sys.executable, "-m", "isaaclab_neural.train.train", *train_args]
     subprocess.run(command, check=True)
+
+
+def run_throughput_benchmarks(experiment: dict, output_root: Path) -> dict:
+    """Time the trained NeRD against native MJWarp on one otherwise idle GPU after training.
+
+    ``throughput_benchmark`` lists ``variants`` (``name``, optional ``nerd`` and extra ``args``), the
+    ``num_envs`` sweep, step counts, model-only ``model_autocast`` settings and the ``checkpoint_name`` under
+    ``<output_root>/<env_name>/nn``. Each run writes ``throughput/<variant>_<num_envs>.json``; a failed variant is
+    recorded in ``throughput/summary.json`` instead of failing the workflow, so the trained model is still kept.
+    """
+    bench = experiment["throughput_benchmark"]
+    root = output_root / "throughput"
+    root.mkdir(parents=True, exist_ok=True)
+    checkpoint = output_root / str(experiment["env_name"]) / "nn" / str(bench.get("checkpoint_name", "final_model.pt"))
+    env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(bench.get("gpu", 0))}
+    module = str(bench["module"])
+    runs = []
+    for autocast in bench.get("model_autocast", []):
+        runs.append((f"model_{autocast}", ["model", "--nerd-checkpoint", str(checkpoint), "--autocast", str(autocast)]))
+    for variant in bench.get("variants", []):
+        for num_envs in bench.get("num_envs", [8192]):
+            args = ["env", "--checkpoint", str(experiment["policy_checkpoint"]), "--num-envs", str(num_envs)]
+            for key in ("warmup", "steps", "breakdown_steps", "profile_steps"):
+                if bench.get(key) is not None:
+                    args += [f"--{key.replace('_', '-')}", str(bench[key])]
+            if variant.get("nerd"):
+                args += ["--nerd-checkpoint", str(checkpoint)]
+            runs.append((f"{variant['name']}_{num_envs}", [*args, *[str(item) for item in variant.get("args", [])]]))
+    summary = {"checkpoint": str(checkpoint), "runs": {}}
+    for name, args in runs:
+        report = root / f"{name}.json"
+        with (root / f"{name}.log").open("w", encoding="utf-8") as log:
+            code = subprocess.run(
+                [sys.executable, "-m", module, *args, "--report", str(report)],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=env,
+            ).returncode
+        summary["runs"][name] = json.loads(report.read_text()) if code == 0 and report.is_file() else {"exit": code}
+        print(f"[throughput] {name}: exit={code}", flush=True)
+    (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    return summary
 
 
 def run_context_diagnostic(experiment: dict, specs: list[DatasetSpec], dataset_dir: Path):
@@ -1298,7 +1395,9 @@ def run(args: argparse.Namespace):
             raise RuntimeError(
                 "Keyboard training-only cache is unavailable; refusing to generate or upload replacements."
             )
-        generate_all_datasets(experiment, specs, dataset_dir)
+        # Concurrent collection keeps one log per shard with the workflow output.
+        log_dir = [output_root / "collection_logs"] if experiment.get("parallel_collection_gpus") else []
+        generate_all_datasets(experiment, specs, dataset_dir, *log_dir)
         stage_generated_datasets(
             local_env_dir=local_env_dir,
             dataset_subdir=args.dataset_subdir,
@@ -1329,6 +1428,8 @@ def run(args: argparse.Namespace):
     run_training(experiment, output_root, args)
     if experiment.get("training_only"):
         evaluate_keyboard_checkpoint(experiment, local_env_dir, output_root)
+    if experiment.get("throughput_benchmark"):
+        run_throughput_benchmarks(experiment, output_root)
 
 
 def main():

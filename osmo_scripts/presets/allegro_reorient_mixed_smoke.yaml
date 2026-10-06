@@ -1,0 +1,134 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Two-GPU end-to-end check of allegro_reorient_mixed with the allegro_reorient_teacher_smoke
+# checkpoint: concurrent shard collection, DDP training with closed-loop evaluation and the
+# throughput benchmarks, at sizes that only exercise the pipeline. Uses its own dataset cache.
+
+workflow:
+  base_name: allegro-reorient-mixed-smoke
+  dataset_subdir: allegro-reorient-smoke-v1
+  image: docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095
+
+resources:
+  num_gpu: 2
+  num_cpu: 24
+  memory: 128Gi
+  storage: 256Gi
+  platform: ovx-l40
+
+experiment:
+  dataset_dir: ./data/datasets/allegro-reorient-newton-contacts-v1
+  env_name: Allegro-Reorient
+  robot_name: Allegro-Reorient
+  data_gen_task: Isaac-Reorient-Cube-Allegro-Dataset-Gen-v0
+  deployment_task: Isaac-Reorient-Cube-Allegro-Dataset-Gen-v0
+  train_task: Isaac-Reorient-Cube-Allegro-NeRD-v0
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Allegro/transformer_reorient_mixed.yaml
+  train_preset: newton_mjwarp
+  num_gpus: 2
+  contact_mode: newton_native
+  contact_representation: contact_tokens
+  num_contacts_per_env: 128
+  max_contact_tokens: 128
+  contact_packing_policy: body_round_robin_pair_atomic
+  sample_mode: action
+  initial_states_source: env
+  states_frame: body
+  train_transitions: 76800
+  valid_transitions: 15360
+  data_gen_num_envs: 128
+  train_num_envs: 64
+  trajectory_length: 120
+  write_chunk_transitions: 15360
+  # Eight small shards queued over two collection GPUs.
+  parallel_collection_gpus: 2
+  no_time_stamp: true
+  headless: true
+  update_dataset_statistics: true
+  eval_interval: 1
+  save_interval: 1
+  train_cfg_overrides: algorithm.num_epochs 2 algorithm.num_iters_per_epoch 20 algorithm.num_valid_batches 4 algorithm.dataset.max_capacity 200000 algorithm.eval.control_steps 300 algorithm.eval.policy_checkpoint ./pretrained/control_policy/allegro_reorient/smoke/model_29.pt
+  policy_checkpoint: ./pretrained/control_policy/allegro_reorient/smoke/model_29.pt
+  require_packaged_policy: true
+  policy_evaluation:
+    module: isaaclab_neural.eval.allegro_reorient_policy
+    num_envs: 64
+    control_steps: 400
+    seed: 100
+  throughput_benchmark:
+    module: isaaclab_neural.eval.allegro_benchmark
+    checkpoint_name: best_eval_model.pt
+    num_envs: [256]
+    warmup: 10
+    steps: 50
+    breakdown_steps: 10
+    profile_steps: 5
+    model_autocast: [fp16]
+    variants:
+      - name: mjwarp_newton_contacts
+      - name: mjwarp_mujoco_contacts
+        args: [--mujoco-contacts]
+      - name: nerd_fp32_eager
+        nerd: true
+        args: [--inference-precision, fp32, --no-inference-compile, --no-frame-cache]
+      - name: nerd_optimized
+        nerd: true
+  dataset_specs:
+    - filename: dataset_policy_a_train.hdf5
+      seed: 0
+      split: train
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+      num_transitions: 15360
+    - filename: dataset_policy_b_train.hdf5
+      seed: 30
+      split: train
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+      num_transitions: 15360
+    - filename: dataset_policy_c_train.hdf5
+      seed: 40
+      split: train
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+      num_transitions: 15360
+    - filename: dataset_policy_noisy_train.hdf5
+      seed: 10
+      split: train
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+      policy_action_noise_std: 0.1
+      num_transitions: 15360
+    - filename: dataset_zero_action_train.hdf5
+      seed: 20
+      split: train
+      task_kind: default
+      zero_actions: true
+      use_policy: false
+      num_transitions: 15360
+    - filename: dataset_policy_valid.hdf5
+      seed: 1
+      split: valid
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+    - filename: dataset_policy_noisy_valid.hdf5
+      seed: 3
+      split: valid
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+      policy_action_noise_std: 0.1
+    - filename: dataset_zero_action_valid.hdf5
+      seed: 2
+      split: valid
+      task_kind: default
+      zero_actions: true
+      use_policy: false

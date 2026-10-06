@@ -81,7 +81,9 @@ uv run --no-sync python -m isaaclab_neural.train.train \
 The recipe uses the Franka Lift model, losses and weighted mixed-source loading
 with the SO101 throughput settings: the streaming trunk (`relative_lag` attention
 spans), the frame cache, FP16 online inference, `inference_compile` and pinned,
-non-blocking batch transfers. Training stays FP32. As for SO101 Keyboard, `algorithm.eval.mode: allegro_policy` replaces
+non-blocking batch transfers, plus fused Adam. Training stays FP32. Like SO101,
+`contact_filter: solver_active` keeps only penetrating native pairs; the filter is
+applied to stored pairs at training time, so it can be ablated without recollection. As for SO101 Keyboard, `algorithm.eval.mode: allegro_policy` replaces
 dataset rollouts: every fifth epoch rank 0 runs the teacher closed loop in the
 training environment with the current weights, logs
 `eval_closed_loop/mean_goals_per_episode` and `drop_rate`, and saves
@@ -114,15 +116,23 @@ teacher used. Submission refuses the NeRD preset if this file would not be packa
 
 **3. Data and NeRD** (`allegro_reorient_mixed`, eight GPUs): evaluates the packaged
 teacher on MJWarp first (`policy_evaluation.json`) and stops before collection below
-`min_mean_goals_per_episode` (2.0). It then collects the six datasets (or reuses the
-dataset cache) and trains NeRD with closed-loop evaluation against the same teacher.
+`min_mean_goals_per_episode` (2.0). It then collects eight balanced shards concurrently,
+one GPU each (`parallel_collection_gpus: 8`; the clean-policy data is split into three
+2M-transition shards with distinct seeds), or reuses the dataset cache, and trains NeRD
+with closed-loop evaluation against the same teacher. Finally, on the then idle GPU 0,
+`throughput_benchmark` times `best_eval_model.pt` against native MJWarp with Newton and
+with MuJoCo contacts, unoptimized and optimized NeRD, at 1024 and 8192 worlds, plus the
+model-only sweep. Reports are in `throughput/`; a failed benchmark is recorded in
+`throughput/summary.json` without failing the workflow.
 
 ```bash
 ./osmo_scripts/start.sh --preset allegro_reorient_mixed --pool <osmo-pool>
 ```
 
-Data collection runs the six dataset splits sequentially on one GPU through the generic
-generator; the other ranks are idle until NeRD training starts.
+`allegro_reorient_teacher_smoke` (30 iterations, run id `allegro-smoke-<id>`) and
+`allegro_reorient_mixed_smoke` (two GPUs, tiny shards, two epochs, its own dataset cache)
+exercise the same stages; stage the smoke teacher's `model_29.pt` under
+`pretrained/control_policy/allegro_reorient/smoke/` before submitting the second one.
 
 ## Throughput comparison
 
@@ -135,6 +145,7 @@ B="uv run --no-sync python -m isaaclab_neural.eval.allegro_benchmark"
 $B model --nerd-checkpoint "$CHECKPOINT" --autocast fp16 --report logs/allegro_bench/model_fp16.json
 # End to end with the teacher: native MJWarp (CUDA graph), then NeRD.
 $B env --checkpoint "$POLICY" --num-envs 8192 --report logs/allegro_bench/mjwarp_8192.json
+$B env --checkpoint "$POLICY" --num-envs 8192 --mujoco-contacts --report logs/allegro_bench/mjwarp_mujoco_8192.json
 $B env --checkpoint "$POLICY" --nerd-checkpoint "$CHECKPOINT" --num-envs 8192 \
   --report logs/allegro_bench/nerd_8192.json
 ```

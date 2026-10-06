@@ -15,3 +15,6 @@ Added
   MJWarp/NeRD throughput comparisons, and made the
   :mod:`isaaclab_neural.eval.keyboard_benchmark` model and environment timers reusable
   for other model widths and decimations.
+* Added Allegro concurrent shard collection, a post-training throughput benchmark stage
+  with a MuJoCo-contact MJWarp baseline, and teacher/pipeline smoke presets. The recipe
+  now filters native pairs to penetrating contacts and uses fused Adam.

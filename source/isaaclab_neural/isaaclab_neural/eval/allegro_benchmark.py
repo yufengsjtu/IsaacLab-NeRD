@@ -52,6 +52,7 @@ def benchmark_env(args: argparse.Namespace) -> dict[str, Any]:
     result: dict[str, Any] = {
         "mode": "env",
         "dynamics": "nerd" if provenance is not None else "native_mjwarp",
+        "contacts": "mujoco" if getattr(args, "mujoco_contacts", False) else "newton",
         "nerd": provenance,
         "num_envs": args.num_envs,
         "physics_dt_s": cfg.sim.dt,
@@ -95,6 +96,11 @@ def main() -> None:
     env = sub.add_parser("env", help="Policy-driven end-to-end environment steps at one world count.")
     env.add_argument("--checkpoint", type=Path, required=True, help="RSL-RL teacher checkpoint.")
     add_nerd_override_args(env)
+    env.add_argument(
+        "--mujoco-contacts",
+        action="store_true",
+        help="Native MJWarp with the core task's MuJoCo contacts instead of the Newton contacts NeRD is trained on.",
+    )
     env.add_argument("--num-envs", type=int, required=True)
     env.add_argument("--seed", type=int, default=43)
     env.add_argument("--warmup", type=int, default=30)

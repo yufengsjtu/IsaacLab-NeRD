@@ -44,6 +44,10 @@ experiment:
   train_num_envs: 256
   trajectory_length: 600
   write_chunk_transitions: 614400
+  # Eight 1-2M-transition dataset shards collected concurrently, one GPU each.
+  parallel_collection_gpus: 8
+  no_time_stamp: true
+  headless: true
   update_dataset_statistics: true
   eval_interval: 5
   policy_checkpoint: ./pretrained/control_policy/allegro_reorient/model_4999.pt
@@ -54,14 +58,42 @@ experiment:
     control_steps: 1500
     seed: 100
     min_mean_goals_per_episode: 2.0
+  throughput_benchmark:
+    module: isaaclab_neural.eval.allegro_benchmark
+    checkpoint_name: best_eval_model.pt
+    num_envs: [1024, 8192]
+    model_autocast: [fp32, fp16]
+    variants:
+      - name: mjwarp_newton_contacts
+      - name: mjwarp_mujoco_contacts
+        args: [--mujoco-contacts]
+      - name: nerd_fp32_eager
+        nerd: true
+        args: [--inference-precision, fp32, --no-inference-compile, --no-frame-cache]
+      - name: nerd_optimized
+        nerd: true
   dataset_specs:
-    - filename: dataset_policy_train.hdf5
+    - filename: dataset_policy_a_train.hdf5
       seed: 0
       split: train
       task_kind: default
       zero_actions: false
       use_policy: true
-      num_transitions: 6000000
+      num_transitions: 2000000
+    - filename: dataset_policy_b_train.hdf5
+      seed: 30
+      split: train
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+      num_transitions: 2000000
+    - filename: dataset_policy_c_train.hdf5
+      seed: 40
+      split: train
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+      num_transitions: 2000000
     - filename: dataset_policy_noisy_train.hdf5
       seed: 10
       split: train

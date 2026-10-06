@@ -1,0 +1,37 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Short allegro_reorient_teacher check: 1024 worlds, 30 iterations, W&B upload under run id
+# allegro-smoke-<id> and the MJWarp baseline. Its final model_29.pt is staged under
+# pretrained/control_policy/allegro_reorient/smoke/ for allegro_reorient_mixed_smoke.
+
+workflow:
+  base_name: allegro-reorient-teacher-smoke
+  dataset_subdir: allegro-reorient-teacher-smoke
+  image: docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095
+
+resources:
+  num_gpu: 1
+  num_cpu: 12
+  memory: 64Gi
+  storage: 128Gi
+  platform: ovx-l40
+
+experiment:
+  teacher_only: true
+  teacher_policy:
+    task: Isaac-Reorient-Cube-Allegro-Policy-v0
+    experiment_name: allegro_reorient_teacher_smoke
+    num_gpus: 1
+    num_envs: 1024
+    max_iterations: 30
+    seed: 42
+    wandb_project: rl
+    wandb_run_id_prefix: allegro-smoke
+    evaluation:
+      module: isaaclab_neural.eval.allegro_reorient_policy
+      num_envs: 64
+      control_steps: 400
+      seed: 100

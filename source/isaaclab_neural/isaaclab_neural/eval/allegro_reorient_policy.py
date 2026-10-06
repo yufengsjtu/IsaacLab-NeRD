@@ -27,6 +27,9 @@ from isaaclab_neural.eval.eval import build_policy_env, load_saved_agent_cfg_for
 ALLEGRO_REORIENT_POLICY_TASK = "Isaac-Reorient-Cube-Allegro-Policy-v0"
 """Task whose dynamics, observations and resets the policy and the NeRD data share."""
 
+ALLEGRO_REORIENT_CORE_TASK = "Isaac-Reorient-Cube-Allegro"
+"""Core task with MuJoCo's internal contacts, an alternative native-MJWarp throughput baseline."""
+
 
 def summarize_reorient_episodes(episodes: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate completed episodes into goals per episode and drop rate.
@@ -150,6 +153,8 @@ def add_nerd_override_args(parser: argparse.ArgumentParser) -> None:
 def build_allegro_reorient_env_cfg(args: argparse.Namespace):
     """Resolve the policy task for ``args.num_envs`` worlds, swapping in NeRD when ``args.nerd_checkpoint`` is set.
 
+    ``args.mujoco_contacts`` (optional) selects the core task's native MuJoCo contacts instead, for MJWarp only.
+
     Returns:
         The environment config, the config to launch the simulation with and the NeRD provenance (``None`` for
         native MJWarp).
@@ -159,7 +164,11 @@ def build_allegro_reorient_env_cfg(args: argparse.Namespace):
     from isaaclab_tasks.utils.hydra import resolve_presets
     from isaaclab_tasks.utils.parse_cfg import resolve_task_config
 
-    cfg, _ = resolve_task_config(ALLEGRO_REORIENT_POLICY_TASK, "rsl_rl_cfg_entry_point", overrides=[])
+    mujoco_contacts = bool(getattr(args, "mujoco_contacts", False))
+    if mujoco_contacts and args.nerd_checkpoint is not None:
+        raise ValueError("MuJoCo contacts are a native-MJWarp baseline; NeRD uses Newton contacts.")
+    task = ALLEGRO_REORIENT_CORE_TASK if mujoco_contacts else ALLEGRO_REORIENT_POLICY_TASK
+    cfg, _ = resolve_task_config(task, "rsl_rl_cfg_entry_point", overrides=[])
     cfg = resolve_presets(cfg, {"newton_mjwarp"})
     cfg.scene.num_envs = args.num_envs
     cfg.sim.device = args.device or "cuda:0"

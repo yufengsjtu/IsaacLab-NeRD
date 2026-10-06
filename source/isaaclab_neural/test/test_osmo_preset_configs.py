@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -1672,3 +1673,68 @@ def test_allegro_submit_requires_packaged_teacher(monkeypatch, capsys) -> None:
 
     with pytest.raises(ValueError, match="allegro_reorient_mixed teacher"):
         preset_lib.resolve_submit(args)
+
+
+def test_parallel_collection_isolates_gpus_and_stops_on_failure(tmp_path, monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import run_experiment
+
+    monkeypatch.setattr(run_experiment.time, "sleep", lambda _seconds: None)
+    script = "import os, sys; print(os.environ['CUDA_VISIBLE_DEVICES']); sys.exit(int(sys.argv[1]))"
+    jobs = [(f"job{index}", ["-c", script, "0"]) for index in range(3)]
+    run_experiment.run_parallel_collection(jobs, 2, tmp_path / "logs")
+    devices = {(tmp_path / "logs" / f"job{index}.log").read_text().strip() for index in range(3)}
+    assert devices == {"0", "1"}
+
+    sleeper = ("slow", ["-c", "import time; time.sleep(60)"])
+    with pytest.raises(RuntimeError, match="bad failed with exit code 3"):
+        run_experiment.run_parallel_collection([sleeper, ("bad", ["-c", script, "3"])], 2, tmp_path / "fail")
+
+
+def test_generic_training_overrides_and_throughput_stage(tmp_path, monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import run_experiment
+
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append([str(item) for item in command])
+        if "--report" in command and "fail" not in command:
+            Path(command[command.index("--report") + 1]).write_text('{"status": "ok"}')
+        return SimpleNamespace(returncode=1 if "fail" in command else 0)
+
+    monkeypatch.setattr(run_experiment.subprocess, "run", fake_run)
+    experiment = dict(_load_yaml(PRESET_DIR / "allegro_reorient_mixed_smoke.yaml")["experiment"])
+    run_experiment.run_training(experiment, tmp_path, Namespace(enable_wandb=False))
+    command = calls[0]
+    assert command[command.index("--cfg-overrides") + 1] == experiment["train_cfg_overrides"]
+    keyboard = {**experiment, "dataset_profile": "so101_keyboard"}
+    run_experiment.run_training(keyboard, tmp_path / "keyboard", Namespace(enable_wandb=False))
+    assert "--cfg-overrides" not in calls[1]
+
+    calls.clear()
+    experiment["throughput_benchmark"]["variants"].append({"name": "broken", "args": ["fail"]})
+    summary = run_experiment.run_throughput_benchmarks(experiment, tmp_path)
+    names = set(summary["runs"])
+    assert {"model_fp16", "mjwarp_newton_contacts_256", "nerd_optimized_256", "broken_256"} <= names
+    assert summary["runs"]["broken_256"] == {"exit": 1}
+    nerd = next(call for call in calls if call[call.index("--report") + 1].endswith("nerd_fp32_eager_256.json"))
+    assert nerd[nerd.index("--nerd-checkpoint") + 1].endswith("Allegro-Reorient/nn/best_eval_model.pt")
+    assert "--no-inference-compile" in nerd and nerd[nerd.index("--steps") + 1] == "50"
+    mujoco = next(call for call in calls if "--mujoco-contacts" in call)
+    assert "--nerd-checkpoint" not in mujoco
+
+
+def test_allegro_smoke_presets_mirror_formal_pipeline() -> None:
+    formal = _load_yaml(PRESET_DIR / "allegro_reorient_mixed.yaml")["experiment"]
+    smoke_preset = _load_yaml(PRESET_DIR / "allegro_reorient_mixed_smoke.yaml")
+    smoke = smoke_preset["experiment"]
+    teacher = _load_yaml(PRESET_DIR / "allegro_reorient_teacher_smoke.yaml")["experiment"]["teacher_policy"]
+    final_iteration = teacher["max_iterations"] - 1
+    assert Path(smoke["policy_checkpoint"]).name == f"model_{final_iteration}.pt"
+    assert smoke["policy_checkpoint"] in smoke["train_cfg_overrides"].split()
+    assert [s["filename"] for s in smoke["dataset_specs"]] == [s["filename"] for s in formal["dataset_specs"]]
+    assert smoke["train_cfg"] == formal["train_cfg"]
+    assert smoke_preset["workflow"]["dataset_subdir"] != "allegro-reorient-newton-contacts-v1"
+    assert smoke["parallel_collection_gpus"] == smoke["num_gpus"] == smoke_preset["resources"]["num_gpu"]
+    assert formal["parallel_collection_gpus"] == len(formal["dataset_specs"]) == 8
