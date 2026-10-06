@@ -16,7 +16,7 @@ resources:
   num_gpu: 2
   num_cpu: 24
   memory: 128Gi
-  storage: 256Gi
+  storage: 200Gi
   platform: ovx-l40
 
 experiment:
