@@ -161,6 +161,11 @@ packaged teacher:
 ```
 
 `allegro_reorient_control_step_smoke` runs the same stages on two GPUs with the smoke teacher.
+Its unoptimized NeRD baseline keeps the frame cache because `reset_history: episode_start`
+requires it. On OSMO (`allegro-reorient-control-step-smoke-20261006-153406-1`, L40, untrained
+model, 256 worlds, not a formal measurement) every stage passed; NeRD ran 12.5k control
+steps/s optimized and 10.7k FP32 eager, against 3.3k for the physics-frame recipe in the
+same setting and 18.1k / 15.1k for MJWarp with Newton / MuJoCo contacts.
 
 ## Throughput comparison
 
