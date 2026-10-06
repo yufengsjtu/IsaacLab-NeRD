@@ -71,9 +71,10 @@ experiment:
       - name: mjwarp_newton_contacts
       - name: mjwarp_mujoco_contacts
         args: [--mujoco-contacts]
+      # reset_history episode_start requires the frame cache, so the baseline keeps it.
       - name: nerd_fp32_eager
         nerd: true
-        args: [--inference-precision, fp32, --no-inference-compile, --no-frame-cache]
+        args: [--inference-precision, fp32, --no-inference-compile]
       - name: nerd_optimized
         nerd: true
   dataset_specs:

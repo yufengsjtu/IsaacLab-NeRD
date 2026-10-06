@@ -118,14 +118,18 @@ def main() -> None:
         from isaaclab_neural.eval.keyboard_benchmark import benchmark_model
         from isaaclab_neural.utils.checkpoint import load_checkpoint
 
-        input_dims, prediction_dim = checkpoint_model_dims(load_checkpoint(args.nerd_checkpoint, device="cpu"))
+        checkpoint = load_checkpoint(args.nerd_checkpoint, device="cpu")
+        input_dims, prediction_dim = checkpoint_model_dims(checkpoint)
+        step_mode = checkpoint["cfg"]["env"]["neural_solver_cfg"].get("step_mode", "physics_frame")
         result = benchmark_model(
             args,
             input_dims=input_dims,
             prediction_dim=prediction_dim,
             num_bodies=ALLEGRO_NUM_BODIES,
             frames_per_control_step=ALLEGRO_FRAMES_PER_CONTROL_STEP,
+            frames_per_call=ALLEGRO_FRAMES_PER_CONTROL_STEP if step_mode == "control_step" else 1,
         )
+        result["step_mode"] = step_mode
     else:
         args.device = args.device or "cuda:0"
         result = benchmark_env(args)

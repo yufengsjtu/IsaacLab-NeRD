@@ -51,7 +51,8 @@ def synthetic_model_inputs(
         batch: Number of worlds.
         valid_tokens: Valid contact rows per world and frame.
         device: Torch device.
-        input_dims: Widths of ``states_embedding`` and ``joint_f``; defaults to SO101 Keyboard.
+        input_dims: Widths of ``states_embedding``, ``joint_f`` and any further low-dimensional inputs such as
+            ``joint_target_offset``; defaults to SO101 Keyboard.
         num_bodies: Primary contact body slots sampled for the token owners.
     """
     input_dims = input_dims or KEYBOARD_INPUT_DIMS
@@ -73,7 +74,13 @@ def synthetic_model_inputs(
         0, num_bodies, (*shape, capacity), generator=generator, device=device
     ).float()
     tokens[..., CONTACT_TOKEN_OTHER_BODY_SLOT_INDEX] = -1.0
+    extra = {
+        name: torch.randn((*shape, width), generator=generator, device=device)
+        for name, width in input_dims.items()
+        if name not in ("states_embedding", "joint_f", "gravity_dir", "contact_tokens")
+    }
     return {
+        **extra,
         "states_embedding": torch.randn((*shape, input_dims["states_embedding"]), generator=generator, device=device),
         "joint_f": torch.randn((*shape, input_dims["joint_f"]), generator=generator, device=device),
         "gravity_dir": torch.randn((*shape, 3), generator=generator, device=device),
@@ -88,11 +95,13 @@ def benchmark_model(
     prediction_dim: int = 228,
     num_bodies: int = KEYBOARD_NUM_BODIES,
     frames_per_control_step: int = PHYSICS_FRAMES_PER_CONTROL_STEP,
+    frames_per_call: int = 1,
 ) -> dict[str, Any]:
     """Time full-window NeRD model calls exactly as the solver issues them (``return_aux``, eval mode).
 
     The keyword arguments default to SO101 Keyboard and describe the model's input widths, prediction width,
-    primary contact bodies and physics frames per control step.
+    primary contact bodies, physics frames per control step and physics frames spanned by one model call
+    (``frames_per_control_step`` for ``step_mode="control_step"`` models).
     """
     from isaaclab_neural.utils.checkpoint import load_checkpoint, reconstruct_model_from_checkpoint
 
@@ -142,8 +151,8 @@ def benchmark_model(
                 "status": "ok",
                 "model_call_ms": ms,
                 "model_calls_per_s": 1000.0 / ms,
-                "physics_frames_per_s": batch * 1000.0 / ms,
-                "control_steps_per_s_model_only": batch * 1000.0 / (ms * frames_per_control_step),
+                "physics_frames_per_s": batch * frames_per_call * 1000.0 / ms,
+                "control_steps_per_s_model_only": batch * frames_per_call * 1000.0 / (ms * frames_per_control_step),
                 "peak_torch_allocated_gib": torch.cuda.max_memory_allocated() / 2**30,
             }
         )
