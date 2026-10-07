@@ -8,7 +8,8 @@
 By default Newton MJWarp (with Newton contacts, as used for data collection) simulates the
 hand and the cube. ``--nerd-checkpoint`` replaces it with learned NeRD dynamics while the
 task, policy, resets and termination thresholds stay unchanged, so goals per episode and
-drop rates are directly comparable.
+drop rates are directly comparable. ``--video-dir`` records world 0 with the headless Newton GL
+visualizer and writes a per-control-step ``reorient_overlay.json`` (goals, episodes, drops).
 """
 
 from __future__ import annotations
@@ -76,10 +77,13 @@ def load_allegro_reorient_policy(env: Any, checkpoint: Path, *, device: str, see
             os.environ["WORLD_SIZE"] = world_size
 
 
-def rollout_reorient_policy(env: Any, wrapped: Any, policy: Any, runner: Any, control_steps: int) -> dict[str, Any]:
+def rollout_reorient_policy(
+    env: Any, wrapped: Any, policy: Any, runner: Any, control_steps: int, on_step: Any = None
+) -> dict[str, Any]:
     """Reset ``env`` and run the policy closed loop, recording every episode that ends.
 
     Call under :func:`torch.inference_mode`. Episodes still running after ``control_steps`` are not recorded.
+    ``on_step(env, episodes)`` is called after every control step.
 
     Returns:
         Recorded episodes, whether states and rewards stayed finite, completed control steps and the reward sum.
@@ -116,6 +120,8 @@ def rollout_reorient_policy(env: Any, wrapped: Any, policy: Any, runner: Any, co
             reset_policy(policy, runner, done)
             reward_sum += float(reward.sum())
             completed += 1
+            if on_step is not None:
+                on_step(env, episodes)
             finite = bool(
                 torch.isfinite(env.scene["robot"].data.joint_pos.torch).all()
                 and torch.isfinite(env.scene["object"].data.root_pose_w.torch).all()
@@ -210,6 +216,50 @@ def build_allegro_reorient_env_cfg(args: argparse.Namespace):
     return cfg, launch_cfg, provenance
 
 
+def add_video_args(parser: argparse.ArgumentParser) -> None:
+    """Add headless Newton GL video options."""
+    parser.add_argument("--video-dir", type=Path, help="Record world 0 to this new directory.")
+    parser.add_argument("--video-length", type=int, default=900, help="Recorded control steps.")
+    parser.add_argument(
+        "--camera-eye", type=float, nargs=3, help="Video camera position [m]; defaults to the task view."
+    )
+    parser.add_argument(
+        "--camera-lookat", type=float, nargs=3, help="Video camera target [m]; defaults to the task view."
+    )
+
+
+def configure_video(cfg: Any, launch_cfg: Any, args: argparse.Namespace) -> None:
+    """Record world 0 at the control rate with the headless Newton GL visualizer (also on the launch config)."""
+    from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
+
+    from isaaclab.envs.utils.video_recorder_cfg import VideoRecorderCfg
+
+    camera = cfg.sim.default_visualizer_cfg
+    fps = round(1.0 / (cfg.sim.dt * cfg.decimation))
+    for target in {id(cfg): cfg, id(launch_cfg): launch_cfg}.values():
+        target.sim.visualizer_cfgs = [
+            NewtonGLVisualizerCfg(
+                headless=True,
+                eye=tuple(args.camera_eye) if args.camera_eye else camera.eye,
+                lookat=tuple(args.camera_lookat) if args.camera_lookat else camera.lookat,
+                window_width=1280,
+                window_height=720,
+            )
+        ]
+        target.video_recorders = [
+            VideoRecorderCfg(
+                source="visualizer:newton_gl",
+                output_dir=str(args.video_dir),
+                video_length=args.video_length,
+                output_filename_prefix="allegro_reorient",
+                fps=fps,
+            )
+        ]
+    args.visualizer = ["newton_gl"]
+    args.visualizer_explicit = True
+    args.max_visible_envs = 1
+
+
 def make_allegro_reorient_env(cfg, nerd: bool):
     """Create the native MJWarp policy environment or its NeRD counterpart from a resolved config."""
     if not nerd:
@@ -233,14 +283,32 @@ def main() -> None:
     parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--control-steps", type=int, default=1500)
     parser.add_argument("--seed", type=int, default=100)
+    add_video_args(parser)
     add_launcher_args(parser)
     args = parser.parse_args()
-    if args.num_envs <= 0 or args.control_steps <= 0:
-        parser.error("environment count and rollout length must be positive")
+    if args.num_envs <= 0 or args.control_steps <= 0 or args.video_length <= 0:
+        parser.error("environment count and rollout/video lengths must be positive")
     if args.report.exists():
         raise FileExistsError(args.report)
+    if args.video_dir is not None and args.video_dir.exists():
+        raise FileExistsError(args.video_dir)
     sys.argv = [sys.argv[0]]
     cfg, launch_cfg, nerd_provenance = build_allegro_reorient_env_cfg(args)
+    if args.video_dir is not None:
+        configure_video(cfg, launch_cfg, args)
+    overlay: list[dict[str, Any]] = []
+
+    def record_overlay(env, episodes):
+        # Headless capture does not dispatch marker callbacks; refresh the goal marker for the next frame.
+        env.sim.vis_marker_registry.dispatch_callbacks()
+        ended = [episode for episode in episodes if episode["world"] == 0]
+        overlay.append(
+            {
+                "goals": int(env.command_manager.get_term("object_pose").metrics["consecutive_success"][0]),
+                "episodes": len(ended),
+                "drops": sum(episode["dropped"] for episode in ended),
+            }
+        )
 
     with launch_simulation(launch_cfg, args):
         env = make_allegro_reorient_env(cfg, nerd_provenance is not None)
@@ -249,7 +317,14 @@ def main() -> None:
                 env, args.checkpoint, device=cfg.sim.device, seed=args.seed
             )
             with torch.inference_mode():
-                rollout = rollout_reorient_policy(env, wrapped, policy, runner, args.control_steps)
+                rollout = rollout_reorient_policy(
+                    env,
+                    wrapped,
+                    policy,
+                    runner,
+                    args.control_steps,
+                    on_step=record_overlay if args.video_dir is not None else None,
+                )
         finally:
             env.close()
     episodes = rollout["episodes"]
@@ -268,6 +343,9 @@ def main() -> None:
     }
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+    if args.video_dir is not None:
+        args.video_dir.mkdir(parents=True, exist_ok=True)
+        (args.video_dir / "reorient_overlay.json").write_text(json.dumps({"frames": overlay}) + "\n")
     print(json.dumps({key: value for key, value in result.items() if key != "episode_records"}, indent=2))
     if not rollout["finite"]:
         raise RuntimeError("Policy evaluation produced non-finite values.")

@@ -207,7 +207,9 @@ uv run --no-sync python -m isaaclab_neural.eval.allegro_reorient_policy \
   --checkpoint "$POLICY" --nerd-checkpoint "$CHECKPOINT" --report logs/allegro_eval/nerd.json --num-envs 64
 ```
 
-Episodes still running after `--control-steps` are not counted. Select NeRD
+Add `--num-envs 1 --video-dir DIR` to record world 0 with the headless Newton GL visualizer at
+the 30 Hz control rate (install the `video` extra, i.e. `moviepy<2`); `DIR/reorient_overlay.json`
+holds the per-step goal, episode and drop counts. Episodes still running after `--control-steps` are not counted. Select NeRD
 checkpoints by this closed-loop comparison rather than validation loss.
 
 **Validation status:** on OSMO (`isaac-lab-l40-07`, L40), `allegro_reorient_teacher_smoke`
