@@ -139,9 +139,7 @@ def sample_trajectory_indices(
     if trajectory_indices:
         indices = np.asarray(trajectory_indices, dtype=np.int64)
         if np.any(indices < 0) or np.any(indices >= num_trajectories):
-            raise ValueError(
-                f"Trajectory indices {indices.tolist()} are outside [0, {num_trajectories})."
-            )
+            raise ValueError(f"Trajectory indices {indices.tolist()} are outside [0, {num_trajectories}).")
         if indices.size == 1 and num_envs > 1:
             return np.full(num_envs, int(indices[0]), dtype=np.int64)
         if indices.size != num_envs:
@@ -392,11 +390,10 @@ def _pace_playback(args: argparse.Namespace, last_time: float) -> float:
 def run_replay(env_cfg, args: argparse.Namespace, info: ReplayDatasetInfo) -> None:
     """Launch the Dataset-Gen env and kinematically play selected trajectories."""
     import gymnasium as gym
-
-    from isaaclab.app import launch_simulation
-
     from isaaclab_neural.generate.adapter import DataGenerationAdapter
     from isaaclab_neural.utils.usd_utils import newton_material_binding_api_autofix
+
+    from isaaclab.app import launch_simulation
 
     if args.num_envs <= 0:
         raise ValueError("--num-envs must be positive.")

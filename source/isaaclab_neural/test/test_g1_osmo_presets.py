@@ -36,6 +36,186 @@ def _normalize_weights(entries: dict) -> dict[str, float]:
     return {name: float(source["weight"]) / total for name, source in entries.items()}
 
 
+def test_rough_mbpo_preset_has_bounded_manager_based_workers_and_requested_wandb_target():
+    from isaaclab_neural.rl.rsl_rl.mbpo_train import smoke_config, validate_config, worker_command
+
+    preset = _load_yaml(PRESET_DIR / "g1_mbpo_rough.yaml")
+    config = validate_config(preset["experiment"])
+    assert preset["workflow"]["kind"] == "mbpo"
+    assert preset["resources"]["num_gpu"] == 1
+    assert preset["resources"]["num_cpu"] <= 15
+    assert preset["wandb"] == {"enabled": True, "project": "rl", "group": "mbpo-g1-rough", "save_checkpoints": False}
+    assert config["iterations"] == 3000 and config["warmup_iterations"] == 32
+    assert config["model_envs"] == 4096 and config["rollout_schedule"] == [0, 1, 24, 24]
+    assert config["model_eval_rows"] == 256 and config["model_fit_files_per_chunk"] == 512
+    assert config["model_first_update"] == 25 and config["model_pd_mode"] == "torch"
+    assert config["model_holdout_env_ids"] == [7, 15, 23, 31]
+    assert config["terrain_profile"] == "stock" and config["physics_events"] == "stock"
+    assert config["ppo_runner"] == "stock_rough"
+    assert config["feet_contact_separation"] == 0.0025
+    smoke = smoke_config(config)
+    assert smoke["terrain_seed"] == config["terrain_seed"]
+    assert smoke["iterations"] == 2 and smoke["model_envs"] < config["model_envs"]
+    config["dynamics_path"] = "flat_f_pre.pt"
+    for role in ("init", "mj_collect", "nerd_train", "model_fit"):
+        command = worker_command(
+            config, Path("config.json"), Path(role), role, None if role == "init" else Path("rough_init.pt")
+        )
+        assert command[command.index("--terrain") + 1] == "rough"
+        assert command[command.index("--scene-config") + 1] == "config.json"
+        assert "logs/g1_mbpo" not in " ".join(command)
+    with pytest.raises(ValueError):
+        validate_config({"model_holdout_env_ids": [32]})
+    with pytest.raises(ValueError):
+        validate_config({"model_first_update": 100, "warmup_iterations": 4})
+    with pytest.raises(ValueError):
+        validate_config({"terrain_difficulty_max": 1.1})
+    with pytest.raises(ValueError, match="feet_contact_separation"):
+        validate_config({"feet_contact_separation": 0.05})
+
+
+def test_mbpo_output_budget_skips_files_renamed_during_scan(monkeypatch, tmp_path):
+    from isaaclab_neural.rl.rsl_rl.mbpo_train import output_size
+
+    (tmp_path / "kept.pt").write_bytes(b"x" * 7)
+    vanishing = tmp_path / "real_rollouts" / "rollout_01128.pt.partial"
+    vanishing.parent.mkdir()
+    vanishing.write_bytes(b"x" * 100)
+    original, calls = Path.stat, {}
+
+    def racing_stat(self, *args, **kwargs):
+        # is_file() sees the worker's temporary file; it is renamed before the size is read.
+        if self == vanishing:
+            calls[self] = calls.get(self, 0) + 1
+            if calls[self] > 1:
+                raise FileNotFoundError(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", racing_stat)
+    assert output_size(tmp_path) == 7
+
+
+def test_rough_mbpo_smoke_respects_existing_model_fit_world_budget():
+    from isaaclab_neural.rl.rsl_rl.mbpo_train import smoke_config, validate_config
+
+    config = validate_config(_load_yaml(PRESET_DIR / "g1_mbpo_rough.yaml")["experiment"])
+    assert smoke_config(config)["model_fit_envs"] in (4, 16)
+    for unsupported in (8, 32):
+        with pytest.raises(ValueError, match="model fitting"):
+            validate_config({"model_fit_envs": unsupported})
+
+
+def test_mbpo_workflow_uses_secret_reference_and_cannot_submit_without_confirmation(monkeypatch, tmp_path):
+    monkeypatch.syspath_prepend(str(REPO_ROOT / "osmo_scripts"))
+    monkeypatch.setenv("WANDB_API_KEY", "test-secret-not-for-workflow")
+    import submit_mbpo
+
+    preset = submit_mbpo.load_preset("g1_mbpo_rough")
+    workflow = submit_mbpo.render_workflow(
+        preset, "mbpo-test", "IsaacLab-NeRD-MBPO-G1-Rough-test", "test-wandb", "test-entity", tmp_path / "inputs.json"
+    )
+    task = workflow["workflow"]["tasks"][0]
+    assert task["credentials"] == {
+        "test-wandb": {"WANDB_API_KEY": "api_key"},
+        "nvdataset_cred": {"NGC_API_KEY": "nvapi_key", "NVDATASET_TENANTID": "tenant_id"},
+    }
+    assert "WANDB_API_KEY" not in task["environment"] and "NGC_API_KEY" not in task["environment"]
+    assert task["environment"]["NVDATASET_INPUT_DATASET"] == "IsaacLab-NeRD-MBPO-G1-Rough-test"
+    assert task["environment"]["NVDATASET_OUTPUT_DATASET"] == "IsaacLab-NeRD-Output"
+    assert "test-secret-not-for-workflow" not in str(workflow)
+    assert "inputs" not in task and "outputs" not in task
+    assert not any(word in str(workflow) for word in ("s3://", "backblaze", "{{input", "{{output"))
+    assert workflow["workflow"]["resources"]["default"]["gpu"] == 1
+    assert "/tmp/nvdataset_io.py" in {entry["path"] for entry in task["files"]}
+    assert "artifactory" not in str(workflow) and "NVDATASET_PYTHON" in task["files"][0]["contents"]
+    assert workflow["workflow"]["tasks"][0]["image"].endswith(":g1-develop-sdk095")
+    shipped = [entry for entry in task["files"] if entry["path"].startswith("/tmp/nvdataset")]
+    assert all(Path(entry["localpath"]).is_file() for entry in shipped)
+    assert "--smoke-only" not in task["files"][0]["contents"]
+    with pytest.raises(ValueError, match="separate"):
+        submit_mbpo.render_workflow(preset, "mbpo-test", "inputs", "nvdataset_cred", "entity", tmp_path / "i.json")
+    import subprocess
+
+    subprocess.run(["bash", "-n"], input=task["files"][0]["contents"], text=True, check=True)
+    with pytest.raises(ValueError, match="confirm"):
+        submit_mbpo.submit(Namespace(confirm=False, prepared=tmp_path))
+
+
+def test_mbpo_submission_reuses_credentials_and_rejects_blind_retry(monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    monkeypatch.syspath_prepend(str(REPO_ROOT / "osmo_scripts"))
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    import submit_mbpo
+
+    workflow, manifest = tmp_path / "workflow.yaml", tmp_path / "inputs.json"
+    workflow.write_text("workflow: {}")
+    manifest.write_text("{}")
+    plan = {
+        "name": "mbpo-test",
+        "pool": "pool",
+        "priority": "NORMAL",
+        "uploads": [],
+        "workflow": str(workflow),
+        "workflow_sha256": submit_mbpo.file_digest(workflow),
+        "input_manifest": str(manifest),
+        "input_manifest_sha256": submit_mbpo.file_digest(manifest),
+        "credential": "existing",
+        "create_wandb_credential": False,
+        "storage": {"backend": "nvdataset", "input_dataset": "inputs-test", "index_url": "https://index.invalid"},
+    }
+    (tmp_path / "submission_plan.json").write_text(json.dumps(plan))
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert "PYTHONPATH" not in kwargs.get("env", {})
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setenv("NGC_API_KEY", "test-only")
+    monkeypatch.setenv("NVDATASET_TENANTID", "test-only")
+    monkeypatch.setattr(submit_mbpo.subprocess, "run", run)
+    submit_mbpo.submit(Namespace(confirm=True, prepared=tmp_path))
+    upload = calls[1]
+    assert calls[0][1:3] == ["workflow", "validate"] and calls[2][1:3] == ["workflow", "submit"]
+    assert upload[0] == "uv" and upload[upload.index("--dataset") + 1] == "inputs-test" and "create-files" in upload
+    assert not any(command[1:3] == ["data", "upload"] for command in calls)
+    with pytest.raises(RuntimeError, match="already attempted"):
+        submit_mbpo.submit(Namespace(confirm=True, prepared=tmp_path))
+
+
+def test_nvdataset_input_creation_refuses_to_modify_existing_dataset(monkeypatch, tmp_path):
+    import sys
+    from types import SimpleNamespace
+
+    monkeypatch.syspath_prepend(str(REPO_ROOT / "osmo_scripts"))
+    from lib import nvdataset_io
+
+    created = []
+
+    class Client:
+        def __init__(self, existing):
+            self.existing = existing
+
+        def load_dataset(self, name):
+            if not self.existing:
+                raise ValueError("Did not find dataset", name)
+            return SimpleNamespace(id="existing")
+
+        def create_and_load_dataset(self, name, description):
+            return SimpleNamespace(upload_files=lambda files: created.append((name, files)))
+
+    for existing in (False, True):
+        monkeypatch.setitem(sys.modules, "nvdataset", SimpleNamespace(NVDatasetClient=lambda e=existing: Client(e)))
+        if existing:
+            with pytest.raises(FileExistsError):
+                nvdataset_io.create_dataset_with_files("inputs", [tmp_path / "a"])
+        else:
+            nvdataset_io.create_dataset_with_files("inputs", [tmp_path / "a"])
+    assert created == [("inputs", [str(tmp_path / "a")])]
+
+
 def test_g1_presets_use_public_dockerhub_image():
     for name in G1_PRESETS:
         workflow = _load_yaml(PRESET_DIR / name)["workflow"]

@@ -43,10 +43,7 @@ def _patch_optional_policy_export() -> None:
             try:
                 return export_fn(self, *args, **kwargs)
             except AttributeError as exc:
-                print(
-                    "[WARN] Skipping policy export "
-                    f"({type(exc).__name__}: {exc}). Playback will continue."
-                )
+                print(f"[WARN] Skipping policy export ({type(exc).__name__}: {exc}). Playback will continue.")
                 return None
 
         return _safe_export

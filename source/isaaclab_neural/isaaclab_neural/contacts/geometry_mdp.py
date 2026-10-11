@@ -54,28 +54,64 @@ def _token_owner_local_ids(adapter, tokens: torch.Tensor) -> torch.Tensor:
     return torch.where(token_body_ids >= 0, local_ids, torch.full_like(local_ids, -1))
 
 
+def body_min_separation(adapter, selected: torch.Tensor) -> torch.Tensor:
+    """Return each selected body's minimum signed surface separation over native collision candidates.
+
+    Native pairs are collected before solver-active filtering, so they include candidates with positive
+    separation up to the collision shape margin.
+
+    Args:
+        adapter: Contact adapter exposing ``native_contact_pairs()``, ``body_local_ids`` and ``num_envs``.
+        selected: Robot-local body indices, shape ``(num_selected_bodies,)``.
+
+    Returns:
+        Minimum separation [m] shaped ``(num_envs, num_selected_bodies)``; ``inf`` without a candidate.
+    """
+    pairs = adapter.native_contact_pairs()
+    if pairs is None:
+        raise RuntimeError("Positive geometric contact separation requires native contact pairs.")
+    result = torch.full((adapter.num_envs, len(selected)), float("inf"), device=adapter.device)
+    for side in ("body_ids_0", "body_ids_1"):
+        body = pairs[side]
+        local = torch.where(body >= 0, adapter.body_local_ids[body.clamp(min=0)], torch.full_like(body, -1))
+        values = torch.where(
+            local.unsqueeze(-1) == selected, pairs["separation"].to(result).unsqueeze(-1), float("inf")
+        )
+        result.scatter_reduce_(0, pairs["world_ids"].unsqueeze(-1).expand_as(values), values, reduce="amin")
+    return result
+
+
 def body_contacts(
     body_ids: Sequence[int] | slice,
     *,
     maximum_separation: float = 0.0,
+    env: ManagerBasedRLEnv | None = None,
 ) -> torch.Tensor:
     """Return geometric contact state for selected robot bodies.
 
     A native collision candidate counts as contact when its signed surface
-    separation is at most ``maximum_separation``.
+    separation is at most ``maximum_separation``. Packed contacts contain only
+    solver-active (penetrating) pairs, so a positive ``maximum_separation`` is
+    evaluated on the native candidates instead.
 
     Args:
         body_ids: Robot-local body indices.
         maximum_separation: Largest signed surface separation [m] considered contact.
+        env: Optional environment-scoped adapter provider for matched-MDP analytic baselines.
 
     Returns:
         Contact flags shaped ``(num_envs, num_selected_bodies)``.
     """
-    adapter = _native_contact_adapter()
+    adapter = getattr(env, "geometry_contact_adapter", None)
+    if adapter is None:
+        adapter = _native_contact_adapter()
     if isinstance(body_ids, slice):
         selected = torch.arange(adapter.bodies_per_env, device=adapter.device)[body_ids]
     else:
         selected = torch.as_tensor(body_ids, dtype=torch.long, device=adapter.device)
+
+    if maximum_separation > 0.0:
+        return body_min_separation(adapter, selected) <= maximum_separation
 
     if getattr(adapter, "contact_representation", None) == CONTACT_REPRESENTATION_TOKENS:
         tokens = adapter.contact_tokens
@@ -117,7 +153,7 @@ class GeometryFeetAirTime(ManagerTermBase):
         maximum_separation: float = 0.0,
     ) -> torch.Tensor:
         """Compute touchdown air-time reward from native contact geometry."""
-        contact = body_contacts(body_cfg.body_ids, maximum_separation=maximum_separation)
+        contact = body_contacts(body_cfg.body_ids, maximum_separation=maximum_separation, env=env)
         first_contact = contact & ~self._previous_contact & (self._air_time > 0.0)
         reward = torch.sum((self._air_time - threshold) * first_contact, dim=1)
         reward *= torch.linalg.norm(env.command_manager.get_command(command_name)[:, :2], dim=1) > 0.1
@@ -145,7 +181,7 @@ class GeometryFeetAirTimePositiveBiped(ManagerTermBase):
         env.sim.physics_manager.register_post_step_callback(self._update)
 
     def _update(self) -> None:
-        contact = body_contacts(self._body_ids, maximum_separation=self._maximum_separation)
+        contact = body_contacts(self._body_ids, maximum_separation=self._maximum_separation, env=self._env)
         self._air_time.copy_(torch.where(contact, 0.0, self._air_time + self._dt))
         self._contact_time.copy_(torch.where(contact, self._contact_time + self._dt, 0.0))
 
@@ -204,7 +240,7 @@ class GeometryFeetSlide(ManagerTermBase):
 
     def _update(self) -> None:
         self._history[:, 1:] = self._history[:, :-1].clone()
-        self._history[:, 0] = body_contacts(self._body_ids, maximum_separation=self._maximum_separation)
+        self._history[:, 0] = body_contacts(self._body_ids, maximum_separation=self._maximum_separation, env=self._env)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         if env_ids is None:
@@ -240,8 +276,7 @@ def geometry_undesired_contacts(
     maximum_separation: float = 0.0,
 ) -> torch.Tensor:
     """Count selected bodies touching geometry."""
-    del env
-    return body_contacts(body_cfg.body_ids, maximum_separation=maximum_separation).sum(dim=1)
+    return body_contacts(body_cfg.body_ids, maximum_separation=maximum_separation, env=env).sum(dim=1)
 
 
 def geometry_illegal_contact(
@@ -250,5 +285,4 @@ def geometry_illegal_contact(
     maximum_separation: float = 0.0,
 ) -> torch.Tensor:
     """Terminate when any selected body touches geometry."""
-    del env
-    return torch.any(body_contacts(body_cfg.body_ids, maximum_separation=maximum_separation), dim=1)
+    return torch.any(body_contacts(body_cfg.body_ids, maximum_separation=maximum_separation, env=env), dim=1)

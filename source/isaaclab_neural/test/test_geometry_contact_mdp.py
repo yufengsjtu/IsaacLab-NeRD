@@ -43,6 +43,22 @@ def test_body_contacts_matches_either_side_and_rejects_positive_separation(monke
     )
 
 
+def test_environment_contact_adapter_does_not_replace_neural_global(monkeypatch):
+    import copy
+
+    from isaaclab_neural.contacts.geometry_mdp import geometry_illegal_contact
+
+    original = _install_adapter(monkeypatch)
+    scoped = copy.deepcopy(original)
+    scoped.contact_masks.zero_()
+    env = SimpleNamespace(geometry_contact_adapter=scoped)
+    assert body_contacts([1]).any()
+    assert not body_contacts([1], env=env).any()
+    assert not geometry_illegal_contact(env, SimpleNamespace(body_ids=[1])).any()
+    assert body_contacts([1]).any()
+    assert NewtonNerdManager._nerd_contact_adapter is original
+
+
 def test_body_contacts_reads_contact_tokens(monkeypatch):
     adapter = _install_adapter(monkeypatch)
     adapter.contact_representation = "contact_tokens"
@@ -97,6 +113,31 @@ def test_body_contacts_ignores_padded_newton_body_ids(monkeypatch):
     adapter.body_local_ids = torch.arange(4, dtype=torch.long)
 
     torch.testing.assert_close(body_contacts([0]), torch.tensor([[False]]))
+
+
+def test_positive_separation_reads_native_candidates_not_solver_active_tokens(monkeypatch):
+    adapter = _install_adapter(monkeypatch)
+    adapter.contact_representation = "contact_tokens"
+    adapter.contact_tokens = torch.zeros((2, 1, CONTACT_TOKEN_DIM))
+    adapter.body_local_ids = torch.arange(8, dtype=torch.long) % 4
+    # world 0: body 1 hovers 2 mm, body 2 hovers 8 mm; world 1: body 3 penetrates via the second side.
+    pairs = {
+        "body_ids_0": torch.tensor([1, 2, -1, 5]),
+        "body_ids_1": torch.tensor([-1, -1, 7, -1]),
+        "world_ids": torch.tensor([0, 0, 1, 1]),
+        "separation": torch.tensor([0.002, 0.008, -0.001, 0.03]),
+    }
+    adapter.native_contact_pairs = lambda: pairs
+
+    assert not body_contacts([1, 2, 3]).any()
+    torch.testing.assert_close(
+        body_contacts([1, 2, 3], maximum_separation=0.005),
+        torch.tensor([[True, False, False], [False, False, True]]),
+    )
+    torch.testing.assert_close(
+        body_contacts([1, 2, 3], maximum_separation=0.01),
+        torch.tensor([[True, True, False], [False, False, True]]),
+    )
 
 
 def test_geometry_feet_air_time_rewards_touchdown_after_air(monkeypatch):

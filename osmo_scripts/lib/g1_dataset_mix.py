@@ -82,8 +82,7 @@ def parse_mix_ratios(dataset_mix: Mapping) -> dict[str, float]:
         values = list(dataset_mix["ratios"])
         if len(values) != len(MIX_SOURCE_KEYS):
             raise ValueError(
-                f"dataset_mix.ratios must have {len(MIX_SOURCE_KEYS)} entries "
-                f"{MIX_SOURCE_KEYS}, got {len(values)}."
+                f"dataset_mix.ratios must have {len(MIX_SOURCE_KEYS)} entries {MIX_SOURCE_KEYS}, got {len(values)}."
             )
         ratios = {key: float(value) for key, value in zip(MIX_SOURCE_KEYS, values)}
     else:
@@ -110,9 +109,7 @@ def parse_valid_config(dataset_mix: Mapping) -> tuple[int, tuple[str, ...]]:
     always = tuple(str(value) for value in always_values)
     unknown = [key for key in always if key not in _CORE_VALID_FILES]
     if unknown:
-        raise ValueError(
-            f"dataset_mix.valid.always entries must be in {DEFAULT_VALID_ALWAYS}, got {unknown}."
-        )
+        raise ValueError(f"dataset_mix.valid.always entries must be in {DEFAULT_VALID_ALWAYS}, got {unknown}.")
     ordered = tuple(key for key in DEFAULT_VALID_ALWAYS if key in set(always))
     if not ordered:
         raise ValueError("dataset_mix.valid.always must include at least one core valid source.")
@@ -192,17 +189,13 @@ def expand_g1_dataset_mix(experiment: Mapping) -> list[dict]:
     trajectory_length = int(experiment["trajectory_length"])
     if trajectory_length <= 0:
         raise ValueError("trajectory_length must be positive.")
-    perturbed_length = int(
-        dataset_mix.get("perturbed_trajectory_length", DEFAULT_PERTURBED_TRAJECTORY_LENGTH)
-    )
+    perturbed_length = int(dataset_mix.get("perturbed_trajectory_length", DEFAULT_PERTURBED_TRAJECTORY_LENGTH))
     if perturbed_length <= 0:
         raise ValueError("perturbed_trajectory_length must be positive.")
     reset_length = int(dataset_mix.get("reset_trajectory_length", DEFAULT_RESET_TRAJECTORY_LENGTH))
     if reset_length <= 0:
         raise ValueError("reset_trajectory_length must be positive.")
-    random_fraction = float(
-        dataset_mix.get("perturbed_random_fraction", DEFAULT_PERTURBED_RANDOM_FRACTION)
-    )
+    random_fraction = float(dataset_mix.get("perturbed_random_fraction", DEFAULT_PERTURBED_RANDOM_FRACTION))
     if not 0.0 <= random_fraction <= 1.0:
         raise ValueError("perturbed_random_fraction must be in [0, 1].")
 
@@ -494,9 +487,7 @@ def mix_train_dataset_entries(
                 "weight": ckpt_weight,
                 "max_capacity": count,
             }
-    random_fraction = float(
-        dataset_mix.get("perturbed_random_fraction", DEFAULT_PERTURBED_RANDOM_FRACTION)
-    )
+    random_fraction = float(dataset_mix.get("perturbed_random_fraction", DEFAULT_PERTURBED_RANDOM_FRACTION))
     perturbed_random, perturbed_zero = allocate_counts(
         source_counts["policy_pool_perturbed"],
         [random_fraction, 1.0 - random_fraction],
@@ -533,9 +524,7 @@ def mix_valid_dataset_entries(
         )
     }
     _, always_valid = parse_valid_config(dataset_mix)
-    random_fraction = float(
-        dataset_mix.get("perturbed_random_fraction", DEFAULT_PERTURBED_RANDOM_FRACTION)
-    )
+    random_fraction = float(dataset_mix.get("perturbed_random_fraction", DEFAULT_PERTURBED_RANDOM_FRACTION))
     perturbed_random, perturbed_zero = allocate_counts(
         source_counts["policy_pool_perturbed"],
         [random_fraction, 1.0 - random_fraction],

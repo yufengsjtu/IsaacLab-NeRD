@@ -51,3 +51,25 @@ class G1RoughNeRDPPORunnerCfg(G1FlatNeRDPPORunnerCfg):
     """PPO runner config for rough G1 policy learning on NeRD."""
 
     experiment_name = "g1_rough_nerd"
+
+
+def g1_mbpo_runner_cfg(profile: str) -> RslRlOnPolicyRunnerCfg:
+    """Resolve an explicit rough MBPO runner without changing legacy registered-task defaults.
+
+    Args:
+        profile: ``stock_rough`` for the default Isaac Lab runner, or ``nerd_legacy``.
+
+    Returns:
+        A fresh runner configuration with all preset values resolved.
+
+    Raises:
+        ValueError: The requested runner profile is unsupported.
+    """
+    from isaaclab_tasks.core.velocity.config.g1.agents.rsl_rl_ppo_cfg import G1RoughPPORunnerCfg
+    from isaaclab_tasks.utils.hydra import resolve_presets
+
+    if profile == "stock_rough":
+        return resolve_presets(G1RoughPPORunnerCfg())
+    if profile == "nerd_legacy":
+        return G1RoughNeRDPPORunnerCfg()
+    raise ValueError(f"Unsupported rough MBPO runner profile: {profile}")

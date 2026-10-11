@@ -49,6 +49,7 @@ def resolve_submit(args: argparse.Namespace):
     dataset_subdir = _value(workflow.get("dataset_subdir", workflow_base_name), args.dataset_subdir)
     workflow_name = f"{workflow_base_name}-{args.run_id}"
 
+    _print_shell_assignment("OSMO_WORKFLOW_KIND", workflow.get("kind", "dynamics"))
     _print_shell_assignment("WORKFLOW_BASE_NAME", workflow_base_name)
     _print_shell_assignment("WORKFLOW_NAME", workflow_name)
     _print_shell_assignment("DATASET_SUBDIR", dataset_subdir)

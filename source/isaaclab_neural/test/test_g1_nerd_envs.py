@@ -430,6 +430,91 @@ def test_g1_flat_invalid_state_terminates_finite_outliers_and_rejects_nan():
         term.func(env, **term.params)
 
 
+def test_rough_mbpo_scene_is_fixed_and_does_not_reuse_flat_height_guard():
+    from isaaclab_neural.envs.g1_nerd_env import NerdG1RoughEnvCfg, configure_g1_mbpo_rough
+
+    cfg = NerdG1RoughEnvCfg()
+    original = NerdG1RoughEnvCfg()
+    configure_g1_mbpo_rough(
+        cfg,
+        {
+            "terrain_seed": 123,
+            "terrain_rows": 2,
+            "terrain_cols": 3,
+            "terrain_difficulty_max": 0.25,
+            "policy_observation_corruption": False,
+        },
+    )
+    generator = cfg.scene.terrain.terrain_generator
+    assert generator.seed == 123 and (generator.num_rows, generator.num_cols) == (2, 3)
+    assert generator.difficulty_range == (0.0, 0.25) and not generator.curriculum
+    assert cfg.curriculum.terrain_levels is None
+    assert cfg.scene.height_scanner is not None and cfg.observations.policy.height_scan is not None
+    assert not cfg.observations.policy.enable_corruption
+    assert cfg.terminations.invalid_state.params["maximum_height"] is None
+    assert original.scene.terrain.terrain_generator.num_rows == 10
+    with pytest.raises(ValueError):
+        configure_g1_mbpo_rough(cfg, {"terrain_difficulty_max": 1.1})
+
+
+def test_aligned_rough_mbpo_keeps_stock_terrain_events_and_reward_weights():
+    from isaaclab_neural.envs.g1_nerd_env import NerdG1RoughEnvCfg, configure_g1_mbpo_rough
+
+    from isaaclab.utils.dict import class_to_dict
+
+    from isaaclab_tasks.core.velocity.config.g1.rough_env_cfg import G1RoughEnvCfg
+
+    stock, cfg = G1RoughEnvCfg(), NerdG1RoughEnvCfg()
+    configure_g1_mbpo_rough(
+        cfg, {"terrain_profile": "stock", "physics_events": "stock", "terrain_seed": 42, "role": "mj_collect"}
+    )
+    expected = class_to_dict(stock.scene.terrain.terrain_generator)
+    actual = class_to_dict(cfg.scene.terrain.terrain_generator)
+    expected["seed"] = actual["seed"] = 42
+    assert actual == expected
+    assert cfg.scene.terrain.max_init_terrain_level == stock.scene.terrain.max_init_terrain_level
+    assert class_to_dict(cfg.events) == class_to_dict(stock.events)
+    assert class_to_dict(cfg.curriculum) == class_to_dict(stock.curriculum)
+    assert cfg.rewards.feet_slide.weight == stock.rewards.feet_slide.weight == -0.1
+    assert cfg.mbpo_randomized_physics
+    assert cfg.rewards.feet_air_time.params["maximum_separation"] == 0.0
+
+
+def test_rough_mbpo_feet_contact_margin_applies_only_to_geometry_gait_rewards():
+    from isaaclab_neural.envs.g1_nerd_env import NerdG1RoughEnvCfg, configure_g1_mbpo_rough
+
+    from isaaclab_tasks.core.velocity.config.g1.rough_env_cfg import G1RoughEnvCfg
+
+    cfg = NerdG1RoughEnvCfg()
+    configure_g1_mbpo_rough(cfg, {"terrain_profile": "stock", "role": "nerd_train", "feet_contact_separation": 0.0025})
+    for name in ("feet_air_time", "feet_slide"):
+        assert getattr(cfg.rewards, name).params["maximum_separation"] == 0.0025
+    assert "maximum_separation" not in cfg.terminations.base_contact.params
+    stock = G1RoughEnvCfg()
+    configure_g1_mbpo_rough(
+        stock,
+        {"terrain_profile": "stock", "role": "evaluate", "contact_mdp": "stock", "feet_contact_separation": 0.0025},
+    )
+    assert "maximum_separation" not in stock.rewards.feet_air_time.params
+    with pytest.raises(ValueError, match="feet_contact_separation"):
+        configure_g1_mbpo_rough(NerdG1RoughEnvCfg(), {"feet_contact_separation": 0.05})
+
+
+def test_aligned_rough_runner_is_default_stock_runner():
+    from isaaclab_neural.envs.agents.g1_nerd_rsl_rl_ppo_cfg import g1_mbpo_runner_cfg
+
+    from isaaclab.utils.dict import class_to_dict
+
+    from isaaclab_tasks.core.velocity.config.g1.agents.rsl_rl_ppo_cfg import G1RoughPPORunnerCfg
+    from isaaclab_tasks.utils.hydra import resolve_presets
+
+    runner = g1_mbpo_runner_cfg("stock_rough")
+    stock = resolve_presets(G1RoughPPORunnerCfg())
+    assert class_to_dict(runner) == class_to_dict(stock)
+    assert runner.max_iterations == 3000
+    assert runner.actor.hidden_dims == runner.critic.hidden_dims == [512, 256, 128]
+
+
 def test_g1_rough_nerd_task_uses_rough_agent_cfg():
     from isaaclab_neural.envs.agents.g1_nerd_rsl_rl_ppo_cfg import G1RoughNeRDPPORunnerCfg
 

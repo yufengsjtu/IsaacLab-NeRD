@@ -1,0 +1,15 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# The unchanged G1 training image plus the validated, isolated NV-Datasets SDK venv.
+# OSMO nodes cannot resolve the internal package index, so the SDK must be in the image.
+ARG BASE_IMAGE=docker.io/rowany28070/isaac-lab-nerd@sha256:4a0d84c9d83558d90c6c0ee76f88cf51e887edc206fabcdbe437c89c1a68587c
+ARG SDK_IMAGE=docker.io/rowany28070/isaac-lab-nerd@sha256:0362671e11f48e9a49186295d26d8e37be1e9cbd20cf47f00742d78324a6a651
+FROM ${SDK_IMAGE} AS sdk
+FROM ${BASE_IMAGE}
+COPY --from=sdk /opt/nvdataset-venv /opt/nvdataset-venv
+RUN env -u PYTHONPATH -u PYTHONHOME /opt/nvdataset-venv/bin/python -c \
+      'import importlib.metadata as m; import _cffi_backend, nvdataset.cli.cli; assert m.version("nvdataset") == "0.95.0"'
+ENV NVDATASET_PYTHON=/opt/nvdataset-venv/bin/python

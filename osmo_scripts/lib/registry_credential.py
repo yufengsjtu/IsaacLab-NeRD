@@ -67,8 +67,7 @@ def load_docker_hub_login(
     path = config_path if config_path is not None else docker_config_path()
     if not path.is_file():
         raise RegistryCredentialError(
-            "Docker Hub credentials were not found. Run `docker login`, or set "
-            "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN."
+            "Docker Hub credentials were not found. Run `docker login`, or set DOCKERHUB_USERNAME and DOCKERHUB_TOKEN."
         )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -82,9 +81,7 @@ def load_docker_hub_login(
             entry = auths[key]
             break
     if not isinstance(entry, dict):
-        raise RegistryCredentialError(
-            f"No Docker Hub auth entry in {path}. Run `docker login` for docker.io."
-        )
+        raise RegistryCredentialError(f"No Docker Hub auth entry in {path}. Run `docker login` for docker.io.")
     auth_b64 = entry.get("auth")
     if not auth_b64:
         raise RegistryCredentialError(

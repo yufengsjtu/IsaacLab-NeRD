@@ -32,6 +32,7 @@ G1_PRESET_FILES = {
     "g1_newton_native_shared_per_body_perturb.yaml",
     "g1_newton_native_shared_per_body_policy_noise.yaml",
     "g1_newton_native_smoke.yaml",
+    "g1_mbpo_rough.yaml",
 }
 ADDITIONAL_TRACKED_PRESETS = {
     "anymal_rough_newton_native_shared_per_body_contact_force_rope_active_filter.yaml",

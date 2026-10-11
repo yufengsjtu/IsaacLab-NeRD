@@ -320,6 +320,10 @@ if [[ -n "$OSMO_REGISTRY_CREDENTIAL_OVERRIDE" ]]; then
     resolve_args+=(--registry-credential "$OSMO_REGISTRY_CREDENTIAL_OVERRIDE")
 fi
 eval "$(python3 "$SCRIPT_DIR/lib/preset.py" resolve-submit "${resolve_args[@]}")"
+if [[ "$OSMO_WORKFLOW_KIND" == "mbpo" ]]; then
+    echo "[FATAL] MBPO presets require audited F_pre/recipe inputs. Use osmo_scripts/submit_mbpo.py prepare, then submit --confirm." >&2
+    exit 2
+fi
 
 TMP_DIR="$(mktemp -d)"
 cleanup() {

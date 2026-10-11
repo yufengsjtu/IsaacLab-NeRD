@@ -161,6 +161,22 @@ def replace_dataset_with_files(name: str, files: list[Path], description: str = 
     dataset.upload_files(files=[str(path) for path in files])
 
 
+def create_dataset_with_files(name: str, files: list[Path], description: str = ""):
+    """Create a new NV-Datasets dataset from files, refusing to modify an existing dataset."""
+    import nvdataset
+
+    client = nvdataset.NVDatasetClient()
+    try:
+        client.load_dataset(name=name)
+    except ValueError as exc:
+        if exc.args != ("Did not find dataset", name):
+            raise
+    else:
+        raise FileExistsError(f"Dataset {name!r} already exists; use a new immutable input dataset name.")
+    dataset = client.create_and_load_dataset(name=name, description=description)
+    dataset.upload_files(files=[str(path) for path in files])
+
+
 def _cmd_check(_args: argparse.Namespace):
     import _cffi_backend  # noqa: F401
     import dateutil.parser  # noqa: F401
@@ -194,6 +210,14 @@ def _cmd_replace_files(args: argparse.Namespace):
     )
 
 
+def _cmd_create_files(args: argparse.Namespace):
+    create_dataset_with_files(
+        name=args.dataset,
+        files=[Path(path) for path in args.files],
+        description=args.description,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -219,6 +243,12 @@ def main():
     replace_parser.add_argument("--description", default="")
     replace_parser.add_argument("files", nargs="+")
     replace_parser.set_defaults(func=_cmd_replace_files)
+
+    create_parser = subparsers.add_parser("create-files", help="Create a new dataset from files.")
+    create_parser.add_argument("--dataset", required=True)
+    create_parser.add_argument("--description", default="")
+    create_parser.add_argument("files", nargs="+")
+    create_parser.set_defaults(func=_cmd_create_files)
 
     args = parser.parse_args()
     args.func(args)
