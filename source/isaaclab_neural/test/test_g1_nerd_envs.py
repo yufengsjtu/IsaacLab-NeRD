@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import math
+import os
 from argparse import Namespace
 from types import SimpleNamespace
 
@@ -523,3 +525,105 @@ def test_g1_rough_nerd_task_uses_rough_agent_cfg():
 
     assert task_spec.kwargs["rsl_rl_cfg_entry_point"].endswith(":G1RoughNeRDPPORunnerCfg")
     assert agent_cfg.experiment_name == "g1_rough_nerd"
+
+
+G1_29DOF_BFM_TASKS = ("Isaac-G1-29DoF-BFM-Dataset-Gen-v0", "Isaac-G1-29DoF-BFM-Push-Dataset-Gen-v0")
+
+
+@pytest.mark.parametrize("task_id", G1_29DOF_BFM_TASKS)
+def test_g1_29dof_bfm_tasks_are_registered(task_id: str):
+    from isaaclab_neural.controllers.bfm_zero import BfmZeroLatentActionCfg
+
+    from isaaclab_tasks.utils import load_cfg_from_registry
+
+    cfg = load_cfg_from_registry(task_id, "env_cfg_entry_point")
+    assert isinstance(cfg.actions.bfm, BfmZeroLatentActionCfg)
+    # BFM-Zero runs at 50 Hz on 200 Hz physics
+    assert cfg.sim.dt * cfg.decimation == pytest.approx(0.02)
+    assert cfg.actions.bfm.control_decimation == cfg.decimation
+    assert cfg.terminations.invalid_state.params["maximum_height"] is None
+
+
+def test_g1_29dof_push_variant_updates_pulses_every_step():
+    from isaaclab_neural.envs.g1_29dof_env_cfg import G129DofBfmEnvCfg, G129DofBfmPushEnvCfg
+
+    base, push = G129DofBfmEnvCfg(), G129DofBfmPushEnvCfg()
+    assert base.events.root_pushes is None
+    assert base.events.reset_lying.params["fraction"] == 0.0
+    step_dt = push.sim.dt * push.decimation
+    assert push.events.root_pushes.mode == "interval"
+    assert push.events.root_pushes.interval_range_s == pytest.approx((step_dt, step_dt))
+    assert push.events.reset_lying.params["fraction"] == 0.3
+
+
+def test_g1_29dof_actuator_parameters_cover_every_joint_once():
+    from isaaclab_neural.robots import g1_29dof
+
+    from isaaclab.utils.string import resolve_matching_names_values
+
+    actuator = g1_29dof.G1_29DOF_BFM_CFG.actuators["body"]
+    for table in (actuator.stiffness, actuator.damping, actuator.armature, actuator.joint_effort_limit):
+        ids, _, _ = resolve_matching_names_values(table, g1_29dof.G1_29DOF_JOINT_NAMES)
+        assert sorted(ids) == list(range(29))
+    # BFM-Zero gains follow kp = armature * (2*pi*10 Hz)^2 and kd = 2 * zeta * armature * (2*pi*10 Hz), zeta = 2
+    _, _, kp = resolve_matching_names_values(actuator.stiffness, g1_29dof.G1_29DOF_JOINT_NAMES)
+    _, _, kd = resolve_matching_names_values(actuator.damping, g1_29dof.G1_29DOF_JOINT_NAMES)
+    _, _, armature = resolve_matching_names_values(actuator.armature, g1_29dof.G1_29DOF_JOINT_NAMES)
+    omega = 2.0 * math.pi * 10.0
+    for p, d, a in zip(kp, kd, armature):
+        assert p == pytest.approx(a * omega**2, rel=1e-4)
+        assert d == pytest.approx(4.0 * a * omega, rel=1e-4)
+
+
+def test_g1_29dof_mirror_path_matches_isaaclab_layout(tmp_path):
+    from isaaclab_neural.robots.g1_29dof import g1_29dof_mirror_path
+
+    from isaaclab.utils import assets
+
+    url = "https://example.org:8443/Assets/G1/configuration/base.usd"
+    expected = assets._mirror_path(url, str(tmp_path))
+    assert g1_29dof_mirror_path(url, str(tmp_path)) == expected
+    assert g1_29dof_mirror_path("/local/file.usd", str(tmp_path)) == ""
+
+
+def test_g1_29dof_root_layer_localization_rewrites_only_mirrored_urls(tmp_path):
+    from isaaclab_neural.robots.g1_29dof import g1_29dof_mirror_path, localize_usd_root_layer
+
+    from pxr import Sdf, UsdUtils
+
+    mirrored_url = "https://example.org/Assets/G1/configuration/physics.usda"
+    missing_url = "https://example.org/Assets/G1/configuration/missing.usda"
+    payload = g1_29dof_mirror_path(mirrored_url, str(tmp_path))
+    os.makedirs(os.path.dirname(payload))
+    Sdf.Layer.CreateNew(payload).Save()
+    root_path = str(tmp_path / "root.usda")
+    root = Sdf.Layer.CreateNew(root_path)
+    prim = Sdf.PrimSpec(root, "Robot", Sdf.SpecifierDef)
+    prim.payloadList.Prepend(Sdf.Payload(mirrored_url))
+    prim.referenceList.Prepend(Sdf.Reference(missing_url))
+    root.Save()
+
+    localized = localize_usd_root_layer(root_path, str(tmp_path))
+
+    def asset_paths(path: str) -> set[str]:
+        found: set[str] = set()
+        UsdUtils.ModifyAssetPaths(Sdf.Layer.FindOrOpen(path), lambda p: (found.add(p), p)[1])
+        return found
+
+    assert localized != root_path
+    assert asset_paths(localized) == {payload, missing_url}
+    assert asset_paths(root_path) == {mirrored_url, missing_url}
+    assert localize_usd_root_layer(localized, str(tmp_path)) == localized
+
+
+def test_root_wrench_writes_only_free_joint_entries():
+    from isaaclab_neural.envs.mdp_g1_29dof import write_root_wrench
+
+    joint_f = torch.arange(18, dtype=torch.float32)
+    starts = torch.tensor([0, 9])
+    wrench = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]])
+    write_root_wrench(joint_f, starts, wrench)
+    torch.testing.assert_close(joint_f[0:6], wrench[0])
+    torch.testing.assert_close(joint_f[9:15], wrench[1])
+    torch.testing.assert_close(joint_f[6:9], torch.tensor([6.0, 7.0, 8.0]))
+    torch.testing.assert_close(joint_f[15:18], torch.tensor([15.0, 16.0, 17.0]))

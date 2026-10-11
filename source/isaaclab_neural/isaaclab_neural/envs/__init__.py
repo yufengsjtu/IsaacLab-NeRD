@@ -119,6 +119,20 @@ gym.register(
     },
 )
 
+gym.register(
+    id="Isaac-G1-29DoF-BFM-Dataset-Gen-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={"env_cfg_entry_point": "isaaclab_neural.envs.g1_29dof_env_cfg:G129DofBfmEnvCfg"},
+)
+
+gym.register(
+    id="Isaac-G1-29DoF-BFM-Push-Dataset-Gen-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={"env_cfg_entry_point": "isaaclab_neural.envs.g1_29dof_env_cfg:G129DofBfmPushEnvCfg"},
+)
+
 
 def register_gym_tasks() -> None:
     """Register NeRD gym ids. Safe to use as ``--external_callback``.
