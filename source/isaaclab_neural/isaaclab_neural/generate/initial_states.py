@@ -40,8 +40,7 @@ def load_initial_states_pool(path: str | Path, device: str | torch.device) -> to
             states = np.asarray(handle["data"]["states"])
         if states.ndim != 3:
             raise ValueError(
-                "HDF5 initial-state pools must have shape "
-                f"[num_trajectories, horizon, state_dim], got {states.shape}."
+                f"HDF5 initial-state pools must have shape [num_trajectories, horizon, state_dim], got {states.shape}."
             )
         return torch.as_tensor(states, dtype=torch.float32, device=device).reshape(-1, states.shape[-1])
 

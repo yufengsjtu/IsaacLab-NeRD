@@ -9,11 +9,14 @@ import copy
 import importlib
 import importlib.metadata as metadata
 import os
+import random
 import sys
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 import yaml
@@ -26,6 +29,89 @@ if TYPE_CHECKING:
     from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg
 
 CHECKPOINT_VERSION = 2
+
+
+def save_opd_policy_snapshot(
+    path: str | Path,
+    runner: Any,
+    runner_cfg: Mapping[str, Any],
+    *,
+    updates_completed: int,
+    provenance: Mapping[str, Any],
+) -> None:
+    """Save a local, immutable RSL-RL snapshot with explicit OPD progress and RNG."""
+    if updates_completed < 0:
+        raise ValueError("updates_completed cannot be negative.")
+    if updates_completed == 0 and runner.alg.optimizer.state:
+        raise ValueError("An initial policy must have an empty optimizer state.")
+    path = Path(path)
+    if path.exists():
+        raise FileExistsError(path)
+    payload = runner.alg.save()
+    payload["iter"] = updates_completed - 1
+    payload["infos"] = {
+        "opd": {
+            "version": 1,
+            "ppo_updates_completed": updates_completed,
+            "next_iteration": updates_completed,
+            "origin": "random_initialization",
+            "runner_cfg": copy.deepcopy(dict(runner_cfg)),
+            "learning_rate": float(runner.alg.learning_rate),
+            "provenance": dict(provenance),
+            "rng": {
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+                "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else [],
+            },
+        }
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".partial", dir=path.parent)
+    os.close(descriptor)
+    try:
+        torch.save(payload, temporary)
+        os.link(temporary, path)
+    finally:
+        os.unlink(temporary)
+
+
+def load_opd_policy_snapshot(
+    path: str | Path,
+    runner: Any,
+    *,
+    restore_rng: bool = False,
+    require_initial: bool = False,
+) -> dict[str, Any]:
+    """Restore an OPD snapshot without confusing an untrained policy with iteration zero.
+
+    Collection uses restore_rng=False so data seeds are not replaced by the policy seed.
+    This loader accepts trusted local artifacts, like the existing checkpoint loader.
+    """
+    payload = torch.load(path, map_location=runner.device, weights_only=False)
+    info = payload.get("infos", {}).get("opd")
+    if not info or info.get("version") != 1 or info.get("origin") != "random_initialization":
+        raise ValueError("Not a versioned, randomly initialized OPD policy snapshot.")
+    completed = info["ppo_updates_completed"]
+    if completed < 0 or info["next_iteration"] != completed or payload["iter"] != completed - 1:
+        raise ValueError("Inconsistent OPD policy progress.")
+    if require_initial and (completed != 0 or payload["optimizer_state_dict"]["state"]):
+        raise ValueError("Cold-start collection requires an untrained initial policy.")
+    runner.alg.load(payload, None, strict=True)
+    runner.current_learning_iteration = info["next_iteration"]
+    runner.alg.learning_rate = info["learning_rate"]
+    if any(group["lr"] != runner.alg.learning_rate for group in runner.alg.optimizer.param_groups):
+        raise ValueError("Restored optimizer and adaptive learning rate disagree.")
+    if restore_rng:
+        rng = info["rng"]
+        random.setstate(rng["python"])
+        np.random.set_state(rng["numpy"])
+        torch.set_rng_state(rng["torch"].cpu())
+        if rng["cuda"]:
+            if len(rng["cuda"]) != torch.cuda.device_count():
+                raise ValueError("CUDA device count changed since the policy snapshot.")
+            torch.cuda.set_rng_state_all([state.cpu() for state in rng["cuda"]])
+    return info
 
 
 def load_saved_agent_cfg_for_policy(

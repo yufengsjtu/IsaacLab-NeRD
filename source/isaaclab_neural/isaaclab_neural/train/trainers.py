@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import shutil
 import traceback
@@ -174,6 +175,67 @@ def _synchronize_running_mean_std(rms: RunningMeanStd, epsilon: float = 1.0e-4) 
     rms.count.copy_(global_count.to(rms.count.dtype))
 
 
+def validate_finetune_checkpoint(checkpoint: dict | None, model: Any, *, update_statistics: bool) -> None:
+    """Reject fine-tuning without frozen checkpoint normalization and loss scaling."""
+    if checkpoint is None:
+        raise ValueError("Finetune requires a checkpoint.")
+    if update_statistics:
+        raise ValueError("Finetune requires frozen dataset statistics.")
+    if getattr(model, "input_rms", None) is None or getattr(model, "output_rms", None) is None:
+        raise ValueError("Finetune requires checkpoint input/output RMS.")
+    for statistics in (model.input_rms, model.output_rms):
+        if not all(torch.isfinite(value).all() for value in statistics.state_dict().values()):
+            raise ValueError("Finetune requires finite checkpoint RMS statistics.")
+    if "loss_weights" not in checkpoint or not torch.isfinite(torch.as_tensor(checkpoint["loss_weights"])).all():
+        raise ValueError("Finetune requires finite checkpoint loss_weights.")
+    if (
+        getattr(model, "predict_body_net_contact_forces", False)
+        and getattr(model, "body_net_contact_force_rms", None) is None
+    ):
+        raise ValueError("Finetune requires checkpoint force RMS for an enabled force head.")
+
+
+def _masked_time_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    if mask.dtype != torch.bool or tuple(mask.shape) != tuple(value.shape[:2]):
+        raise ValueError("supervision_mask must be boolean with shape [batch, time].")
+    counts = mask.sum(dim=1)
+    if not bool((counts > 0).all()):
+        raise ValueError("Every window must contain at least one supervised label.")
+    per_time = value.flatten(2).mean(dim=-1) if value.ndim > 2 else value
+    return (per_time.masked_fill(~mask, 0.0).sum(dim=1) / counts).mean()
+
+
+def masked_dynamics_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    loss_func: torch.nn.Module,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Average supervised error per window without weighting long contexts more heavily.
+
+    Prediction and target have matching target units and shape [batch, time, features].
+    A missing mask preserves the existing loss reduction.
+    """
+    if mask is None:
+        return loss_func(prediction, target)
+    if prediction.shape != target.shape:
+        raise ValueError("Prediction and target must have identical shape.")
+    if mask.dtype != torch.bool or tuple(mask.shape) != tuple(prediction.shape[:2]):
+        raise ValueError("supervision_mask must be boolean with shape [batch, time].")
+    expanded_mask = mask.reshape(*mask.shape, *([1] * (prediction.ndim - 2)))
+    prediction = torch.where(expanded_mask, prediction, 0.0)
+    target = torch.where(expanded_mask, target, 0.0)
+    if isinstance(loss_func, torch.nn.MSELoss):
+        value = torch.nn.functional.mse_loss(prediction, target, reduction="none")
+    elif isinstance(loss_func, torch.nn.L1Loss):
+        value = torch.nn.functional.l1_loss(prediction, target, reduction="none")
+    elif isinstance(loss_func, torch.nn.SmoothL1Loss):
+        value = torch.nn.functional.smooth_l1_loss(prediction, target, reduction="none", beta=loss_func.beta)
+    else:
+        raise ValueError("Masked dynamics supervision requires MSE, L1 or SmoothL1 loss.")
+    return _masked_time_mean(value, mask)
+
+
 class TrainingEnvAdapter:
     """Expose the small environment surface needed by NeRD trainers."""
 
@@ -221,6 +283,9 @@ class VanillaTrainer:
         cli_cfg = cfg["cli"]
 
         self.cfg = cfg
+        self.checkpoint_mode = cli_cfg.get("checkpoint_mode", "resume")
+        if self.checkpoint_mode not in {"resume", "finetune"}:
+            raise ValueError(f"Invalid checkpoint mode: {self.checkpoint_mode}")
         self.seed = algo_cfg.get("seed", 0)
         self.device = device
         self.is_distributed = bool(cli_cfg.get("distributed", False))
@@ -232,6 +297,9 @@ class VanillaTrainer:
         self.rng = np.random.default_rng(seed=self.seed)
 
         self.neural_env = adapt_training_env(neural_env)
+        self.training_dt = float(algo_cfg.get("data_dt", self.neural_env.frame_dt))
+        if not np.isfinite(self.training_dt) or self.training_dt <= 0:
+            raise ValueError("data_dt must be finite and positive [s].")
         self.neural_solver = self.neural_env.solver_neural
         self.neural_env.neural_adapter.sync(update_history=False)
 
@@ -257,6 +325,11 @@ class VanillaTrainer:
         else:
             self.neural_model = reconstruct_model_from_checkpoint(
                 self._checkpoint, self.neural_solver, device=self.device
+            )
+
+        if self.checkpoint_mode == "finetune":
+            validate_finetune_checkpoint(
+                checkpoint, self.neural_model, update_statistics=algo_cfg.get("update_dataset_statistics", True)
             )
 
         if self.is_main_process:
@@ -370,6 +443,10 @@ class VanillaTrainer:
             else:
                 print_info("Using dataset statistics from checkpoint...")
                 self.loss_weights = self._checkpoint["loss_weights"].to(self.device)
+                if "contact_rms_counts" in self._checkpoint:
+                    self.contact_rms_counts = {
+                        key: value.to(self.device) for key, value in self._checkpoint["contact_rms_counts"].items()
+                    }
 
             self._wrap_distributed_model()
             self._init_optimizer(algo_cfg)
@@ -449,6 +526,8 @@ class VanillaTrainer:
             self.dataset_rms[key] = rms
 
     def _restore_training_state(self) -> None:
+        if getattr(self, "checkpoint_mode", "resume") == "finetune":
+            return
         checkpoint = self._checkpoint
         if checkpoint is None:
             raise RuntimeError("Cannot restore training state without a checkpoint.")
@@ -721,6 +800,28 @@ class VanillaTrainer:
             "pin_memory": self.pin_memory,
             "persistent_workers": use_persistent_workers,
         }
+        from isaaclab_neural.data.opd import (
+            ContextBatchSampler,
+            ContextDataset,
+            ContextUpdateSampler,
+            collate_context_update,
+        )
+
+        if isinstance(dataset, ContextDataset):
+            if sampler is not None or self.is_distributed:
+                raise ValueError("OPD context batching currently supports a single process only.")
+            for key in ("batch_size", "shuffle", "sampler", "drop_last"):
+                kwargs.pop(key)
+            sampling = (
+                self.cfg["algorithm"]["dataset"].get("context_sampling") if dataset is self.train_dataset else None
+            )
+            if sampling is not None:
+                if loader_workers != 0:
+                    raise ValueError("Audited context updates require num_data_workers=0 to avoid prefetch exposure.")
+                kwargs["batch_sampler"] = ContextUpdateSampler(dataset, batch_size, seed=self.seed, **sampling)
+                kwargs["collate_fn"] = collate_context_update
+            else:
+                kwargs["batch_sampler"] = ContextBatchSampler(dataset, batch_size, shuffle=shuffle, seed=self.seed)
         if loader_workers > 0:
             kwargs["prefetch_factor"] = self.prefetch_factor
             kwargs["worker_init_fn"] = _data_worker_init
@@ -743,7 +844,7 @@ class VanillaTrainer:
             data["relative_states"] = self.neural_solver.convert_next_states_to_prediction(
                 states=data["states"],
                 next_states=data["next_states"],
-                dt=self.neural_env.frame_dt,
+                dt=getattr(self, "training_dt", self.neural_env.frame_dt),
                 prediction_type="relative",
             )
             contact_masks = data.get("contact_masks")
@@ -864,7 +965,7 @@ class VanillaTrainer:
         data["prediction_target"] = self.neural_solver.convert_next_states_to_prediction(
             states=data["states"],
             next_states=data["next_states"],
-            dt=self.neural_env.frame_dt,
+            dt=getattr(self, "training_dt", self.neural_env.frame_dt),
         )
         return data
 
@@ -877,7 +978,12 @@ class VanillaTrainer:
             prediction = model_output.state_prediction
         else:
             prediction = model_output
-        loss = self.loss_func(prediction * self.loss_weights, prediction_target * self.loss_weights)
+        mask = data.get("supervision_mask")
+        if mask is not None and self.force_head_enabled:
+            raise ValueError("Masked supervision is not supported for the auxiliary force head.")
+        loss = masked_dynamics_loss(
+            prediction * self.loss_weights, prediction_target * self.loss_weights, self.loss_func, mask
+        )
         force_prediction = None
         force_target = None
         force_loss = None
@@ -896,7 +1002,7 @@ class VanillaTrainer:
             predicted_next_states = self.neural_solver.convert_prediction_to_next_states(
                 states=data["states"],
                 prediction=prediction,
-                dt=self.neural_env.frame_dt,
+                dt=getattr(self, "training_dt", self.neural_env.frame_dt),
             )
             self.neural_solver.wrap2PI(predicted_next_states)
             loss_itemized = {
@@ -920,6 +1026,17 @@ class VanillaTrainer:
                 .cpu()
                 .item(),
             }
+            if mask is not None:
+                delta = predicted_next_states - data["next_states"]
+                loss_itemized = {
+                    "state_MSE": float(_masked_time_mean(delta.square(), mask)),
+                    "q_error_norm": float(
+                        _masked_time_mean(delta[..., : self.neural_solver.dof_q_per_env].norm(dim=-1), mask)
+                    ),
+                    "qd_error_norm": float(
+                        _masked_time_mean(delta[..., self.neural_solver.dof_q_per_env :].norm(dim=-1), mask)
+                    ),
+                }
             if force_prediction is not None and force_target is not None and force_loss is not None:
                 loss_itemized["body_force_normalized_MSE"] = float(force_loss.detach().cpu())
                 loss_itemized.update(
@@ -957,16 +1074,27 @@ class VanillaTrainer:
                             self.train_dataset.shuffle()
                         dataloader_iter = iter(dataloader)
                         data = next(dataloader_iter)
-                    data = self.preprocess_data_batch(data)
-
-                with TimeProfiler(self.time_report, "compute_loss"):
-                    if train:
-                        self.optimizer.zero_grad()
-                    loss, loss_itemized = self.compute_loss(data, train)
-
+                microbatches = data if isinstance(data, list) else [data]
+                total_anchors = sum(batch["states"].shape[0] for batch in microbatches)
+                if total_anchors == 0:
+                    raise ValueError("An optimizer update cannot contain zero anchors.")
+                if train:
+                    self.optimizer.zero_grad()
+                for microbatch in microbatches:
+                    weight = microbatch["states"].shape[0] / total_anchors
+                    with TimeProfiler(self.time_report, "dataloader"):
+                        microbatch = self.preprocess_data_batch(microbatch)
+                    with TimeProfiler(self.time_report, "compute_loss"):
+                        loss, loss_itemized = self.compute_loss(microbatch, train)
+                    with TimeProfiler(self.time_report, "backward"):
+                        if train:
+                            (loss * weight).backward()
+                    with TimeProfiler(self.time_report, "other"):
+                        sum_loss += loss.detach() * weight
+                        for key, value in loss_itemized.items():
+                            sum_loss_itemized[key] = sum_loss_itemized.get(key, 0.0) + value * weight
                 with TimeProfiler(self.time_report, "backward"):
                     if train:
-                        loss.backward()
                         with torch.no_grad():
                             grad_norm_before_clip = float(grad_norm(self.neural_model.parameters()).detach().cpu())
                             grad_info["grad_norm_before_clip"] += grad_norm_before_clip
@@ -976,11 +1104,6 @@ class VanillaTrainer:
                                     grad_norm(self.neural_model.parameters()).detach().cpu()
                                 )
                         self.optimizer.step()
-
-                with TimeProfiler(self.time_report, "other"):
-                    sum_loss += loss.detach()
-                    for key, value in loss_itemized.items():
-                        sum_loss_itemized[key] = sum_loss_itemized.get(key, 0.0) + value
 
         avg_loss = sum_loss.cpu().item() / num_batches
         avg_loss_itemized = {key: value / num_batches for key, value in sum_loss_itemized.items()}
@@ -1050,6 +1173,12 @@ class VanillaTrainer:
                     num_batches=self.num_train_batches,
                     shuffle=True,
                 )
+                if self.is_main_process and hasattr(train_loader.batch_sampler, "audit"):
+                    audit = train_loader.batch_sampler.audit.summary()
+                    audit["context_sampling"] = self.cfg["algorithm"]["dataset"]["context_sampling"]
+                    audit["sampling_seed"] = self.seed
+                    with (Path(self.log_dir) / f"sampling_audit_epoch{epoch}.json").open("x") as stream:
+                        json.dump(audit, stream, indent=2)
                 avg_valid_losses, avg_valid_losses_itemized = {}, {}
                 main_process_exception = None
                 main_process_traceback = None
@@ -1249,6 +1378,33 @@ class SequenceModelTrainer(VanillaTrainer):
         super().__init__(neural_env, cfg, checkpoint, device)
 
     def get_datasets(self, train_dataset_path, valid_datasets_cfg, train_datasets_cfg=None) -> None:
+        contexts = self.cfg["algorithm"]["dataset"].get("context_datasets")
+        if contexts is not None:
+            from isaaclab_neural.data.opd import ContextDataset
+
+            if train_dataset_path is not None or train_datasets_cfg is not None or valid_datasets_cfg is not None:
+                raise ValueError("context_datasets cannot be combined with legacy dataset path settings.")
+            if self.checkpoint_mode != "finetune" or self.is_distributed or self.force_head_enabled:
+                raise ValueError("OPD contexts require single-process finetune without an auxiliary force head.")
+            if "data_dt" not in self.cfg["algorithm"]:
+                raise ValueError("OPD contexts require explicit data_dt [s].")
+            options = {
+                "physics_dt": self.training_dt,
+                "max_history": self.neural_solver.num_states_history,
+                "max_contact_tokens": self.neural_solver.max_contact_tokens,
+                "contact_filter": self.neural_solver.contact_filter,
+                "state_dim": self.neural_solver.state_dim,
+                "joint_f_dim": self.neural_solver.joint_f_dim,
+            }
+            self.train_dataset_rank_sharded = False
+            self.train_dataset = ContextDataset(contexts["train"], split="train", **options)
+            for name, paths in contexts.get("validation", {}).items():
+                dataset = ContextDataset(paths, split="validation", **options)
+                if self.train_dataset.families & dataset.families:
+                    raise ValueError(f"Episode/query family leakage into validation dataset {name}.")
+                self.valid_datasets[name] = dataset
+            self.collate_fn = None
+            return
         self.train_dataset_rank_sharded = self.is_distributed and self.dataset_load_mode == "eager"
         dataset_kwargs = {
             "load_mode": self.dataset_load_mode,

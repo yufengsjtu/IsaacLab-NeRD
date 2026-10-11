@@ -17,6 +17,13 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cfg", type=str, default="./cfg/Cartpole/transformer.yaml", help="Training config YAML.")
     parser.add_argument("--test", action="store_true", help="Run trainer test path instead of training.")
     parser.add_argument("--checkpoint", type=str, default=None, help="Restore model/training state from checkpoint.")
+    parser.add_argument(
+        "--checkpoint-mode",
+        choices=("resume", "finetune"),
+        default="resume",
+        help="Finetune keeps weights and normalization but starts fresh optimizer/progress state.",
+    )
+    parser.add_argument("--data-dt", type=float, default=None, help="Explicit dataset transition interval [s].")
     parser.add_argument("--num-envs", type=int, default=None, help="Override number of envs in task config.")
     parser.add_argument("--update-dataset-statistics", action="store_true", help="Recompute dataset RMS statistics.")
     parser.add_argument("--logdir", type=str, default="./trained_models/ppo/", help="Training log directory.")

@@ -113,6 +113,8 @@ def load_training_cfg(args):
     with open(Path(args.cfg).expanduser()) as cfg_file:
         cfg = yaml.load(cfg_file, Loader=yaml.SafeLoader)
 
+    if args.checkpoint_mode == "finetune" and (args.checkpoint is None or args.update_dataset_statistics):
+        raise ValueError("Finetune requires --checkpoint and frozen dataset statistics.")
     checkpoint = None
     if args.checkpoint is not None:
         checkpoint = load_checkpoint(args.checkpoint, device=args.device)
@@ -139,6 +141,8 @@ def load_training_cfg(args):
     cfg["env"]["render"] = args.render
     cfg["algorithm"]["seed"] = args.seed
     cfg["algorithm"]["update_dataset_statistics"] = args.update_dataset_statistics
+    if args.data_dt is not None:
+        cfg["algorithm"]["data_dt"] = args.data_dt
     args.train = not args.test
     cfg["cli"] = vars(args).copy()
     cfg["cli"]["train"] = args.train

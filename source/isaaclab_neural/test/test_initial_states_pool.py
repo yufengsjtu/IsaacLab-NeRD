@@ -13,7 +13,6 @@ import h5py
 import numpy as np
 import pytest
 import torch
-
 from isaaclab_neural.generate.initial_states import load_initial_states_pool
 
 

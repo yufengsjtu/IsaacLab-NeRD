@@ -1,0 +1,45 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+env:
+  env_name: G1-Native-ContactTokens
+  num_envs: 4
+  neural_solver_cfg:
+    name: TransformerNeuralSolver
+    num_states_history: 10
+
+inputs: {}
+network: {}
+
+algorithm:
+  name: SequenceModelTrainer
+  data_dt: 0.005
+  num_epochs: 1
+  num_iters_per_epoch: 100
+  sample_sequence_length: 10
+  batch_size: 256
+  num_valid_batches: 10
+  truncate_grad: true
+  grad_norm: 1.0
+  update_dataset_statistics: false
+  loss:
+    type: MSE
+  optimizer:
+    type: Adam
+    lr_start: 1.0e-5
+    lr_end: 1.0e-5
+    lr_schedule: constant
+    betas: [0.9, 0.999]
+  dataset:
+    load_mode: lazy
+    num_data_workers: 0
+    context_sampling:
+      source_counts: {reference: 128, current_mj: 64, student: 64}
+      length_weights: {1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1, 9: 1, 10: 36}
+    context_datasets:
+      train: []
+      validation: {}
+  eval:
+    interval: 0

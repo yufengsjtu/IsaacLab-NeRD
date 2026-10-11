@@ -190,11 +190,18 @@ class DataGenerationAdapter:
     contacts into training datasets.
     """
 
-    def __init__(self, env: Any, solver_cfg: Any, *, record_body_net_contact_forces: bool = False):
+    def __init__(
+        self,
+        env: Any,
+        solver_cfg: Any,
+        *,
+        record_body_net_contact_forces: bool = False,
+        backend: NewtonDataGenerationBackend | None = None,
+    ):
         self.env = getattr(env, "unwrapped", env)
         self.solver_cfg = solver_cfg
         self.device = getattr(self.env, "device", "cpu")
-        self.backend = NewtonDataGenerationBackend(self.device)
+        self.backend = backend if backend is not None else NewtonDataGenerationBackend(self.device)
         self.model = self.backend.model
         self.state = self.backend.state
         self.control = self.backend.control
@@ -510,7 +517,9 @@ class DataGenerationAdapter:
         self.sync(overlay_applied_effort=True)
         return result
 
-    def step_action_frame(self, action: torch.Tensor, *, process_action: bool = True):
+    def step_action_frame(
+        self, action: torch.Tensor, *, process_action: bool = True, overlay_applied_effort: bool = True
+    ):
         """Step one physics frame using IsaacLab's action pipeline."""
         action = action.to(self.device)
         if process_action:
@@ -522,7 +531,7 @@ class DataGenerationAdapter:
         if hasattr(self.env, "_sim_step_counter"):
             self.env._sim_step_counter += 1
         self.env.scene.update(dt=getattr(self.env, "physics_dt", 0.0))
-        self.sync(overlay_applied_effort=True)
+        self.sync(overlay_applied_effort=overlay_applied_effort)
         return self.neural_inputs()["states"]
 
     def refresh_policy_mdp(self, dt: float) -> None:
