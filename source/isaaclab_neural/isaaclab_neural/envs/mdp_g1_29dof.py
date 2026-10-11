@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Event terms for G1 29-DoF data collection on the Newton backend."""
+"""Event, command and reward terms for G1 29-DoF tasks on the Newton backend."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING
 import torch
 
 import isaaclab.utils.math as math_utils
-from isaaclab.managers import EventTermCfg, ManagerTermBase, SceneEntityCfg
+from isaaclab.managers import CommandTerm, CommandTermCfg, EventTermCfg, ManagerTermBase, SceneEntityCfg
+from isaaclab.utils.configclass import configclass
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -176,3 +177,122 @@ def reset_root_lying(
     joint_pos = torch.clamp(joint_pos, limits[..., 0], limits[..., 1])
     asset.write_joint_position_to_sim_index(position=joint_pos, env_ids=env_ids)
     asset.write_joint_velocity_to_sim_index(velocity=torch.zeros_like(joint_pos), env_ids=env_ids)
+
+
+def body_roll_pitch(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the heading-frame roll and pitch of one body [rad].
+
+    Args:
+        env: Environment.
+        asset_cfg: Robot with exactly one resolved body.
+
+    Returns:
+        Roll and pitch, each of shape ``[N]``.
+    """
+    asset = env.scene[asset_cfg.name]
+    quat = asset.data.body_quat_w.torch[:, asset_cfg.body_ids[0]]
+    roll, pitch, _ = math_utils.euler_xyz_from_quat(quat)
+    return math_utils.wrap_to_pi(roll), math_utils.wrap_to_pi(pitch)
+
+
+class BaseHeightTorsoCommand(CommandTerm):
+    """Uniformly sampled targets for root height and torso roll and pitch.
+
+    The command is ``[height, roll, pitch]``: root height above the environment origin [m] and heading-frame torso
+    roll and pitch [rad].
+    """
+
+    cfg: BaseHeightTorsoCommandCfg
+
+    def __init__(self, cfg: BaseHeightTorsoCommandCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self._env = env
+        self._torso_cfg = SceneEntityCfg(cfg.asset_name, body_names=cfg.torso_body_name)
+        self._torso_cfg.resolve(env.scene)
+        self._command = torch.zeros(self.num_envs, 3, device=self.device)
+        self.metrics["error_height"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["error_torso"] = torch.zeros(self.num_envs, device=self.device)
+
+    @property
+    def command(self) -> torch.Tensor:
+        """Targets ``[height, roll, pitch]`` [m, rad, rad], shape ``[N, 3]``."""
+        return self._command
+
+    def _update_metrics(self) -> None:
+        asset = self._env.scene[self.cfg.asset_name]
+        height = asset.data.root_pos_w.torch[:, 2] - self._env.scene.env_origins[:, 2]
+        roll, pitch = body_roll_pitch(self._env, self._torso_cfg)
+        self.metrics["error_height"] = (height - self._command[:, 0]).abs()
+        self.metrics["error_torso"] = torch.hypot(roll - self._command[:, 1], pitch - self._command[:, 2])
+
+    def _resample_command(self, env_ids: Sequence[int]) -> None:
+        count = len(env_ids)
+        for column, bounds in enumerate((self.cfg.ranges.height, self.cfg.ranges.roll, self.cfg.ranges.pitch)):
+            self._command[env_ids, column] = math_utils.sample_uniform(*bounds, (count,), device=self.device)
+
+    def _update_command(self) -> None:
+        pass
+
+
+@configclass
+class BaseHeightTorsoCommandCfg(CommandTermCfg):
+    """Configuration of :class:`BaseHeightTorsoCommand`."""
+
+    class_type: type = BaseHeightTorsoCommand
+
+    asset_name: str = "robot"
+    torso_body_name: str = "torso_link"
+
+    @configclass
+    class Ranges:
+        """Uniform sampling ranges."""
+
+        height: tuple[float, float] = (0.45, 0.78)
+        """Root height above the environment origin [m]."""
+
+        roll: tuple[float, float] = (-0.3, 0.3)
+        """Torso roll [rad]."""
+
+        pitch: tuple[float, float] = (-0.3, 0.6)
+        """Torso pitch [rad]; positive leans forward."""
+
+    ranges: Ranges = Ranges()
+
+
+def track_base_height_exp(
+    env: ManagerBasedEnv, command_name: str, std: float, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+    """Reward root-height tracking with ``exp(-err^2 / std^2)``.
+
+    Args:
+        env: Environment.
+        command_name: :class:`BaseHeightTorsoCommand` term name.
+        std: Error scale [m].
+        asset_cfg: Robot.
+
+    Returns:
+        Reward per environment.
+    """
+    height = env.scene[asset_cfg.name].data.root_pos_w.torch[:, 2] - env.scene.env_origins[:, 2]
+    error = height - env.command_manager.get_command(command_name)[:, 0]
+    return torch.exp(-error.square() / std**2)
+
+
+def track_torso_roll_pitch_exp(
+    env: ManagerBasedEnv, command_name: str, std: float, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+    """Reward torso roll and pitch tracking with ``exp(-|err|^2 / std^2)``.
+
+    Args:
+        env: Environment.
+        command_name: :class:`BaseHeightTorsoCommand` term name.
+        std: Error scale [rad].
+        asset_cfg: Robot with the torso body resolved.
+
+    Returns:
+        Reward per environment.
+    """
+    roll, pitch = body_roll_pitch(env, asset_cfg)
+    command = env.command_manager.get_command(command_name)
+    error = (roll - command[:, 1]).square() + (pitch - command[:, 2]).square()
+    return torch.exp(-error / std**2)

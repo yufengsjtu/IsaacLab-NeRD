@@ -348,6 +348,9 @@ class BfmZeroLatentAction(ActionTerm):
                 data.root_ang_vel_b.torch,
             )
             action = self._actor(obs, self._latents).clamp(-1.0, 1.0) * BFM_ZERO_ACTION_RESCALE
+            if self.cfg.action_noise_std > 0.0:
+                noise = self.cfg.action_noise_std * torch.randn_like(action)
+                action = (action + noise).clamp(-BFM_ZERO_ACTION_RESCALE, BFM_ZERO_ACTION_RESCALE)
             self._history.record(action)
             limits = data.joint_pos_limits.torch[:, self._joint_ids]
             self._targets = torch.clamp(self._default + self._scale * action, limits[..., 0], limits[..., 1])
@@ -376,6 +379,12 @@ class BfmZeroLatentActionCfg(ActionTermCfg):
 
     project_latent: bool = True
     """Whether to project input latents to norm :data:`BFM_ZERO_Z_NORM`."""
+
+    action_noise_std: float = 0.0
+    """Standard deviation of Gaussian noise added to the rescaled action at each actor step.
+
+    The noisy action is applied and fed back as ``last_action``, as for a perturbed command on hardware.
+    """
 
     default_joint_pos: dict[str, float] = G1_29DOF_DEFAULT_JOINT_POS
     """Default joint positions of the BFM-Zero action and observation offsets [rad]."""

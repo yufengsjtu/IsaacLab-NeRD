@@ -120,6 +120,46 @@ gym.register(
 )
 
 gym.register(
+    id="Isaac-Velocity-Flat-G1-29DoF-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_neural.envs.g1_29dof_env_cfg:G129DofFlatEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{g1_nerd_agents.__name__}:G129DofFlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-G1-29DoF-Posture-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_neural.envs.g1_29dof_env_cfg:G129DofPostureEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{g1_nerd_agents.__name__}:G129DofPosturePPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Flat-G1-29DoF-NeRD-v0",
+    entry_point=f"{NerdG1FlatEnv.__module__}:NerdG1FlatEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_neural.envs.g1_29dof_env_cfg:NerdG129DofFlatEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{g1_nerd_agents.__name__}:G1FlatNeRDPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Flat-G1-29DoF-Dataset-Gen-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_neural.envs.g1_29dof_env_cfg:G129DofDatasetGenFlatEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{g1_nerd_agents.__name__}:G129DofFlatPPORunnerCfg",
+    },
+)
+
+gym.register(
     id="Isaac-G1-29DoF-BFM-Dataset-Gen-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
@@ -127,10 +167,10 @@ gym.register(
 )
 
 gym.register(
-    id="Isaac-G1-29DoF-BFM-Push-Dataset-Gen-v0",
+    id="Isaac-G1-29DoF-BFM-Perturbed-Dataset-Gen-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
-    kwargs={"env_cfg_entry_point": "isaaclab_neural.envs.g1_29dof_env_cfg:G129DofBfmPushEnvCfg"},
+    kwargs={"env_cfg_entry_point": "isaaclab_neural.envs.g1_29dof_env_cfg:G129DofBfmPerturbedEnvCfg"},
 )
 
 

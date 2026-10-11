@@ -49,11 +49,21 @@ def _sampler_spec(
     kp_scale_range: tuple[float, float] = (0.8, 1.2),
     kd_scale_range: tuple[float, float] = (0.8, 1.2),
     hold_hand_actions: bool = True,
+    bfm_latent_kwargs: dict | None = None,
 ):
-    """Return sampler class and kwargs for a dataset-generation task."""
+    """Return sampler class and kwargs for a dataset-generation task.
+
+    ``bfm_latent_kwargs`` selects :class:`~isaaclab_neural.generate.samplers.g1_29dof_bfm.BfmLatentTrajectorySampler`
+    with those keyword arguments, independent of the robot name.
+    """
     from isaaclab_neural.generate.sampler import ActionTrajectorySampler
     from isaaclab_neural.generate.samplers import AnymalCTrajectorySampler, CartpoleTrajectorySampler
     from isaaclab_neural.generate.samplers.g1 import G1TrajectorySampler
+
+    if bfm_latent_kwargs is not None:
+        from isaaclab_neural.generate.samplers.g1_29dof_bfm import BfmLatentTrajectorySampler
+
+        return BfmLatentTrajectorySampler, bfm_latent_kwargs
 
     if robot_name == "Cartpole":
         return CartpoleTrajectorySampler, {}
@@ -80,6 +90,39 @@ def _sampler_spec(
         return sampler_cls, sampler_kwargs
 
     return ActionTrajectorySampler, {}
+
+
+def bfm_latent_sampler_kwargs(args) -> dict | None:
+    """Translate ``--bfm-*`` CLI options into BFM latent sampler keyword arguments.
+
+    Args:
+        args: Parsed dataset-generation arguments.
+
+    Returns:
+        Sampler keyword arguments, or None unless ``--sample-mode bfm_latent``.
+
+    Raises:
+        ValueError: The latent library is missing or a source weight is malformed.
+    """
+    if args.sample_mode != "bfm_latent":
+        return None
+    if not args.bfm_latent_library:
+        raise ValueError("--bfm-latent-library is required when --sample-mode bfm_latent.")
+    weights = {}
+    for item in args.bfm_source_weights.split(","):
+        name, _, value = item.partition("=")
+        if not value:
+            raise ValueError(f"Malformed --bfm-source-weights entry: '{item}'.")
+        weights[name.strip()] = float(value)
+    return {
+        "latent_library": args.bfm_latent_library,
+        "source_weights": weights,
+        "hold_range_s": (args.bfm_hold_min_s, args.bfm_hold_max_s),
+        "push_force_range": (args.bfm_push_force_min, args.bfm_push_force_max),
+        "push_wait_range_s": (args.bfm_push_wait_min_s, args.bfm_push_wait_max_s),
+        "push_duration_s": args.bfm_push_duration_s,
+        "clips": "holdout" if args.bfm_holdout_only else "all" if args.bfm_include_holdout else "train",
+    }
 
 
 def dataset_path(dataset_dir: str, env_name: str, dataset_name: str) -> Path:
@@ -197,6 +240,7 @@ def main(env_cfg, agent_cfg=None) -> None:
             (args_cli.kp_scale_min, args_cli.kp_scale_max),
             (args_cli.kd_scale_min, args_cli.kd_scale_max),
             hold_hand_actions=not bool(getattr(args_cli, "no_hold_g1_hand_actions", False)),
+            bfm_latent_kwargs=bfm_latent_sampler_kwargs(args_cli),
         )
         sampler = sampler_cls(
             adapter,
@@ -240,6 +284,12 @@ def main(env_cfg, agent_cfg=None) -> None:
             )
 
         def sample_rollouts(num_transitions: int):
+            if args_cli.sample_mode == "bfm_latent":
+                return sampler.sample_trajectories_latent_mode(
+                    num_transitions,
+                    initial_states_source=args_cli.initial_states_source,
+                    render=args_cli.render,
+                )
             if args_cli.sample_mode == "joint_f":
                 return sampler.sample_trajectories_joint_f_mode(
                     num_transitions,

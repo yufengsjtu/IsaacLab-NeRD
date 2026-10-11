@@ -9,6 +9,8 @@ from isaaclab.utils.configclass import configclass
 
 from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
+from isaaclab_tasks.core.velocity.config.g1.agents.rsl_rl_ppo_cfg import G1FlatPPORunnerCfg
+
 
 @configclass
 class G1FlatNeRDPPORunnerCfg(RslRlOnPolicyRunnerCfg):
@@ -51,6 +53,24 @@ class G1RoughNeRDPPORunnerCfg(G1FlatNeRDPPORunnerCfg):
     """PPO runner config for rough G1 policy learning on NeRD."""
 
     experiment_name = "g1_rough_nerd"
+
+
+@configclass
+class G129DofFlatPPORunnerCfg(G1FlatPPORunnerCfg):
+    """Stock flat G1 runner with a separate experiment name for the 29-DoF robot."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "g1_29dof_flat"
+
+
+@configclass
+class G129DofPosturePPORunnerCfg(G1FlatPPORunnerCfg):
+    """Stock flat G1 runner for the 29-DoF height and torso posture task."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "g1_29dof_posture"
 
 
 def g1_mbpo_runner_cfg(profile: str) -> RslRlOnPolicyRunnerCfg:

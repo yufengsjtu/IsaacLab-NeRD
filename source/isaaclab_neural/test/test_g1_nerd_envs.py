@@ -527,7 +527,7 @@ def test_g1_rough_nerd_task_uses_rough_agent_cfg():
     assert agent_cfg.experiment_name == "g1_rough_nerd"
 
 
-G1_29DOF_BFM_TASKS = ("Isaac-G1-29DoF-BFM-Dataset-Gen-v0", "Isaac-G1-29DoF-BFM-Push-Dataset-Gen-v0")
+G1_29DOF_BFM_TASKS = ("Isaac-G1-29DoF-BFM-Dataset-Gen-v0", "Isaac-G1-29DoF-BFM-Perturbed-Dataset-Gen-v0")
 
 
 @pytest.mark.parametrize("task_id", G1_29DOF_BFM_TASKS)
@@ -544,16 +544,51 @@ def test_g1_29dof_bfm_tasks_are_registered(task_id: str):
     assert cfg.terminations.invalid_state.params["maximum_height"] is None
 
 
-def test_g1_29dof_push_variant_updates_pulses_every_step():
-    from isaaclab_neural.envs.g1_29dof_env_cfg import G129DofBfmEnvCfg, G129DofBfmPushEnvCfg
+def test_g1_29dof_perturbed_variant_adds_collection_perturbations():
+    from isaaclab_neural.envs.g1_29dof_env_cfg import G129DofBfmEnvCfg, G129DofBfmPerturbedEnvCfg
 
-    base, push = G129DofBfmEnvCfg(), G129DofBfmPushEnvCfg()
-    assert base.events.root_pushes is None
+    base, perturbed = G129DofBfmEnvCfg(), G129DofBfmPerturbedEnvCfg()
+    assert base.events.root_pushes is None and base.events.actuator_gains is None
     assert base.events.reset_lying.params["fraction"] == 0.0
-    step_dt = push.sim.dt * push.decimation
-    assert push.events.root_pushes.mode == "interval"
-    assert push.events.root_pushes.interval_range_s == pytest.approx((step_dt, step_dt))
-    assert push.events.reset_lying.params["fraction"] == 0.3
+    assert base.actions.bfm.action_noise_std == 0.0
+    step_dt = perturbed.sim.dt * perturbed.decimation
+    assert perturbed.events.root_pushes.mode == "interval"
+    assert perturbed.events.root_pushes.interval_range_s == pytest.approx((step_dt, step_dt))
+    assert perturbed.events.actuator_gains.params["stiffness_distribution_params"] == (0.8, 1.2)
+    assert perturbed.events.reset_lying.params["fraction"] == 0.3
+    assert perturbed.actions.bfm.action_noise_std > 0.0
+
+
+@pytest.mark.parametrize(
+    "task_id",
+    (
+        "Isaac-Velocity-Flat-G1-29DoF-v0",
+        "Isaac-Velocity-Flat-G1-29DoF-Dataset-Gen-v0",
+        "Isaac-Velocity-Flat-G1-29DoF-NeRD-v0",
+        "Isaac-G1-29DoF-Posture-v0",
+    ),
+)
+def test_g1_29dof_velocity_tasks_swap_robot_and_joint_terms(task_id: str):
+    from isaaclab_neural.robots.g1_29dof import G1_29DOF_USD_URL
+
+    from isaaclab_tasks.utils import load_cfg_from_registry
+
+    cfg = load_cfg_from_registry(task_id, "env_cfg_entry_point")
+    assert cfg.scene.robot.spawn.usd_path == G1_29DOF_USD_URL
+    assert cfg.rewards.joint_deviation_fingers is None
+    assert cfg.events.wrist_mass.params["operation"] == "abs"
+    assert ".*_wrist_.*_joint" in cfg.rewards.joint_deviation_arms.params["asset_cfg"].joint_names
+
+
+def test_g1_29dof_posture_task_commands_height_and_torso():
+    from isaaclab_neural.envs.g1_29dof_env_cfg import G129DofPostureEnvCfg
+
+    cfg = G129DofPostureEnvCfg()
+    assert cfg.commands.base_velocity.rel_standing_envs == 1.0
+    assert cfg.commands.posture.ranges.height[0] < cfg.commands.posture.ranges.height[1]
+    assert cfg.observations.policy.posture_command.params["command_name"] == "posture"
+    assert cfg.rewards.track_height.weight > 0.0 and cfg.rewards.track_torso.weight > 0.0
+    assert cfg.rewards.feet_air_time is None
 
 
 def test_g1_29dof_actuator_parameters_cover_every_joint_once():

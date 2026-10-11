@@ -24,7 +24,38 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-name", type=str, default="dataset_train.hdf5", help="Generated HDF5 filename.")
     parser.add_argument("--env-name", type=str, default=None, help="Metadata env name stored in the HDF5 file.")
     parser.add_argument("--robot-name", type=str, default=None, help="Robot key used for default sampling ranges.")
-    parser.add_argument("--sample-mode", choices=["action", "joint_f", "policy"], default="action")
+    parser.add_argument("--sample-mode", choices=["action", "joint_f", "policy", "bfm_latent"], default="action")
+    parser.add_argument(
+        "--bfm-latent-library",
+        type=str,
+        default=None,
+        help="Exported BFM-Zero latent library (.npz) for --sample-mode bfm_latent.",
+    )
+    parser.add_argument(
+        "--bfm-source-weights",
+        type=str,
+        default="tracking=1,goal=1,reward=1,sphere=1,slerp=1",
+        help="Comma-separated relative weights of the BFM latent sources.",
+    )
+    parser.add_argument("--bfm-hold-min-s", type=float, default=1.0, help="Minimum BFM latent segment duration [s].")
+    parser.add_argument("--bfm-hold-max-s", type=float, default=3.0, help="Maximum BFM latent segment duration [s].")
+    parser.add_argument("--bfm-push-force-min", type=float, default=0.0, help="Minimum horizontal root push force [N].")
+    parser.add_argument(
+        "--bfm-push-force-max", type=float, default=0.0, help="Maximum horizontal root push force [N]; 0 disables."
+    )
+    parser.add_argument("--bfm-push-wait-min-s", type=float, default=2.0, help="Minimum interval between pushes [s].")
+    parser.add_argument("--bfm-push-wait-max-s", type=float, default=5.0, help="Maximum interval between pushes [s].")
+    parser.add_argument("--bfm-push-duration-s", type=float, default=0.1, help="Root push duration [s].")
+    parser.add_argument(
+        "--bfm-include-holdout",
+        action="store_true",
+        help="Allow held-out tracking clips, e.g. to build evaluation datasets.",
+    )
+    parser.add_argument(
+        "--bfm-holdout-only",
+        action="store_true",
+        help="Sample tracking latents only from held-out clips (evaluation datasets).",
+    )
     parser.add_argument(
         "--initial-states-source",
         choices=["sample", "input_states_pool", "env"],

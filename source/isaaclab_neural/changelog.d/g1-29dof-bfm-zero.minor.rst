@@ -10,4 +10,4 @@ Added
   CC BY-NC 4.0 weights are not distributed; export them to a file and set ``actor_path`` or ``BFM_ZERO_ACTOR_PATH``.
 * Added root force pulses through Newton's floating-base generalized force (``apply_root_wrench_pulses``) and
   lying-start resets for G1 29-DoF data collection, plus the ``Isaac-G1-29DoF-BFM-Dataset-Gen-v0`` and
-  ``Isaac-G1-29DoF-BFM-Push-Dataset-Gen-v0`` environments.
+  ``Isaac-G1-29DoF-BFM-Perturbed-Dataset-Gen-v0`` environments.

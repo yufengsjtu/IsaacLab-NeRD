@@ -301,3 +301,138 @@ def test_g1_action_mode_can_disable_hand_hold():
     sampler._on_action_rollout_reset(constrain_sampled_actions=True)
     action = torch.ones((2, 2))
     assert torch.equal(sampler._constrain_sampled_action(action.clone()), action)
+
+
+def _write_latent_library(path, holdout=(False, True, False)):
+    import numpy as np
+
+    lengths = (40, 30, 50)
+    offsets = np.cumsum((0,) + lengths)
+    # Frame ``i`` points along (1, (i + 1) / 100), so its index survives the projection to norm 16.
+    tracking = np.zeros((offsets[-1], 256), dtype=np.float32)
+    tracking[:, 0] = 1.0
+    tracking[:, 1] = (np.arange(offsets[-1]) + 1.0) / 100.0
+    np.savez(
+        path,
+        tracking_z=tracking,
+        tracking_offsets=offsets,
+        tracking_holdout=np.array(holdout),
+        goal_z=np.full((2, 256), -1.0, dtype=np.float32),
+        reward_z=np.full((3, 256), -2.0, dtype=np.float32),
+    )
+    return offsets
+
+
+def test_bfm_latent_library_selects_train_or_holdout_clips(tmp_path):
+    from isaaclab_neural.generate.samplers.g1_29dof_bfm import BfmLatentLibrary
+
+    path = tmp_path / "library.npz"
+    offsets = _write_latent_library(path)
+    train = BfmLatentLibrary(str(path), "cpu", clips="train")
+    holdout = BfmLatentLibrary(str(path), "cpu", clips="holdout")
+    assert train.clip_start.tolist() == [offsets[0], offsets[2]]
+    assert holdout.clip_start.tolist() == [offsets[1]]
+    held_frames = set(range(offsets[1] + 1, offsets[2] + 1))
+    static_frames = (100.0 * train.static_z[:, 1] / train.static_z[:, 0]).round().long().tolist()
+    assert not held_frames & set(static_frames)
+    assert len(BfmLatentLibrary(str(path), "cpu", clips="all").clip_start) == 3
+
+
+class _DummyBfmAdapter:
+    def __init__(self, num_envs: int = 3):
+        self.num_envs = num_envs
+        self.device = "cpu"
+        term = SimpleNamespace()
+        manager = SimpleNamespace(get_term=lambda name: term)
+        self.env = SimpleNamespace(
+            cfg=SimpleNamespace(decimation=4, sim=SimpleNamespace(dt=0.005)), action_manager=manager
+        )
+
+    def action_bounds(self, low, high):
+        return torch.tensor([low]), torch.tensor([high])
+
+    def state_bounds(self, **kwargs):
+        return torch.zeros(1), torch.ones(1)
+
+    def joint_force_bounds(self, value):
+        return value
+
+
+def test_bfm_tracking_segments_play_consecutive_frames_of_one_clip(tmp_path):
+    from isaaclab_neural.generate.samplers.g1_29dof_bfm import BfmLatentTrajectorySampler
+
+    path = tmp_path / "library.npz"
+    offsets = _write_latent_library(path)
+    sampler = BfmLatentTrajectorySampler(
+        _DummyBfmAdapter(),
+        latent_library=str(path),
+        source_weights={"tracking": 1.0},
+        hold_range_s=(0.2, 0.2),
+        trajectory_length=1,
+        data_device="cpu",
+    )
+    sampler._reset_schedule()
+    latents = torch.stack([sampler._next_latent() for _ in range(10)])
+    torch.testing.assert_close(latents.norm(dim=-1), torch.full((10, 3), 16.0))
+    frames = (100.0 * latents[..., 1] / latents[..., 0]).round()
+    ids = torch.tensor(offsets)
+    for env in range(3):
+        steps = frames[:, env]
+        assert torch.all(steps[1:] - steps[:-1] == 1.0)
+        clip = int(torch.searchsorted(ids, steps[0].long() - 1, right=True)) - 1
+        assert clip != 1 and steps[-1] <= ids[clip + 1]
+
+
+def test_bfm_slerp_segments_interpolate_on_the_sphere(tmp_path):
+    from isaaclab_neural.generate.samplers.g1_29dof_bfm import BfmLatentTrajectorySampler
+
+    path = tmp_path / "library.npz"
+    _write_latent_library(path)
+    sampler = BfmLatentTrajectorySampler(
+        _DummyBfmAdapter(num_envs=1),
+        latent_library=str(path),
+        source_weights={"slerp": 1.0},
+        hold_range_s=(0.4, 0.4),
+        trajectory_length=1,
+        data_device="cpu",
+    )
+    sampler._reset_schedule()
+    start = sampler._start_z[0] / sampler._start_z[0].norm()
+    target = sampler._target_z[0] / sampler._target_z[0].norm()
+    latents = torch.stack([sampler._next_latent()[0] for _ in range(20)]) / 16.0
+    to_start = torch.arccos((latents @ start).clamp(-1.0, 1.0))
+    to_target = torch.arccos((latents @ target).clamp(-1.0, 1.0))
+    total = torch.arccos((start @ target).clamp(-1.0, 1.0))
+    torch.testing.assert_close(to_start + to_target, total.expand(20), atol=1e-4, rtol=0.0)
+    assert torch.all(to_start[1:] >= to_start[:-1] - 1e-6)
+
+
+def test_bfm_cli_options_select_the_latent_sampler():
+    from argparse import Namespace
+
+    from isaaclab_neural.generate.generate_dataset import _sampler_spec, bfm_latent_sampler_kwargs
+    from isaaclab_neural.generate.samplers.g1_29dof_bfm import BfmLatentTrajectorySampler
+
+    args = Namespace(
+        sample_mode="bfm_latent",
+        bfm_latent_library="lib.npz",
+        bfm_source_weights="tracking=2, goal=0.5",
+        bfm_hold_min_s=1.0,
+        bfm_hold_max_s=2.0,
+        bfm_push_force_min=100.0,
+        bfm_push_force_max=300.0,
+        bfm_push_wait_min_s=2.0,
+        bfm_push_wait_max_s=4.0,
+        bfm_push_duration_s=0.1,
+        bfm_include_holdout=False,
+        bfm_holdout_only=True,
+    )
+    kwargs = bfm_latent_sampler_kwargs(args)
+    assert kwargs["source_weights"] == {"tracking": 2.0, "goal": 0.5}
+    assert kwargs["push_force_range"] == (100.0, 300.0)
+    assert kwargs["clips"] == "holdout"
+    sampler_cls, sampler_kwargs = _sampler_spec(
+        "task", "env", "G1", False, (0.0, 1.0), (0.0, 1.0), bfm_latent_kwargs=kwargs
+    )
+    assert sampler_cls is BfmLatentTrajectorySampler and sampler_kwargs is kwargs
+    assert bfm_latent_sampler_kwargs(Namespace(sample_mode="policy")) is None
