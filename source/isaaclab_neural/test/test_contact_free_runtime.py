@@ -285,9 +285,7 @@ def test_contact_free_training_batch_needs_no_contact_masks() -> None:
 
 def test_upstream_sync_attrs_exist_on_nerd_manager() -> None:
     """Fail when the NewtonManager mirror list names a removed class attribute."""
-    missing = [
-        name for name in NewtonNerdManager._UPSTREAM_SYNC_ATTRS if not hasattr(NewtonNerdManager, name)
-    ]
+    missing = [name for name in NewtonNerdManager._UPSTREAM_SYNC_ATTRS if not hasattr(NewtonNerdManager, name)]
     assert missing == [], f"Stale NewtonManager sync attrs: {missing}"
     NewtonNerdManager._sync_upstream_newton_state()
 

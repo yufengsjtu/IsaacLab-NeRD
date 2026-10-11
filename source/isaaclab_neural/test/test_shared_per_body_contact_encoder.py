@@ -383,6 +383,52 @@ def test_shared_per_body_encoder_preserves_contact_count_information():
     assert not torch.allclose(encoder(one_contact), encoder(two_contacts))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required to test contact-reduction repeatability.")
+def test_shared_per_body_encoder_repeats_identical_cuda_inputs_exactly():
+    with torch.random.fork_rng(devices=[0]):
+        torch.manual_seed(17)
+        encoder = SharedPerBodyContactEncoder(num_bodies=8, device="cuda:0").eval()
+        tokens = torch.randn(4, 10, 64, CONTACT_TOKEN_DIM, device="cuda:0")
+        tokens[..., 0] = 1
+        tokens[..., 1] = torch.arange(64, device="cuda:0") % 3
+        tokens[..., 2] = -1
+        tokens[..., 3] = 0
+        with torch.no_grad():
+            expected = encoder(tokens)
+            for _ in range(24):
+                torch.testing.assert_close(encoder(tokens), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_shared_per_body_pool_matches_explicit_means_and_gradients(dtype):
+    with torch.random.fork_rng():
+        torch.manual_seed(7)
+        encoder = SharedPerBodyContactEncoder(num_bodies=4, body_latent_dim=8, hidden_dim=16).to(dtype=dtype)
+        tokens = torch.randn(2, 3, 9, CONTACT_TOKEN_DIM, dtype=dtype)
+        tokens[..., 0] = 1
+        tokens[..., 1] = torch.tensor([0, 0, 1, 2, 2, 2, -1, 7, 0])
+        tokens[..., 2] = -1
+        tokens[..., 3] = 0
+        tokens[..., -1, 0] = 0
+        tokens.requires_grad_()
+        encoded = encoder._encode_contacts(tokens)
+        pieces = []
+        for body in range(4):
+            mask = ((tokens[..., 1].long() == body) & (tokens[..., 0] > 0.5)).to(dtype).unsqueeze(-1)
+            count = mask.sum(-2)
+            mean = (encoded * mask).sum(-2) / count.clamp_min(1)
+            value = mean + encoder.count_proj(torch.log1p(count))
+            pieces.append(torch.where(count > 0, value, torch.zeros_like(value)))
+        expected = torch.stack(pieces, dim=-2)
+        actual = encoder(tokens)
+        torch.testing.assert_close(actual, expected)
+        variables = [tokens, *encoder.parameters()]
+        actual_grad = torch.autograd.grad(actual.square().sum(), variables, retain_graph=True)
+        expected_grad = torch.autograd.grad(expected.square().sum(), variables)
+        for actual_value, expected_value in zip(actual_grad, expected_grad):
+            torch.testing.assert_close(actual_value, expected_value)
+
+
 def test_shared_per_body_encoder_has_finite_forward_and_backward():
     torch.manual_seed(0)
     encoder = SharedPerBodyContactEncoder(num_bodies=2, body_latent_dim=8, hidden_dim=16)

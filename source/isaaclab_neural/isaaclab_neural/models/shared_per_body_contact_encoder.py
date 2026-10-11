@@ -28,6 +28,8 @@ class SharedPerBodyContactEncoder(nn.Module):
     The per-contact MLP is shared by all primary bodies. Valid contacts are
     grouped by their local primary body slot and pooled with a masked mean plus
     a contact-count projection. Bodies without valid contacts produce zeros.
+    Batched matrix reduction avoids unordered CUDA atomic accumulation for
+    repeated inputs; checkpoint parameter names and dimensions are unchanged.
     """
 
     def __init__(
@@ -98,17 +100,12 @@ class SharedPerBodyContactEncoder(nn.Module):
         valid = valid & (body_slots >= 0) & (body_slots < self.num_bodies)
         contact_features = self._encode_contacts(flat_tokens)
 
-        weights = valid.unsqueeze(-1).to(contact_features.dtype)
-        safe_body_slots = body_slots.clamp(min=0, max=self.num_bodies - 1)
-        set_offsets = torch.arange(num_sets, device=contact_tokens.device).unsqueeze(-1) * self.num_bodies
-        segment_ids = set_offsets + safe_body_slots
-
-        pooled_sums = contact_features.new_zeros((num_sets * self.num_bodies, self.body_latent_dim))
-        pooled_sums.index_add_(
-            0, segment_ids.reshape(-1), (contact_features * weights).reshape(-1, self.body_latent_dim)
+        body_ids = torch.arange(self.num_bodies, device=contact_tokens.device)
+        membership = (valid.unsqueeze(1) & (body_slots.unsqueeze(1) == body_ids[None, :, None])).to(
+            contact_features.dtype
         )
-        counts = contact_features.new_zeros((num_sets * self.num_bodies, 1))
-        counts.index_add_(0, segment_ids.reshape(-1), weights.reshape(-1, 1))
+        pooled_sums = torch.bmm(membership, contact_features).reshape(-1, self.body_latent_dim)
+        counts = membership.sum(dim=-1, keepdim=True).reshape(-1, 1)
 
         pooled_means = pooled_sums / counts.clamp_min(1.0)
         latents = pooled_means + self.count_proj(torch.log1p(counts))

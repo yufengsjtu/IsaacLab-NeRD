@@ -403,7 +403,13 @@ class NeuralSolver(SolverBase):
         # execution, and state writes preserve ordering without extra syncs.
         # NOTE[Jie]: need to remove no_grad if we want the differentiability
         if str(self.torch_device).startswith("cuda"):
-            stream_context = torch.cuda.stream(wp.stream_to_torch(self.device))
+            warp_stream = wp.get_stream(self.device)
+            torch_stream = (
+                torch.cuda.default_stream(self.torch_device)
+                if warp_stream.cuda_stream == 0
+                else wp.stream_to_torch(warp_stream)
+            )
+            stream_context = torch.cuda.stream(torch_stream)
         else:
             stream_context = nullcontext()
 
