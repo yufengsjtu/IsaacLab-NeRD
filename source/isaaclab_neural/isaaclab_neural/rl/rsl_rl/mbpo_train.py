@@ -148,7 +148,8 @@ def validate_config(settings: dict) -> dict:
         raise ValueError("Branch capacity cannot hold one collector iteration.")
     if config["model_data_steps"] != [11, 23]:
         raise ValueError("The H10/16-physics-step window must align with the existing24-control-step PPO rollout.")
-    if type(config["feet_contact_separation"]) not in (int, float) or not 0 <= config["feet_contact_separation"] <= 0.01:
+    separation = config["feet_contact_separation"]
+    if type(separation) not in (int, float) or not 0 <= separation <= 0.01:
         raise ValueError("feet_contact_separation must lie in [0, 0.01] m.")
     if not 0 <= config["terrain_difficulty_min"] <= config["terrain_difficulty_max"] <= 1:
         raise ValueError("Invalid rough terrain difficulty range.")
