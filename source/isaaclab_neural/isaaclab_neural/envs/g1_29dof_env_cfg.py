@@ -239,12 +239,22 @@ class G129DofPostureEnvCfg(G129DofFlatEnvCfg):
 
 @configclass
 class G129DofDatasetGenFlatEnvCfg(G1DatasetGenFlatEnvCfg):
-    """Flat G1 dataset-generation config (rich commands, reset disturbances) with the 29-DoF robot."""
+    """Flat G1 dataset-generation config with the 29-DoF robot and the teacher's command and reset distribution.
+
+    The 29-DoF teacher, trained on stock flat commands with the soft BFM-Zero gains, falls within seconds under the
+    rich dataset commands (backward walking, 1 s resampling) and in about a fifth of episodes under joint-offset
+    resets, both of which the stock 37-joint teacher tolerates. Stock flat commands and resets keep policy datasets on
+    walking states.
+    """
 
     def __post_init__(self) -> None:
         super().__post_init__()
         configure_g1_29dof_robot(self)
         configure_g1_29dof_mjwarp_capacity(self)
+        stock = G1FlatEnvCfg()
+        self.commands.base_velocity = stock.commands.base_velocity
+        self.events.reset_base = stock.events.reset_base
+        self.events.reset_robot_joints = stock.events.reset_robot_joints
 
 
 @configclass

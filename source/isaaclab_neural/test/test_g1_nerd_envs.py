@@ -580,6 +580,17 @@ def test_g1_29dof_velocity_tasks_swap_robot_and_joint_terms(task_id: str):
     assert ".*_wrist_.*_joint" in cfg.rewards.joint_deviation_arms.params["asset_cfg"].joint_names
 
 
+def test_g1_29dof_dataset_gen_keeps_the_teacher_command_and_reset_distribution():
+    from isaaclab_neural.envs.g1_29dof_env_cfg import G129DofDatasetGenFlatEnvCfg
+
+    from isaaclab_tasks.core.velocity.config.g1.flat_env_cfg import G1FlatEnvCfg
+
+    cfg, stock = G129DofDatasetGenFlatEnvCfg(), G1FlatEnvCfg()
+    assert cfg.commands.base_velocity.ranges.lin_vel_x == stock.commands.base_velocity.ranges.lin_vel_x
+    assert cfg.events.reset_robot_joints.params == stock.events.reset_robot_joints.params
+    assert cfg.events.push_robot is None and cfg.terminations.base_contact is None
+
+
 def test_g1_29dof_posture_task_commands_height_and_torso():
     from isaaclab_neural.envs.g1_29dof_env_cfg import G129DofPostureEnvCfg
 
