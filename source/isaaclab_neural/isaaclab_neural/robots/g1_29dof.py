@@ -67,6 +67,21 @@ G1_29DOF_JOINT_NAMES = (
 G1_29DOF_DEFAULT_JOINT_POS = {".*_hip_pitch_joint": -0.1, ".*_knee_joint": 0.3, ".*_ankle_pitch_joint": -0.2}
 """Default joint positions [rad]; unspecified joints default to zero."""
 
+G1_29DOF_WALKING_JOINT_POS = {
+    ".*_hip_pitch_joint": -0.20,
+    ".*_knee_joint": 0.42,
+    ".*_ankle_pitch_joint": -0.23,
+    ".*_elbow_joint": 0.87,
+    "left_shoulder_roll_joint": 0.16,
+    "left_shoulder_pitch_joint": 0.35,
+    "right_shoulder_roll_joint": -0.16,
+    "right_shoulder_pitch_joint": 0.35,
+}
+"""Standing pose of the Isaac Lab 29-DoF G1 locomotion configuration (isaac-sim/IsaacLab PR #8055) [rad]."""
+
+G1_29DOF_WALKING_ROOT_HEIGHT = 0.793
+"""Root height of :data:`G1_29DOF_WALKING_JOINT_POS` above flat ground [m]."""
+
 G1_29DOF_STIFFNESS = {
     ".*_hip_yaw_joint": 40.17924,
     ".*_hip_roll_joint": 99.09843,

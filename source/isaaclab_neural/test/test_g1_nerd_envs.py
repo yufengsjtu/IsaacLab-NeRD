@@ -673,3 +673,88 @@ def test_root_wrench_writes_only_free_joint_entries():
     torch.testing.assert_close(joint_f[9:15], wrench[1])
     torch.testing.assert_close(joint_f[6:9], torch.tensor([6.0, 7.0, 8.0]))
     torch.testing.assert_close(joint_f[15:18], torch.tensor([15.0, 16.0, 17.0]))
+
+
+def test_g1_29dof_walking_task_uses_pr8055_gait_terms_with_bfm_actuators():
+    from isaaclab_neural.controllers.bfm_zero import bfm_zero_action_scale
+    from isaaclab_neural.envs.g1_29dof_env_cfg import G129DofFlatEnvCfg, G129DofPostureEnvCfg
+    from isaaclab_neural.robots.g1_29dof import G1_29DOF_BFM_CFG, G1_29DOF_JOINT_NAMES, G1_29DOF_WALKING_JOINT_POS
+
+    cfg = G129DofFlatEnvCfg()
+    robot = cfg.scene.robot
+    assert robot.actuators["body"].stiffness == G1_29DOF_BFM_CFG.actuators["body"].stiffness
+    assert robot.soft_joint_pos_limit_factor == 0.9
+    assert robot.init_state.joint_pos == G1_29DOF_WALKING_JOINT_POS
+    assert list(cfg.actions.joint_pos.scale.values()) == bfm_zero_action_scale(G1_29DOF_JOINT_NAMES)
+    for name in ("feet_air_time_variance", "feet_flight", "pelvis_height"):
+        assert getattr(cfg.rewards, name).weight < 0.0
+    assert cfg.terminations.base_height.params["minimum_height"] == 0.4
+    posture = G129DofPostureEnvCfg()
+    assert posture.rewards.pelvis_height is None
+
+
+def test_g1_29dof_gait_terms_match_reference_calculations():
+    from isaaclab_neural.envs import mdp_g1_29dof as terms
+
+    air_time = torch.tensor([[0.0, 0.3], [0.2, 0.1], [0.0, 0.0]])
+    data = SimpleNamespace(
+        joint_pos=SimpleNamespace(torch=torch.tensor([[0.1, -0.2, 0.3]] * 3)),
+        default_joint_pos=SimpleNamespace(torch=torch.zeros(3, 3)),
+        root_pos_w=SimpleNamespace(torch=torch.tensor([[0.0, 0.0, 0.5], [0.0, 0.0, 0.9], [0.0, 0.0, 0.3]])),
+    )
+
+    class Scene:
+        sensors = {"feet": SimpleNamespace(data=SimpleNamespace(current_air_time=SimpleNamespace(torch=air_time)))}
+        env_origins = torch.zeros(3, 3)
+
+        def __getitem__(self, name):
+            return SimpleNamespace(data=data)
+
+    env = SimpleNamespace(scene=Scene(), num_envs=3, device="cpu", common_step_counter=0)
+    asset_cfg = SimpleNamespace(name="robot", joint_ids=[0, 2])
+    torch.testing.assert_close(
+        terms.feet_flight(env, SimpleNamespace(name="feet", body_ids=[0, 1])), torch.tensor([0.0, 1.0, 0.0])
+    )
+    torch.testing.assert_close(terms.joint_deviation_l2(env, asset_cfg), torch.full((3,), 0.1**2 + 0.3**2))
+    torch.testing.assert_close(
+        terms.root_height_deficit_l2(env, 0.686, asset_cfg), torch.tensor([0.186**2, 0.0, 0.386**2])
+    )
+    assert not terms.root_height_below_minimum_after_warmup(env, 0.4, 10, asset_cfg).any()
+    env.common_step_counter = 10
+    torch.testing.assert_close(
+        terms.root_height_below_minimum_after_warmup(env, 0.4, 10, asset_cfg), torch.tensor([False, False, True])
+    )
+
+
+def test_g1_29dof_air_time_variance_penalizes_asymmetric_completed_phases():
+    from isaaclab_neural.envs.mdp_g1_29dof import feet_air_time_variance
+
+    air_time = torch.zeros(1, 2)
+    sensor = SimpleNamespace(data=SimpleNamespace(current_air_time=SimpleNamespace(torch=air_time)))
+    command = torch.tensor([[0.5, 0.0, 0.0]])
+    env = SimpleNamespace(
+        scene=SimpleNamespace(sensors={"feet": sensor}),
+        num_envs=1,
+        device="cpu",
+        step_dt=0.02,
+        command_manager=SimpleNamespace(get_command=lambda name: command),
+    )
+    sensor_cfg = SimpleNamespace(name="feet", body_ids=[0, 1])
+    cfg = SimpleNamespace(params={"sensor_cfg": sensor_cfg})
+    term = feet_air_time_variance(cfg, env)
+
+    def run(left_air: list[bool], right_air: list[bool]) -> torch.Tensor:
+        penalty = torch.zeros(1)
+        for left, right in zip(left_air, right_air):
+            air_time[0] = torch.tensor([0.1 if left else 0.0, 0.1 if right else 0.0])
+            penalty = term(env, "base_velocity", sensor_cfg)
+        return penalty
+
+    # both feet complete a 0.1 s swing and a 0.1 s stance phase: no variance
+    pattern = [False, True, True, True, True, True, False, False, False, False, False, True]
+    assert float(run(pattern, pattern)) == pytest.approx(0.0, abs=1e-9)
+    term.reset()
+    # the right foot swings for 0.2 s instead of 0.1 s
+    left = [False, True, True, True, True, True, False, False, False, False, False, True, True]
+    right = [False, True, True, True, True, True, True, True, True, True, True, False, False]
+    assert float(run(left, right)) > 0.0

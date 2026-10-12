@@ -11,3 +11,6 @@ Added
 * Added root force pulses through Newton's floating-base generalized force (``apply_root_wrench_pulses``) and
   lying-start resets for G1 29-DoF data collection, plus the ``Isaac-G1-29DoF-BFM-Dataset-Gen-v0`` and
   ``Isaac-G1-29DoF-BFM-Perturbed-Dataset-Gen-v0`` environments.
+* The 29-DoF walking teacher task used the flat-terrain gait rewards and terminations of isaac-sim/IsaacLab PR #8055
+  (swing/stance duration variance, double-flight and pelvis-height penalties), its standing pose, a 0.9 soft
+  joint-limit factor and the ``0.25 * effort_limit / stiffness`` action scale, while keeping the BFM-Zero actuators.

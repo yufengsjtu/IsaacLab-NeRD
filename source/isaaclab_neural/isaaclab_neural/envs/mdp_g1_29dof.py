@@ -296,3 +296,123 @@ def track_torso_roll_pitch_exp(
     command = env.command_manager.get_command(command_name)
     error = (roll - command[:, 1]).square() + (pitch - command[:, 2]).square()
     return torch.exp(-error / std**2)
+
+
+# Walking-gait terms ported from the 29-DoF G1 velocity tasks of isaac-sim/IsaacLab PR #8055. Root height is measured
+# from the environment origin, which equals the PR's terrain-scan estimate on flat ground.
+
+
+def joint_deviation_l2(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Penalize the squared displacement of selected joints from their default positions [rad²].
+
+    Args:
+        env: Environment.
+        asset_cfg: Robot with the selected joints resolved.
+
+    Returns:
+        Penalty per environment.
+    """
+    data = env.scene[asset_cfg.name].data
+    joint_ids = asset_cfg.joint_ids
+    return (data.joint_pos.torch[:, joint_ids] - data.default_joint_pos.torch[:, joint_ids]).square().sum(dim=1)
+
+
+def feet_flight(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Return one when all selected feet are airborne, otherwise zero.
+
+    Args:
+        env: Environment.
+        sensor_cfg: Contact sensor with the feet resolved.
+
+    Returns:
+        Indicator per environment.
+    """
+    air_time = env.scene.sensors[sensor_cfg.name].data.current_air_time.torch[:, sensor_cfg.body_ids]
+    return torch.all(air_time > 0.0, dim=-1).float()
+
+
+class feet_air_time_variance(ManagerTermBase):
+    """Penalize the variance across feet of completed swing and stance durations [s²].
+
+    Phases are measured at the control rate; initial partial phases are ignored and durations are clipped at
+    ``max_time`` [s]. The penalty is active only while the commanded planar speed exceeds 0.1 m/s.
+    """
+
+    def __init__(self, cfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        sensor_cfg = cfg.params["sensor_cfg"]
+        sensor = env.scene.sensors[sensor_cfg.name]
+        self._elapsed = torch.zeros_like(sensor.data.current_air_time.torch[:, sensor_cfg.body_ids])
+        self._air = torch.zeros_like(self._elapsed)
+        self._stance = torch.zeros_like(self._elapsed)
+        self._contact = torch.zeros_like(self._elapsed, dtype=torch.bool)
+        self._known = torch.zeros_like(self._contact)
+        self._initialized = torch.zeros(env.num_envs, 1, device=env.device, dtype=torch.bool)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        env_ids = slice(None) if env_ids is None else env_ids
+        for buffer in (self._elapsed, self._air, self._stance, self._contact, self._known, self._initialized):
+            buffer[env_ids] = 0
+
+    def __call__(
+        self, env: ManagerBasedEnv, command_name: str, sensor_cfg: SceneEntityCfg, max_time: float = 0.5
+    ) -> torch.Tensor:
+        """Update the phase timers and return the penalty.
+
+        Args:
+            env: Environment.
+            command_name: Velocity command term name.
+            sensor_cfg: Contact sensor with the feet resolved.
+            max_time: Duration clip [s].
+
+        Returns:
+            Penalty per environment [s²].
+        """
+        contact = env.scene.sensors[sensor_cfg.name].data.current_air_time.torch[:, sensor_cfg.body_ids] <= 0.0
+        changed = (contact != self._contact) & self._initialized
+        complete = changed & self._known
+        self._air.copy_(torch.where(complete & contact, self._elapsed, self._air))
+        self._stance.copy_(torch.where(complete & ~contact, self._elapsed, self._stance))
+        self._elapsed.copy_(torch.where(changed, 0.0, self._elapsed) + env.step_dt)
+        self._known |= changed
+        self._contact.copy_(contact)
+        self._initialized.fill_(True)
+        penalty = torch.zeros(env.num_envs, device=env.device)
+        for duration in (self._air, self._stance):
+            penalty += duration.clamp(max=max_time).var(dim=1, correction=0) * (duration > 0.0).all(dim=1)
+        return penalty * (env.command_manager.get_command(command_name)[:, :2].norm(dim=1) > 0.1)
+
+
+def root_height_deficit_l2(env: ManagerBasedEnv, target_height: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Penalize the squared shortfall of the root height below ``target_height`` on flat ground [m²].
+
+    Args:
+        env: Environment.
+        target_height: Root height above the environment origin [m]; heights above it are not penalized.
+        asset_cfg: Robot.
+
+    Returns:
+        Penalty per environment.
+    """
+    height = env.scene[asset_cfg.name].data.root_pos_w.torch[:, 2] - env.scene.env_origins[:, 2]
+    return (target_height - height).clamp(min=0.0).square()
+
+
+def root_height_below_minimum_after_warmup(
+    env: ManagerBasedEnv, minimum_height: float, warmup_steps: int, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+    """Terminate when the root drops below ``minimum_height`` on flat ground, after ``warmup_steps`` env steps.
+
+    Args:
+        env: Environment.
+        minimum_height: Root height above the environment origin [m].
+        warmup_steps: Global environment steps before the term activates; resets do not restart it.
+        asset_cfg: Robot.
+
+    Returns:
+        Termination flags per environment.
+    """
+    if env.common_step_counter < warmup_steps:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    height = env.scene[asset_cfg.name].data.root_pos_w.torch[:, 2] - env.scene.env_origins[:, 2]
+    return height < minimum_height

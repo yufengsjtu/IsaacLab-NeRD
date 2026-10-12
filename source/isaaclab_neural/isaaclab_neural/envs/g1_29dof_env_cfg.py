@@ -29,17 +29,28 @@ from isaaclab.utils.configclass import configclass
 from isaaclab_tasks.core.velocity.config.g1.flat_env_cfg import G1FlatEnvCfg
 from isaaclab_tasks.utils import PresetCfg
 
-from isaaclab_neural.controllers.bfm_zero import BfmZeroLatentActionCfg
+from isaaclab_neural.controllers.bfm_zero import BfmZeroLatentActionCfg, bfm_zero_action_scale
 from isaaclab_neural.envs.g1_dataset_gen_cfg import G1DatasetGenFlatEnvCfg
 from isaaclab_neural.envs.g1_nerd_env import NerdG1FlatEnvCfg, g1_invalid_state
 from isaaclab_neural.envs.mdp_g1_29dof import (
     BaseHeightTorsoCommandCfg,
     apply_root_wrench_pulses,
+    feet_air_time_variance,
+    feet_flight,
+    joint_deviation_l2,
     reset_root_lying,
+    root_height_below_minimum_after_warmup,
+    root_height_deficit_l2,
     track_base_height_exp,
     track_torso_roll_pitch_exp,
 )
-from isaaclab_neural.robots.g1_29dof import G1_29DOF_BFM_CFG, G1_29DOF_WRIST_YAW_LINK_MASS
+from isaaclab_neural.robots.g1_29dof import (
+    G1_29DOF_BFM_CFG,
+    G1_29DOF_JOINT_NAMES,
+    G1_29DOF_WALKING_JOINT_POS,
+    G1_29DOF_WALKING_ROOT_HEIGHT,
+    G1_29DOF_WRIST_YAW_LINK_MASS,
+)
 
 G1_29DOF_MJWARP_PHYSICS = NewtonCfg(
     solver_cfg=MJWarpSolverCfg(
@@ -163,21 +174,81 @@ class G129DofBfmEnvCfg(ManagerBasedRLEnvCfg):
 def configure_g1_29dof_robot(cfg: G1FlatEnvCfg) -> None:
     """Replace the stock 37-joint G1 with the 29-DoF robot in a velocity-tracking config.
 
-    Joint-name dependent reward terms are remapped (no fingers; waist instead of ``torso_joint``) and the wrist links
-    receive the same mass correction as the BFM-Zero collection environments. Physics settings are left unchanged.
+    The robot keeps the BFM-Zero actuators and takes the standing pose, the 0.9 soft joint-limit factor and the
+    ``0.25 * effort_limit / stiffness`` action scale of the Isaac Lab 29-DoF G1 locomotion configuration
+    (isaac-sim/IsaacLab PR #8055). Joint-name dependent reward terms are remapped (no fingers; waist instead of
+    ``torso_joint``) and the wrist links receive the mass correction of the BFM-Zero collection environments. Physics
+    settings are left unchanged.
 
     Args:
         cfg: Stock or NeRD G1 velocity config, modified in place.
     """
     cfg.scene.robot = G1_29DOF_BFM_CFG.replace(
-        prim_path="{ENV_REGEX_NS}/Robot", spawn=G1_29DOF_BFM_CFG.spawn.replace(activate_contact_sensors=True)
+        prim_path="{ENV_REGEX_NS}/Robot",
+        spawn=G1_29DOF_BFM_CFG.spawn.replace(activate_contact_sensors=True),
+        init_state=G1_29DOF_BFM_CFG.init_state.replace(
+            pos=(0.0, 0.0, G1_29DOF_WALKING_ROOT_HEIGHT), joint_pos=G1_29DOF_WALKING_JOINT_POS
+        ),
+        soft_joint_pos_limit_factor=0.9,
     )
+    cfg.actions.joint_pos.scale = dict(zip(G1_29DOF_JOINT_NAMES, bfm_zero_action_scale(G1_29DOF_JOINT_NAMES)))
     cfg.rewards.joint_deviation_arms.params["asset_cfg"] = SceneEntityCfg(
         "robot", joint_names=[".*_shoulder_.*_joint", ".*_elbow_joint", ".*_wrist_.*_joint"]
     )
     cfg.rewards.joint_deviation_torso.params["asset_cfg"] = SceneEntityCfg("robot", joint_names="waist_.*_joint")
     cfg.rewards.joint_deviation_fingers = None
     cfg.events.wrist_mass = G129DofBfmEventsCfg().wrist_mass
+
+
+def configure_g1_29dof_walking_rewards(cfg: G1FlatEnvCfg) -> None:
+    """Apply the flat-terrain walking rewards and terminations of isaac-sim/IsaacLab PR #8055.
+
+    Adds gait regularization (swing/stance duration variance across feet, double-flight penalty, pelvis height) and
+    stronger posture terms. Pelvis height is measured from the environment origin instead of a height scan, which is
+    equivalent on flat ground and keeps the observation free of the scan.
+
+    Args:
+        cfg: 29-DoF G1 flat velocity config with a ``contact_forces`` sensor, modified in place.
+    """
+    rewards = cfg.rewards
+    feet = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link")
+    rewards.track_lin_vel_xy_exp.weight = 1.0
+    rewards.track_ang_vel_z_exp.weight = 2.0
+    rewards.lin_vel_z_l2.weight = -2.0
+    rewards.flat_orientation_l2.weight = -5.0
+    rewards.action_rate_l2.weight = -0.005
+    rewards.dof_acc_l2.weight = -1.25e-7
+    rewards.dof_acc_l2.params["asset_cfg"] = SceneEntityCfg("robot", joint_names=[".*_hip_.*", ".*_knee_joint"])
+    rewards.dof_torques_l2.weight = -1.5e-7
+    rewards.dof_torques_l2.params["asset_cfg"] = SceneEntityCfg(
+        "robot", joint_names=[".*_hip_.*", ".*_knee_joint", ".*_ankle_.*"]
+    )
+    rewards.feet_air_time.weight = 1.5
+    rewards.feet_air_time.params["threshold"] = 0.4
+    rewards.joint_deviation_hip = RewTerm(
+        func=joint_deviation_l2,
+        weight=-1.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_roll_joint", ".*_hip_yaw_joint"])},
+    )
+    rewards.joint_deviation_arms.weight = -0.1
+    rewards.joint_deviation_torso = RewTerm(
+        func=joint_deviation_l2,
+        weight=-1.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names="waist_.*_joint")},
+    )
+    rewards.pelvis_height = RewTerm(
+        func=root_height_deficit_l2,
+        weight=-10.0,
+        params={"target_height": 0.686, "asset_cfg": SceneEntityCfg("robot")},
+    )
+    rewards.feet_air_time_variance = RewTerm(
+        func=feet_air_time_variance, weight=-24.0, params={"command_name": "base_velocity", "sensor_cfg": feet}
+    )
+    rewards.feet_flight = RewTerm(func=feet_flight, weight=-2.0, params={"sensor_cfg": feet})
+    cfg.terminations.base_height = DoneTerm(
+        func=root_height_below_minimum_after_warmup,
+        params={"minimum_height": 0.4, "warmup_steps": 12_000, "asset_cfg": SceneEntityCfg("robot")},
+    )
 
 
 def configure_g1_29dof_mjwarp_capacity(cfg: G1FlatEnvCfg) -> None:
@@ -192,11 +263,12 @@ def configure_g1_29dof_mjwarp_capacity(cfg: G1FlatEnvCfg) -> None:
 
 @configclass
 class G129DofFlatEnvCfg(G1FlatEnvCfg):
-    """Stock flat G1 velocity tracking with the 29-DoF robot; used to train the walking teacher."""
+    """Flat G1 velocity tracking with the 29-DoF robot and PR #8055 walking rewards; trains the walking teacher."""
 
     def __post_init__(self) -> None:
         super().__post_init__()
         configure_g1_29dof_robot(self)
+        configure_g1_29dof_walking_rewards(self)
         configure_g1_29dof_mjwarp_capacity(self)
 
 
@@ -234,7 +306,9 @@ class G129DofPostureEnvCfg(G129DofFlatEnvCfg):
         )
         self.rewards.feet_air_time = None
         self.rewards.joint_deviation_torso = None
+        self.rewards.pelvis_height = None
         self.rewards.flat_orientation_l2.weight = -0.2
+        self.rewards.lin_vel_z_l2.weight = -0.2
 
 
 @configclass

@@ -57,20 +57,24 @@ class G1RoughNeRDPPORunnerCfg(G1FlatNeRDPPORunnerCfg):
 
 @configclass
 class G129DofFlatPPORunnerCfg(G1FlatPPORunnerCfg):
-    """Stock flat G1 runner with a separate experiment name for the 29-DoF robot."""
+    """Flat G1 runner of isaac-sim/IsaacLab PR #8055 ([512, 256, 128] networks) for the 29-DoF robot."""
 
     def __post_init__(self):
         super().__post_init__()
         self.experiment_name = "g1_29dof_flat"
+        self.actor.hidden_dims = [512, 256, 128]
+        self.critic.hidden_dims = [512, 256, 128]
 
 
 @configclass
 class G129DofPosturePPORunnerCfg(G1FlatPPORunnerCfg):
-    """Stock flat G1 runner for the 29-DoF height and torso posture task."""
+    """Flat G1 runner of isaac-sim/IsaacLab PR #8055 for the 29-DoF height and torso posture task."""
 
     def __post_init__(self):
         super().__post_init__()
         self.experiment_name = "g1_29dof_posture"
+        self.actor.hidden_dims = [512, 256, 128]
+        self.critic.hidden_dims = [512, 256, 128]
 
 
 def g1_mbpo_runner_cfg(profile: str) -> RslRlOnPolicyRunnerCfg:
