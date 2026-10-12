@@ -34,9 +34,11 @@ from isaaclab_neural.envs.g1_dataset_gen_cfg import G1DatasetGenFlatEnvCfg
 from isaaclab_neural.envs.g1_nerd_env import NerdG1FlatEnvCfg, g1_invalid_state
 from isaaclab_neural.envs.mdp_g1_29dof import (
     BaseHeightTorsoCommandCfg,
+    GeometryFeetAirTimeVariance,
     apply_root_wrench_pulses,
     feet_air_time_variance,
     feet_flight,
+    geometry_feet_flight,
     joint_deviation_l2,
     reset_root_lying,
     root_height_below_minimum_after_warmup,
@@ -200,7 +202,7 @@ def configure_g1_29dof_robot(cfg: G1FlatEnvCfg) -> None:
     cfg.events.wrist_mass = G129DofBfmEventsCfg().wrist_mass
 
 
-def configure_g1_29dof_walking_rewards(cfg: G1FlatEnvCfg) -> None:
+def configure_g1_29dof_walking_rewards(cfg: G1FlatEnvCfg, feet_contact_separation: float | None = None) -> None:
     """Apply the flat-terrain walking rewards and terminations of isaac-sim/IsaacLab PR #8055.
 
     Adds gait regularization (swing/stance duration variance across feet, double-flight penalty, pelvis height) and
@@ -208,7 +210,10 @@ def configure_g1_29dof_walking_rewards(cfg: G1FlatEnvCfg) -> None:
     equivalent on flat ground and keeps the observation free of the scan.
 
     Args:
-        cfg: 29-DoF G1 flat velocity config with a ``contact_forces`` sensor, modified in place.
+        cfg: 29-DoF G1 flat velocity config, modified in place. Without ``feet_contact_separation`` it needs a
+            ``contact_forces`` sensor; otherwise its gait terms must already use NeRD contact geometry.
+        feet_contact_separation: None for contact-sensor foot contacts, or the largest signed surface separation
+            [m] counted as foot contact by the NeRD geometry gait terms.
     """
     rewards = cfg.rewards
     feet = SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link")
@@ -241,10 +246,20 @@ def configure_g1_29dof_walking_rewards(cfg: G1FlatEnvCfg) -> None:
         weight=-10.0,
         params={"target_height": 0.686, "asset_cfg": SceneEntityCfg("robot")},
     )
-    rewards.feet_air_time_variance = RewTerm(
-        func=feet_air_time_variance, weight=-24.0, params={"command_name": "base_velocity", "sensor_cfg": feet}
-    )
-    rewards.feet_flight = RewTerm(func=feet_flight, weight=-2.0, params={"sensor_cfg": feet})
+    if feet_contact_separation is None:
+        rewards.feet_air_time_variance = RewTerm(
+            func=feet_air_time_variance, weight=-24.0, params={"command_name": "base_velocity", "sensor_cfg": feet}
+        )
+        rewards.feet_flight = RewTerm(func=feet_flight, weight=-2.0, params={"sensor_cfg": feet})
+    else:
+        feet = SceneEntityCfg("robot", body_names=".*_ankle_roll_link")
+        geometry = {"body_cfg": feet, "maximum_separation": feet_contact_separation}
+        rewards.feet_air_time_variance = RewTerm(
+            func=GeometryFeetAirTimeVariance, weight=-24.0, params={"command_name": "base_velocity", **geometry}
+        )
+        rewards.feet_flight = RewTerm(func=geometry_feet_flight, weight=-2.0, params=geometry)
+        rewards.feet_air_time.params["maximum_separation"] = feet_contact_separation
+        rewards.feet_slide.params["maximum_separation"] = feet_contact_separation
     cfg.terminations.base_height = DoneTerm(
         func=root_height_below_minimum_after_warmup,
         params={"minimum_height": 0.4, "warmup_steps": 12_000, "asset_cfg": SceneEntityCfg("robot")},
@@ -331,13 +346,24 @@ class G129DofDatasetGenFlatEnvCfg(G1DatasetGenFlatEnvCfg):
         self.events.reset_robot_joints = stock.events.reset_robot_joints
 
 
+G1_29DOF_NERD_FEET_CONTACT_SEPARATION = 0.0025
+"""Largest signed surface separation [m] counted as foot contact by the NeRD walking gait terms.
+
+A positive margin suppresses millimetre contact chatter of NeRD foot predictions; the torso termination stays strict.
+"""
+
+
 @configclass
 class NerdG129DofFlatEnvCfg(NerdG1FlatEnvCfg):
-    """Flat G1 velocity tracking with the 29-DoF robot on NeRD-backed physics."""
+    """:class:`G129DofFlatEnvCfg` walking task on NeRD-backed physics, with geometry foot contacts in the gait terms.
+
+    Interval pushes stay disabled as in the other NeRD G1 tasks.
+    """
 
     def __post_init__(self) -> None:
         super().__post_init__()
         configure_g1_29dof_robot(self)
+        configure_g1_29dof_walking_rewards(self, feet_contact_separation=G1_29DOF_NERD_FEET_CONTACT_SEPARATION)
 
 
 @configclass

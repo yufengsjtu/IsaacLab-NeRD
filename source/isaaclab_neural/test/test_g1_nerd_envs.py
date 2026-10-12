@@ -693,6 +693,45 @@ def test_g1_29dof_walking_task_uses_pr8055_gait_terms_with_bfm_actuators():
     assert posture.rewards.pelvis_height is None
 
 
+def test_g1_29dof_nerd_walking_task_matches_teacher_with_geometry_foot_contacts():
+    import gymnasium as gym
+    from isaaclab_neural.contacts.geometry_mdp import GeometryFeetAirTimePositiveBiped, GeometryFeetSlide
+    from isaaclab_neural.envs.agents.g1_nerd_rsl_rl_ppo_cfg import G129DofFlatNeRDPPORunnerCfg
+    from isaaclab_neural.envs.g1_29dof_env_cfg import (
+        G1_29DOF_NERD_FEET_CONTACT_SEPARATION,
+        G129DofFlatEnvCfg,
+        NerdG129DofFlatEnvCfg,
+    )
+    from isaaclab_neural.envs.mdp_g1_29dof import GeometryFeetAirTimeVariance, geometry_feet_flight
+
+    teacher, nerd = G129DofFlatEnvCfg(), NerdG129DofFlatEnvCfg()
+    assert nerd.scene.contact_forces is None
+    assert nerd.scene.robot.init_state == teacher.scene.robot.init_state
+    assert nerd.actions.joint_pos.scale == teacher.actions.joint_pos.scale
+    assert set(vars(nerd.rewards)) == set(vars(teacher.rewards))
+    for name, term in vars(teacher.rewards).items():
+        if term is not None:
+            assert getattr(nerd.rewards, name).weight == term.weight, name
+    geometry_terms = {
+        "feet_air_time": GeometryFeetAirTimePositiveBiped,
+        "feet_slide": GeometryFeetSlide,
+        "feet_air_time_variance": GeometryFeetAirTimeVariance,
+        "feet_flight": geometry_feet_flight,
+    }
+    for name, func in geometry_terms.items():
+        term = getattr(nerd.rewards, name)
+        assert term.func is func
+        assert term.params["maximum_separation"] == G1_29DOF_NERD_FEET_CONTACT_SEPARATION
+    assert nerd.terminations.base_height.params == teacher.terminations.base_height.params
+    assert "maximum_separation" not in nerd.terminations.base_contact.params
+
+    spec = gym.spec("Isaac-Velocity-Flat-G1-29DoF-NeRD-v0")
+    assert spec.kwargs["rsl_rl_cfg_entry_point"].endswith(":G129DofFlatNeRDPPORunnerCfg")
+    runner = G129DofFlatNeRDPPORunnerCfg()
+    assert runner.actor.hidden_dims == runner.critic.hidden_dims == [512, 256, 128]
+    assert runner.experiment_name == "g1_29dof_flat_nerd"
+
+
 def test_g1_29dof_gait_terms_match_reference_calculations():
     from isaaclab_neural.envs import mdp_g1_29dof as terms
 
@@ -758,3 +797,43 @@ def test_g1_29dof_air_time_variance_penalizes_asymmetric_completed_phases():
     left = [False, True, True, True, True, True, False, False, False, False, False, True, True]
     right = [False, True, True, True, True, True, True, True, True, True, True, False, False]
     assert float(run(left, right)) > 0.0
+
+
+def test_g1_29dof_geometry_gait_terms_match_contact_sensor_terms(monkeypatch):
+    from isaaclab_neural.envs import mdp_g1_29dof as terms
+
+    contact = torch.zeros(3, 2, dtype=torch.bool)
+    air_time = torch.zeros(3, 2)
+    sensor = SimpleNamespace(data=SimpleNamespace(current_air_time=SimpleNamespace(torch=air_time)))
+    command = torch.tensor([[0.5, 0.0, 0.0], [0.0, 0.0, 0.3], [0.0, 0.4, 0.0]])
+    env = SimpleNamespace(
+        scene=SimpleNamespace(sensors={"feet": sensor}),
+        num_envs=3,
+        device="cpu",
+        step_dt=0.02,
+        command_manager=SimpleNamespace(get_command=lambda name: command),
+    )
+    sensor_cfg = SimpleNamespace(name="feet", body_ids=[0, 1])
+    body_cfg = SimpleNamespace(name="robot", body_ids=[0, 1])
+    separations = set()
+
+    def geometry_contacts(body_ids, *, maximum_separation=0.0, env=None):
+        separations.add(maximum_separation)
+        return contact.clone()
+
+    monkeypatch.setattr(terms, "body_contacts", geometry_contacts)
+    sensor_term = terms.feet_air_time_variance(SimpleNamespace(params={"sensor_cfg": sensor_cfg}), env)
+    geometry_term = terms.GeometryFeetAirTimeVariance(SimpleNamespace(params={"body_cfg": body_cfg}), env)
+    generator = torch.Generator().manual_seed(0)
+    total = torch.zeros(3)
+    for _ in range(100):
+        contact.copy_(torch.rand(3, 2, generator=generator) < 0.6)
+        air_time.copy_(torch.where(contact, 0.0, air_time + env.step_dt))
+        torch.testing.assert_close(
+            terms.geometry_feet_flight(env, body_cfg, maximum_separation=0.003), terms.feet_flight(env, sensor_cfg)
+        )
+        expected = sensor_term(env, "base_velocity", sensor_cfg)
+        torch.testing.assert_close(geometry_term(env, "base_velocity", body_cfg, maximum_separation=0.003), expected)
+        total += expected
+    assert separations == {0.003}
+    assert total[0] > 0.0 and total[2] > 0.0 and total[1] == 0.0

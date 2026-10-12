@@ -17,6 +17,8 @@ import isaaclab.utils.math as math_utils
 from isaaclab.managers import CommandTerm, CommandTermCfg, EventTermCfg, ManagerTermBase, SceneEntityCfg
 from isaaclab.utils.configclass import configclass
 
+from ..contacts.geometry_mdp import body_contacts
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
@@ -331,6 +333,23 @@ def feet_flight(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg) -> torch.Tenso
     return torch.all(air_time > 0.0, dim=-1).float()
 
 
+def geometry_feet_flight(
+    env: ManagerBasedEnv, body_cfg: SceneEntityCfg, maximum_separation: float = 0.0
+) -> torch.Tensor:
+    """Return one when no selected foot touches geometry, otherwise zero; :func:`feet_flight` for NeRD physics.
+
+    Args:
+        env: Environment with NeRD Newton-native contacts.
+        body_cfg: Robot with the feet resolved.
+        maximum_separation: Largest signed surface separation counted as contact [m].
+
+    Returns:
+        Indicator per environment.
+    """
+    contact = body_contacts(body_cfg.body_ids, maximum_separation=maximum_separation, env=env)
+    return (~contact.any(dim=1)).float()
+
+
 class feet_air_time_variance(ManagerTermBase):
     """Penalize the variance across feet of completed swing and stance durations [s²].
 
@@ -338,11 +357,13 @@ class feet_air_time_variance(ManagerTermBase):
     ``max_time`` [s]. The penalty is active only while the commanded planar speed exceeds 0.1 m/s.
     """
 
+    _feet_param = "sensor_cfg"
+    """Term parameter whose ``body_ids`` select the feet."""
+
     def __init__(self, cfg, env: ManagerBasedEnv):
         super().__init__(cfg, env)
-        sensor_cfg = cfg.params["sensor_cfg"]
-        sensor = env.scene.sensors[sensor_cfg.name]
-        self._elapsed = torch.zeros_like(sensor.data.current_air_time.torch[:, sensor_cfg.body_ids])
+        num_feet = len(cfg.params[self._feet_param].body_ids)
+        self._elapsed = torch.zeros(env.num_envs, num_feet, device=env.device)
         self._air = torch.zeros_like(self._elapsed)
         self._stance = torch.zeros_like(self._elapsed)
         self._contact = torch.zeros_like(self._elapsed, dtype=torch.bool)
@@ -369,6 +390,10 @@ class feet_air_time_variance(ManagerTermBase):
             Penalty per environment [s²].
         """
         contact = env.scene.sensors[sensor_cfg.name].data.current_air_time.torch[:, sensor_cfg.body_ids] <= 0.0
+        return self._penalty(env, contact, command_name, max_time)
+
+    def _penalty(self, env: ManagerBasedEnv, contact: torch.Tensor, command_name: str, max_time: float) -> torch.Tensor:
+        """Advance the phase timers with the current foot contacts and return the penalty [s²]."""
         changed = (contact != self._contact) & self._initialized
         complete = changed & self._known
         self._air.copy_(torch.where(complete & contact, self._elapsed, self._air))
@@ -381,6 +406,35 @@ class feet_air_time_variance(ManagerTermBase):
         for duration in (self._air, self._stance):
             penalty += duration.clamp(max=max_time).var(dim=1, correction=0) * (duration > 0.0).all(dim=1)
         return penalty * (env.command_manager.get_command(command_name)[:, :2].norm(dim=1) > 0.1)
+
+
+class GeometryFeetAirTimeVariance(feet_air_time_variance):
+    """:class:`feet_air_time_variance` with foot contacts from NeRD Newton-native contact geometry."""
+
+    _feet_param = "body_cfg"
+
+    def __call__(  # type: ignore[override]
+        self,
+        env: ManagerBasedEnv,
+        command_name: str,
+        body_cfg: SceneEntityCfg,
+        max_time: float = 0.5,
+        maximum_separation: float = 0.0,
+    ) -> torch.Tensor:
+        """Update the phase timers and return the penalty.
+
+        Args:
+            env: Environment with NeRD Newton-native contacts.
+            command_name: Velocity command term name.
+            body_cfg: Robot with the feet resolved.
+            max_time: Duration clip [s].
+            maximum_separation: Largest signed surface separation counted as contact [m].
+
+        Returns:
+            Penalty per environment [s²].
+        """
+        contact = body_contacts(body_cfg.body_ids, maximum_separation=maximum_separation, env=env)
+        return self._penalty(env, contact, command_name, max_time)
 
 
 def root_height_deficit_l2(env: ManagerBasedEnv, target_height: float, asset_cfg: SceneEntityCfg) -> torch.Tensor:

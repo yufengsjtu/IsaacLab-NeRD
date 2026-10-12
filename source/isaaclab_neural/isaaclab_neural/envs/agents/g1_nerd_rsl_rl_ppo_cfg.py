@@ -67,6 +67,15 @@ class G129DofFlatPPORunnerCfg(G1FlatPPORunnerCfg):
 
 
 @configclass
+class G129DofFlatNeRDPPORunnerCfg(G129DofFlatPPORunnerCfg):
+    """:class:`G129DofFlatPPORunnerCfg` for training the 29-DoF walking task on NeRD-backed physics."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "g1_29dof_flat_nerd"
+
+
+@configclass
 class G129DofPosturePPORunnerCfg(G1FlatPPORunnerCfg):
     """Flat G1 runner of isaac-sim/IsaacLab PR #8055 for the 29-DoF height and torso posture task."""
 

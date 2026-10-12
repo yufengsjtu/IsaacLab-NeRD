@@ -145,7 +145,7 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": "isaaclab_neural.envs.g1_29dof_env_cfg:NerdG129DofFlatEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{g1_nerd_agents.__name__}:G1FlatNeRDPPORunnerCfg",
+        "rsl_rl_cfg_entry_point": f"{g1_nerd_agents.__name__}:G129DofFlatNeRDPPORunnerCfg",
     },
 )
 

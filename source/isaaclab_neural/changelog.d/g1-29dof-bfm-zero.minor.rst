@@ -14,3 +14,7 @@ Added
 * The 29-DoF walking teacher task used the flat-terrain gait rewards and terminations of isaac-sim/IsaacLab PR #8055
   (swing/stance duration variance, double-flight and pelvis-height penalties), its standing pose, a 0.9 soft
   joint-limit factor and the ``0.25 * effort_limit / stiffness`` action scale, while keeping the BFM-Zero actuators.
+* Added geometry-contact versions of the PR #8055 gait terms (``geometry_feet_flight`` and
+  ``GeometryFeetAirTimeVariance``). ``Isaac-Velocity-Flat-G1-29DoF-NeRD-v0`` trained the same walking task as the
+  teacher on NeRD physics, counting feet within 2.5 mm of the ground as in contact, with the teacher's
+  ``[512, 256, 128]`` PPO runner.
