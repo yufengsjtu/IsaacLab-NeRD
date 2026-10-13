@@ -158,6 +158,55 @@ G1_29DOF_JOINT_FRICTION = 0.03
 G1_29DOF_WRIST_YAW_LINK_MASS = 0.254576
 """Unitree rev_1_0 wrist-yaw link mass including the rubber hand [kg]; the asset without hands has 0.0846 kg."""
 
+G1_29DOF_IBFM_STIFFNESS = {
+    ".*_hip_yaw_joint": 40.17924,
+    ".*_hip_(roll|pitch)_joint": 99.09843,
+    ".*_knee_joint": 99.09843,
+    ".*_ankle_.*_joint": 28.50125,
+    "waist_yaw_joint": 40.17924,
+    "waist_roll_joint": 28.50125,
+    "waist_pitch_joint": 40.0,
+    ".*_(shoulder_.*|elbow|wrist_roll)_joint": 14.25062,
+    ".*_wrist_(pitch|yaw)_joint": 8.61103,
+}
+"""Implicit PD stiffness of the I-BFM ``g1_29dof.yaml`` robot configuration [N·m/rad]."""
+
+G1_29DOF_IBFM_DAMPING = {
+    ".*_hip_yaw_joint": 2.55789,
+    ".*_hip_(roll|pitch)_joint": 6.3088,
+    ".*_knee_joint": 6.3088,
+    ".*_ankle_.*_joint": 1.81445,
+    "waist_.*_joint": 5.0,
+    ".*_(shoulder_.*|elbow|wrist_roll)_joint": 0.90722,
+    ".*_wrist_(pitch|yaw)_joint": 0.5482,
+}
+"""Implicit PD damping of the I-BFM robot configuration [N·m·s/rad]."""
+
+G1_29DOF_IBFM_EFFORT_LIMIT = {
+    ".*_hip_(pitch|roll)_joint": 139.0,
+    ".*_hip_yaw_joint": 88.0,
+    ".*_knee_joint": 139.0,
+    ".*_ankle_.*_joint": 50.0,
+    "waist_yaw_joint": 88.0,
+    "waist_(roll|pitch)_joint": 50.0,
+    ".*_shoulder_.*_joint": 25.0,
+    ".*_elbow_joint": 25.0,
+    ".*_wrist_roll_joint": 25.0,
+    ".*_wrist_(pitch|yaw)_joint": 13.4,
+}
+"""Torque limits of the I-BFM runtime [N·m]; also the effort limits of its action scale."""
+
+G1_29DOF_IBFM_ACTION_SCALE = {
+    ".*_(hip|knee|ankle|shoulder|elbow|wrist)_.*joint": 0.25,
+    "waist_yaw_joint": 0.0334827,
+    "waist_roll_joint": 0.0237510,
+    "waist_pitch_joint": 0.08,
+}
+"""Per-joint action scale of the I-BFM runtime before multiplying by ``effort_limit / stiffness``."""
+
+G1_29DOF_IBFM_JOINT_FRICTION = 0.01
+"""Static joint friction effort of the I-BFM runtime [N·m]."""
+
 
 def g1_29dof_mirror_path(url: str, download_dir: str) -> str:
     """Return where Isaac Lab's recursive asset retrieval mirrors a remote URL.
@@ -281,3 +330,18 @@ G1_29DOF_BFM_CFG = ArticulationCfg(
     },
 )
 """Unitree G1 29-DoF articulation without hands, with BFM-Zero actuator parameters."""
+
+G1_29DOF_IBFM_CFG = G1_29DOF_BFM_CFG.replace(
+    actuators={
+        "body": ImplicitActuatorCfg(
+            joint_names_expr=[".*"],
+            stiffness=G1_29DOF_IBFM_STIFFNESS,
+            damping=G1_29DOF_IBFM_DAMPING,
+            armature=G1_29DOF_ARMATURE,
+            friction=G1_29DOF_IBFM_JOINT_FRICTION,
+            joint_effort_limit=G1_29DOF_IBFM_EFFORT_LIMIT,
+            joint_velocity_limit=G1_29DOF_VELOCITY_LIMIT,
+        )
+    },
+)
+"""Unitree G1 29-DoF articulation without hands, with I-BFM actuator parameters."""
