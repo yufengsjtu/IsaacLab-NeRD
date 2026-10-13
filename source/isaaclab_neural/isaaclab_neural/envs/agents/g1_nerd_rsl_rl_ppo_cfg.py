@@ -86,6 +86,15 @@ class G129DofPosturePPORunnerCfg(G1FlatPPORunnerCfg):
         self.critic.hidden_dims = [512, 256, 128]
 
 
+@configclass
+class G129DofPostureNeRDPPORunnerCfg(G129DofPosturePPORunnerCfg):
+    """:class:`G129DofPosturePPORunnerCfg` for training the 29-DoF posture task on NeRD-backed physics."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "g1_29dof_posture_nerd"
+
+
 def g1_mbpo_runner_cfg(profile: str) -> RslRlOnPolicyRunnerCfg:
     """Resolve an explicit rough MBPO runner without changing legacy registered-task defaults.
 

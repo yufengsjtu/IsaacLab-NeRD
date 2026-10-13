@@ -732,6 +732,28 @@ def test_g1_29dof_nerd_walking_task_matches_teacher_with_geometry_foot_contacts(
     assert runner.experiment_name == "g1_29dof_flat_nerd"
 
 
+def test_g1_29dof_nerd_posture_task_matches_teacher():
+    import gymnasium as gym
+    from isaaclab_neural.envs.agents.g1_nerd_rsl_rl_ppo_cfg import G129DofPostureNeRDPPORunnerCfg
+    from isaaclab_neural.envs.g1_29dof_env_cfg import G129DofPostureEnvCfg, NerdG129DofPostureEnvCfg
+
+    teacher, nerd = G129DofPostureEnvCfg(), NerdG129DofPostureEnvCfg()
+    assert nerd.commands.posture == teacher.commands.posture
+    assert nerd.commands.base_velocity.rel_standing_envs == teacher.commands.base_velocity.rel_standing_envs == 1.0
+    assert nerd.observations.policy.posture_command == teacher.observations.policy.posture_command
+    for name, term in vars(teacher.rewards).items():
+        if term is None:
+            assert getattr(nerd.rewards, name) is None, name
+        else:
+            assert getattr(nerd.rewards, name).weight == term.weight, name
+    assert nerd.rewards.track_height.params == teacher.rewards.track_height.params
+
+    spec = gym.spec("Isaac-G1-29DoF-Posture-NeRD-v0")
+    assert spec.kwargs["env_cfg_entry_point"].endswith(":NerdG129DofPostureEnvCfg")
+    assert spec.kwargs["rsl_rl_cfg_entry_point"].endswith(":G129DofPostureNeRDPPORunnerCfg")
+    assert G129DofPostureNeRDPPORunnerCfg().experiment_name == "g1_29dof_posture_nerd"
+
+
 def test_g1_29dof_gait_terms_match_reference_calculations():
     from isaaclab_neural.envs import mdp_g1_29dof as terms
 

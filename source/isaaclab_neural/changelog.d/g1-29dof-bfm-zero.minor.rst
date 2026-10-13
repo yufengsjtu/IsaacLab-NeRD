@@ -18,3 +18,5 @@ Added
   ``GeometryFeetAirTimeVariance``). ``Isaac-Velocity-Flat-G1-29DoF-NeRD-v0`` trained the same walking task as the
   teacher on NeRD physics, counting feet within 2.5 mm of the ground as in contact, with the teacher's
   ``[512, 256, 128]`` PPO runner.
+* Added ``Isaac-G1-29DoF-Posture-NeRD-v0``, the 29-DoF root-height and torso-posture task on NeRD physics. It shares
+  :func:`~isaaclab_neural.envs.g1_29dof_env_cfg.configure_g1_29dof_posture_task` with the MJWarp posture teacher task.

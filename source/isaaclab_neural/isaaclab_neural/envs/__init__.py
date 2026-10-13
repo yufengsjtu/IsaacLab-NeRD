@@ -150,6 +150,16 @@ gym.register(
 )
 
 gym.register(
+    id="Isaac-G1-29DoF-Posture-NeRD-v0",
+    entry_point=f"{NerdG1FlatEnv.__module__}:NerdG1FlatEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_neural.envs.g1_29dof_env_cfg:NerdG129DofPostureEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{g1_nerd_agents.__name__}:G129DofPostureNeRDPPORunnerCfg",
+    },
+)
+
+gym.register(
     id="Isaac-Velocity-Flat-G1-29DoF-Dataset-Gen-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,

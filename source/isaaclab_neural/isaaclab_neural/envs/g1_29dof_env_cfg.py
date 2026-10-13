@@ -287,6 +287,40 @@ class G129DofFlatEnvCfg(G1FlatEnvCfg):
         configure_g1_29dof_mjwarp_capacity(self)
 
 
+def configure_g1_29dof_posture_task(cfg: G1FlatEnvCfg) -> None:
+    """Turn a 29-DoF walking config into standing with commanded root height and torso roll and pitch.
+
+    Args:
+        cfg: 29-DoF G1 walking config (:class:`G129DofFlatEnvCfg` or its NeRD counterpart), modified in place.
+    """
+    velocity = cfg.commands.base_velocity
+    velocity.ranges.lin_vel_x = velocity.ranges.lin_vel_y = velocity.ranges.ang_vel_z = (0.0, 0.0)
+    velocity.heading_command = False
+    velocity.ranges.heading = None
+    velocity.rel_standing_envs = 1.0
+    cfg.commands.posture = BaseHeightTorsoCommandCfg(resampling_time_range=(3.0, 5.0))
+    cfg.observations.policy.posture_command = ObsTerm(func=mdp.generated_commands, params={"command_name": "posture"})
+    cfg.rewards.track_height = RewTerm(
+        func=track_base_height_exp,
+        weight=2.0,
+        params={"command_name": "posture", "std": 0.05, "asset_cfg": SceneEntityCfg("robot")},
+    )
+    cfg.rewards.track_torso = RewTerm(
+        func=track_torso_roll_pitch_exp,
+        weight=2.0,
+        params={
+            "command_name": "posture",
+            "std": 0.2,
+            "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
+        },
+    )
+    cfg.rewards.feet_air_time = None
+    cfg.rewards.joint_deviation_torso = None
+    cfg.rewards.pelvis_height = None
+    cfg.rewards.flat_orientation_l2.weight = -0.2
+    cfg.rewards.lin_vel_z_l2.weight = -0.2
+
+
 @configclass
 class G129DofPostureEnvCfg(G129DofFlatEnvCfg):
     """Stand in place while tracking commanded root height and torso roll and pitch.
@@ -296,34 +330,7 @@ class G129DofPostureEnvCfg(G129DofFlatEnvCfg):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        velocity = self.commands.base_velocity
-        velocity.ranges.lin_vel_x = velocity.ranges.lin_vel_y = velocity.ranges.ang_vel_z = (0.0, 0.0)
-        velocity.heading_command = False
-        velocity.ranges.heading = None
-        velocity.rel_standing_envs = 1.0
-        self.commands.posture = BaseHeightTorsoCommandCfg(resampling_time_range=(3.0, 5.0))
-        self.observations.policy.posture_command = ObsTerm(
-            func=mdp.generated_commands, params={"command_name": "posture"}
-        )
-        self.rewards.track_height = RewTerm(
-            func=track_base_height_exp,
-            weight=2.0,
-            params={"command_name": "posture", "std": 0.05, "asset_cfg": SceneEntityCfg("robot")},
-        )
-        self.rewards.track_torso = RewTerm(
-            func=track_torso_roll_pitch_exp,
-            weight=2.0,
-            params={
-                "command_name": "posture",
-                "std": 0.2,
-                "asset_cfg": SceneEntityCfg("robot", body_names="torso_link"),
-            },
-        )
-        self.rewards.feet_air_time = None
-        self.rewards.joint_deviation_torso = None
-        self.rewards.pelvis_height = None
-        self.rewards.flat_orientation_l2.weight = -0.2
-        self.rewards.lin_vel_z_l2.weight = -0.2
+        configure_g1_29dof_posture_task(self)
 
 
 @configclass
@@ -364,6 +371,15 @@ class NerdG129DofFlatEnvCfg(NerdG1FlatEnvCfg):
         super().__post_init__()
         configure_g1_29dof_robot(self)
         configure_g1_29dof_walking_rewards(self, feet_contact_separation=G1_29DOF_NERD_FEET_CONTACT_SEPARATION)
+
+
+@configclass
+class NerdG129DofPostureEnvCfg(NerdG129DofFlatEnvCfg):
+    """:class:`G129DofPostureEnvCfg` height and torso posture task on NeRD-backed physics."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        configure_g1_29dof_posture_task(self)
 
 
 @configclass
