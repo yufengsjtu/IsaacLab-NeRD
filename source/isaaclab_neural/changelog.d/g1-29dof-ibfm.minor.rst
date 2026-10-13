@@ -9,5 +9,11 @@ Added
 * Added :data:`~isaaclab_neural.robots.g1_29dof.G1_29DOF_IBFM_CFG` with the actuator gains, torque limits and joint
   friction of the I-BFM robot configuration, which differ from BFM-Zero at the waist and wrists.
 * Added :class:`~isaaclab_neural.controllers.ibfm_carry.IbfmCarryController`, the phased latent selection of the
-  I-BFM Carry Box runtime, with optional re-approach and backoff after failed grasps, and the
-  ``isaaclab_neural.eval.ibfm_carry_demo`` script that picks up, carries and places a box on Newton MJWarp.
+  I-BFM Carry Box runtime, with optional re-approach and backoff after failed grasps.
+* Added the ``isaaclab_neural.eval.ibfm_box_demo`` script for Carry, Push and Kick Box on Newton MJWarp. It replaces
+  the asset colliders with the I-BFM training MJCF colliders through a referencing USD layer, starts the box in the
+  expert-data orientation and runs the released Push and Kick Box controllers in a subprocess of the I-BFM
+  environment. Carry succeeded in all 192 randomized starts, push in 97% and kick in 75% of 32 starts.
+* Added the ``isaaclab_neural.eval.bfm_zero_demo`` script for BFM-Zero tracking, reward-prompt and push-recovery
+  demos, and :class:`~isaaclab_neural.eval.newton_video.NewtonFollowVideo` for headless Newton GL recording with a
+  following camera.

@@ -242,3 +242,38 @@ def test_carry_controller_backs_off_after_lift_timeout_and_gets_up_after_falls()
     for _ in range(cfg.fall_detect_steps):
         controller.update(_metrics(root_height=0.2))
     assert controller.phase == "get_up" and controller.falls == 1
+
+
+def test_collision_layer_replaces_asset_colliders_with_mjcf_geometry(tmp_path):
+    pytest.importorskip("mujoco")
+    from isaaclab_neural.eval.ibfm_box_demo import write_ibfm_collision_usd
+
+    from pxr import Gf, Usd, UsdGeom, UsdPhysics
+
+    asset = Usd.Stage.CreateNew(str(tmp_path / "robot.usda"))
+    root = UsdGeom.Xform.Define(asset, "/robot")
+    asset.SetDefaultPrim(root.GetPrim())
+    UsdGeom.Xform.Define(asset, "/robot/link")
+    mesh = UsdGeom.Cube.Define(asset, "/robot/link/collisions/mesh")
+    UsdPhysics.CollisionAPI.Apply(mesh.GetPrim())
+    asset.GetRootLayer().Save()
+    (tmp_path / "robot.xml").write_text(
+        '<mujoco><worldbody><body name="link"><freejoint/>'
+        '<geom name="arm" type="capsule" size="0.03" fromto="0 0 0 0.2 0 0"/>'
+        '<geom name="ghost" type="sphere" size="0.1" contype="0" conaffinity="0"/>'
+        "</body></worldbody></mujoco>"
+    )
+    path = write_ibfm_collision_usd(
+        str(tmp_path / "robot.usda"), str(tmp_path / "layer.usda"), str(tmp_path / "robot.xml")
+    )
+    stage = Usd.Stage.Open(path)
+    assert not stage.GetPrimAtPath("/robot/link/collisions").IsActive()
+    capsule = UsdGeom.Capsule(stage.GetPrimAtPath("/robot/link/ibfm_arm"))
+    assert capsule.GetPrim().HasAPI(UsdPhysics.CollisionAPI)
+    assert capsule.GetRadiusAttr().Get() == pytest.approx(0.03)
+    assert capsule.GetHeightAttr().Get() == pytest.approx(0.2)
+    # the ends of the capsule axis (local z) are the MJCF segment ends
+    transform = UsdGeom.Xformable(capsule).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    ends = sorted(tuple(round(v, 6) for v in transform.Transform(Gf.Vec3d(0, 0, z))) for z in (-0.1, 0.1))
+    assert ends == [(0.0, 0.0, 0.0), (0.2, 0.0, 0.0)]
+    assert not stage.GetPrimAtPath("/robot/link/ibfm_ghost").IsValid()
