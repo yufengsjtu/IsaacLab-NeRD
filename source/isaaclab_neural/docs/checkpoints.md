@@ -1,7 +1,8 @@
 # Archived NeRD checkpoints
 
 The NV-Datasets dataset `IsaacLab-NeRD-Checkpoints` holds one selected NeRD dynamics
-checkpoint per task, archived on 2026-10-15 from the OSMO
+checkpoint per task, archived on 2026-10-15 (see [release.md](release.md) for which entries the
+control-step release keeps or replaces) from the OSMO
 outputs (NV-Datasets `IsaacLab-NeRD-Output`, Swift `isaaclab-nerd-output`) and local
 retrievals. Each directory holds `model.pt`, the training config `train_cfg.yaml`,
 `metadata.json` (source workflow, preset, branch, selection rule, metrics, epoch, SHA-256)

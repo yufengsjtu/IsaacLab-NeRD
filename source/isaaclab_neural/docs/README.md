@@ -348,3 +348,5 @@ for PPO or FPS claims; more training is not a substitute for those checks.
 Archived best NeRD checkpoints for every task are listed in [checkpoints.md](checkpoints.md).
 
 Control-step recipes for every maintained task and the steps to add a new one are in [tasks.md](tasks.md).
+
+What a release tag must prove, the validation already done and the remaining required runs are in [release.md](release.md).
