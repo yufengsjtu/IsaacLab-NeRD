@@ -342,3 +342,5 @@ reduced false presses substantially at the same update budget. Frozen-checkpoint
 evaluation on a newly collected seed still showed position/force outliers and
 incorrect task events. The diagnostic configuration is therefore not qualified
 for PPO or FPS claims; more training is not a substitute for those checks.
+
+Archived best NeRD checkpoints for every task are listed in [checkpoints.md](checkpoints.md).
