@@ -22,3 +22,5 @@ deprecation warning. New code must use `newton_native`; set
 
 G1 development lives in a separate worktree and is not included in this
 release.
+
+Archived best NeRD checkpoints for every task are listed in [checkpoints.md](checkpoints.md).
