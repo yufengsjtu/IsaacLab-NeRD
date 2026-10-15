@@ -570,6 +570,26 @@ def test_frame_cache_is_exclusive_with_other_caches():
         TransformerNeuralSolver(use_kv_cache=True, use_frame_cache=True)
 
 
+@pytest.mark.parametrize(
+    ("states_frame", "anchor", "accepted"), [("world", None, True), ("body", "every", True), ("body", "first", False)]
+)
+def test_frame_cache_requires_world_states_or_per_frame_anchoring(monkeypatch, states_frame, anchor, accepted):
+    from isaaclab_neural.solvers.neural_solver import NeuralSolver
+
+    def init(self, **kwargs):
+        # World-frame solvers never set anchor_frame_step (the contact-free Reach and Cartpole recipes).
+        self.states_frame = states_frame
+        if anchor is not None:
+            self.anchor_frame_step = anchor
+
+    monkeypatch.setattr(NeuralSolver, "__init__", init)
+    if accepted:
+        assert TransformerNeuralSolver(use_frame_cache=True).use_frame_cache
+    else:
+        with pytest.raises(ValueError, match="per-frame anchoring"):
+            TransformerNeuralSolver(use_frame_cache=True)
+
+
 def test_relative_lag_stream_matches_a_sliding_window_over_its_receptive_field():
     # spans (3, 2): each output depends on the newest 1 + 2 + 1 = 4 inputs only.
     model = _gpt("relative_lag", (3, 2))

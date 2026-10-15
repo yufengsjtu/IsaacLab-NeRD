@@ -72,7 +72,7 @@ class TransformerNeuralSolver(NeuralSolver):
         self.kv_cache_rebuild_inputs: dict[str, torch.Tensor | None] | None = None
         self.frame_cache_rebuild_env_ids: torch.Tensor | None = None
         super().__init__(**kwargs)
-        if use_frame_cache and not (self.anchor_frame_step == "every" or self.states_frame == "world"):
+        if use_frame_cache and not (self.states_frame == "world" or self.anchor_frame_step == "every"):
             raise ValueError("use_frame_cache requires per-frame anchoring (anchor_frame_step='every').")
         self.reset_states_history()
 
