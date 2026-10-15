@@ -66,14 +66,10 @@ class Tee(io.TextIOBase):
 
 
 def load_preset(name: str, preset_file: str | None = None) -> dict:
-    path = Path(preset_file) if preset_file else Path(__file__).resolve().parent / "presets" / f"{name}.yaml"
-    if not path.is_file():
-        raise FileNotFoundError(f"Preset {name!r} not found at {path}")
+    """Load a preset and fill ``experiment.task_spec`` defaults, as the submit-time loader does."""
+    from lib.preset import load_preset as load_submit_preset
 
-    preset = load_yaml(path)
-    if not isinstance(preset, dict):
-        raise ValueError(f"Preset file {path} did not contain a mapping.")
-    return preset
+    return load_submit_preset(name, preset_file)
 
 
 def parse_dataset_specs(experiment: dict) -> list[DatasetSpec]:

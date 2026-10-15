@@ -1912,6 +1912,8 @@ def test_control_step_task_collector_args_and_reference(name, tmp_path, monkeypa
         assert ("--checkpoint" in command) == spec.use_policy
         if spec.use_policy:
             assert command[command.index("--policy-task") + 1] == experiment["policy_task"]
+    # The in-pod loader expands the task spec exactly like the submit-time loader.
+    assert run_experiment.load_preset(name)["experiment"] == _expanded_preset(name, monkeypatch)["experiment"]
     evaluation = experiment["policy_evaluation"]
     run_experiment.apply_policy_reference(experiment, evaluation, {evaluation["reference"]["metric"]: 0.25})
     assert experiment["train_cfg_overrides"].endswith("algorithm.eval.selection.reference 0.25")
