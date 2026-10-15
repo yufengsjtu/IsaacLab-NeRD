@@ -14,3 +14,6 @@ Fixed
 
 * Fixed Franka Reach configs for per-backend articulation schema fragments and pinned the Reach recipes to their
   60 Hz physics, 30 Hz control and single-substep contract after the core task moved to 120 Hz.
+* Fixed ``use_frame_cache`` rejecting world-frame solvers, which do not define ``anchor_frame_step``.
+* Fixed weighted training mixtures dropping the per-body contact-force body-name order, which made the
+  body net contact-force head reject multi-source datasets.

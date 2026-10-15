@@ -1248,6 +1248,15 @@ class WeightedMixedTrajectoryDataset(Dataset):
         """Return data keys from the first mixed source."""
         return getattr(self.datasets[self.source_names[0]], "data_keys", ())
 
+    @property
+    def body_net_contact_force_body_names(self) -> tuple[str, ...]:
+        """Return the body-name order of per-body force labels shared by every source, or ``()`` if they differ."""
+        orders = {
+            tuple(getattr(self.datasets[name], "body_net_contact_force_body_names", None) or ())
+            for name in self.source_names
+        }
+        return orders.pop() if len(orders) == 1 else ()
+
     def __len__(self) -> int:
         """Return the weighted virtual dataset length."""
         return self.length

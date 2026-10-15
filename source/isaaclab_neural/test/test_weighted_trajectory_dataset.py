@@ -50,3 +50,17 @@ def test_weighted_mix_rejects_empty_or_mismatched_sources():
         WeightedMixedTrajectoryDataset({"a": _FakeTrajectoryDataset([1])}, {"b": 1.0})
     with pytest.raises(ValueError, match="non-empty"):
         WeightedMixedTrajectoryDataset({"a": _FakeTrajectoryDataset([])}, {"a": 1.0})
+
+
+def test_weighted_mix_exposes_a_shared_body_force_order_only():
+    def source(names):
+        dataset = _FakeTrajectoryDataset([1])
+        dataset.body_net_contact_force_body_names = names
+        return dataset
+
+    order = ("base", "LF_FOOT")
+    shared = WeightedMixedTrajectoryDataset({"a": source(order), "b": source(order)}, {"a": 1.0, "b": 1.0})
+    assert shared.body_net_contact_force_body_names == order
+    # Differing orders are reported as missing so trainer validation rejects the mixture.
+    mixed = WeightedMixedTrajectoryDataset({"a": source(order), "b": source(order[::-1])}, {"a": 1.0, "b": 1.0})
+    assert mixed.body_net_contact_force_body_names == ()
