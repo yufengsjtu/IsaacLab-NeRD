@@ -197,6 +197,17 @@ gym.register(
     },
 )
 
+gym.register(
+    id="Isaac-Lift-Cube-Franka-Policy-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{FrankaLiftCubePolicyEnvCfg.__module__}:FrankaLiftCubePolicyEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{franka_lift_agents.__name__}.rsl_rl_ppo_cfg:FrankaPPORunnerCfg",
+        "default_agent": "rsl_rl",
+    },
+)
+
 _ALLEGRO_REORIENT_RSL_RL_CFG = f"{allegro_reorient_agents.__name__}.rsl_rl_ppo_cfg:AllegroHandManagerPPORunnerCfg"
 
 gym.register(
