@@ -14,7 +14,7 @@ noise (one SO101 seed alone varied between 93.5% and 95.5% closed-loop success a
 | Item | Value |
 |---|---|
 | Branch | `rowany/nerd-optimized` (GitHub `yufengsjtu/IsaacLab-NeRD`) |
-| Candidate commit | `5a55360a88` (2026-10-15) |
+| Candidate code | `5a55360a88` (2026-10-15); later commits up to the tag change documentation only |
 | Proposed tags | `nerd-v1.0.0-rc1` now; `nerd-v1.0.0` on the same commit once every required run below passes |
 | Image | `docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095` (Newton 1.6.0) |
 
@@ -110,7 +110,7 @@ python -m isaaclab_neural.eval.allegro_reorient_policy \
 ## Tagging
 
 ```bash
-git tag -a nerd-v1.0.0-rc1 5a55360a88 -m "NeRD control-step pipeline release candidate (all tasks except G1)"
+git tag -a nerd-v1.0.0-rc1 rowany/nerd-optimized -m "NeRD control-step pipeline release candidate (all tasks except G1)"
 git push git@github.com:yufengsjtu/IsaacLab-NeRD.git nerd-v1.0.0-rc1
 ```
 
