@@ -604,6 +604,8 @@ def build_allegro_collector_args(
     ]
     if experiment.get("record_control_steps"):
         args.append("--record-control-steps")
+    if experiment.get("record_body_net_contact_forces"):
+        args.append("--record-body-net-contact-forces")
     if spec.use_policy:
         args += ["--checkpoint", policy_checkpoint]
         if experiment.get("policy_task"):

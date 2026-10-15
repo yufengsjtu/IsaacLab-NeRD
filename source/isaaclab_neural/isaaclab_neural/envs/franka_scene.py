@@ -100,9 +100,21 @@ def panda_robot_cfg(*, enable_self_collisions: bool) -> ArticulationCfg:
 
 
 def apply_franka_reach_contact_free_scene(env_cfg) -> None:
-    """Drop the Newton table articulation and disable Panda self-collisions."""
+    """Drop the Newton table articulation and disable Panda self-collisions.
+
+    The robot spawner may carry one articulation-property config or a list of per-backend schema fragments; each
+    fragment's own self-collision field is disabled.
+    """
     env_cfg.scene.table = None
-    env_cfg.scene.robot.spawn.articulation_props.enabled_self_collisions = False
+    props = env_cfg.scene.robot.spawn.articulation_props
+    fragments = props if isinstance(props, list) else [props]
+    updated = []
+    for fragment in fragments:
+        for field_name in ("enabled_self_collisions", "self_collision_enabled"):
+            if hasattr(fragment, field_name):
+                fragment = fragment.replace(**{field_name: False})
+        updated.append(fragment)
+    env_cfg.scene.robot.spawn.articulation_props = updated if isinstance(props, list) else updated[0]
 
 
 def apply_franka_lift_nerd_scene(env_cfg) -> None:

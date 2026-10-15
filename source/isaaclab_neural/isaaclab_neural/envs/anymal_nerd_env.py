@@ -31,6 +31,7 @@ from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 
 from ..contacts.geometry_mdp import GeometryFeetAirTime, geometry_illegal_contact, geometry_undesired_contacts
 from .neural_env_wrapper import NerdManagerBasedRLEnv
+from .recording import apply_frame_stepping
 
 DEFAULT_ANYMAL_C_FLAT_NERD_MODEL_PATH: str | None = None
 DEFAULT_ANYMAL_C_ROUGH_NERD_MODEL_PATH: str | None = None
@@ -193,8 +194,7 @@ class AnymalCFlatControlStepDatasetGenEnvCfg(AnymalCFlatPolicyEnvCfg):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self.sim.physics.newton_mjwarp.use_cuda_graph = False
-        self.sim.use_newton_actuators = False
+        apply_frame_stepping(self)
 
 
 @configclass
@@ -253,6 +253,49 @@ class NerdAnymalCRoughEnvCfg(AnymalCRoughEnvCfg):
         self.rewards.track_lin_vel_xy_exp.weight = 1.0
         self.rewards.track_ang_vel_z_exp.weight = 0.5
         self.rewards.feet_air_time.weight = 0.125
+
+
+def _apply_native_policy_physics(env_cfg) -> None:
+    """Select the Newton MJWarp preset with a zero shape margin, as the NeRD environments use."""
+    physics = env_cfg.sim.physics
+    newton_cfg = physics.newton_mjwarp
+    if newton_cfg.default_shape_cfg is None:
+        newton_cfg.default_shape_cfg = NewtonShapeCfg(margin=0.0)
+    physics.default = newton_cfg
+
+
+@configclass
+class AnymalCRoughPolicyEnvCfg(AnymalCRoughEnvCfg):
+    """Native rough-terrain Anymal-C matching :class:`NerdAnymalCRoughControlStepEnvCfg` for data collection.
+
+    The stock observations (including the height scan), terrain, rewards and the contact sensor used for net-force
+    labels are kept; pushes are removed, the stateless ANYdrive actuator replaces the LSTM, and the Newton MJWarp
+    preset with Newton contacts and a zero shape margin is selected.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.events.push_robot = None  # type: ignore[assignment]
+        apply_anymal_simple_actuator(self)
+        _apply_native_policy_physics(self)
+
+
+@configclass
+class AnymalCRoughControlStepDatasetGenEnvCfg(AnymalCRoughPolicyEnvCfg):
+    """Rough policy environment stepped frame by frame for the env-driven collector."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        apply_frame_stepping(self)
+
+
+@configclass
+class NerdAnymalCRoughControlStepEnvCfg(NerdAnymalCRoughEnvCfg):
+    """Rough-terrain Anymal-C NeRD with the stateless actuator of :class:`AnymalCRoughPolicyEnvCfg`."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        apply_anymal_simple_actuator(self)
 
 
 class NerdAnymalCRoughEnv(NerdManagerBasedRLEnv):

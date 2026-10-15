@@ -24,7 +24,7 @@ from isaaclab_neural.envs.franka_reach_nerd_env import (
     NerdFrankaReachEnvCfg,
 )
 from isaaclab_neural.envs.franka_scene import FRANKA_PANDA_CFG as NERD_FRANKA_PANDA_CFG
-from isaaclab_neural.envs.franka_scene import apply_franka_lift_nerd_scene
+from isaaclab_neural.envs.franka_scene import apply_franka_lift_nerd_scene, apply_franka_reach_contact_free_scene
 from isaaclab_neural.envs.incremental_joint_position import IncrementalJointPositionActionCfg
 from isaaclab_neural.physics import NerdNewtonCfg
 from isaaclab_neural.utils.commons import JOINT_F_LIM, JOINT_Q_MAX, JOINT_Q_MIN, JOINT_QD_LIM
@@ -69,13 +69,17 @@ def test_franka_reach_nerd_is_contact_free_and_tableless() -> None:
     cfg = NerdFrankaReachEnvCfg()
 
     assert cfg.scene.table is None
-    assert cfg.scene.robot.spawn.articulation_props.enabled_self_collisions is False
+    props = cfg.scene.robot.spawn.articulation_props
+    for fragment in props if isinstance(props, list) else [props]:
+        assert getattr(fragment, "enabled_self_collisions", False) is False
+        assert getattr(fragment, "self_collision_enabled", False) is False
     standard = resolve_presets(FrankaReachEnvCfg(), {"newton_mjwarp"})
     resolve_presets(cfg, {"newton_mjwarp"})
     for field in ("observations", "actions", "events", "commands", "rewards", "terminations", "curriculum"):
         assert getattr(cfg, field).to_dict() == getattr(standard, field).to_dict(), field
-    assert cfg.sim.dt == standard.sim.dt
-    assert cfg.decimation == standard.decimation
+    # The Reach recipes keep the 60 Hz physics / 30 Hz control contract of their teacher and datasets.
+    policy = FrankaReachPolicyEnvCfg()
+    assert (cfg.sim.dt, cfg.decimation) == (policy.sim.dt, policy.decimation) == (1.0 / 60.0, 2)
     assert cfg.episode_length_s == standard.episode_length_s
     assert isinstance(cfg.sim.physics, NerdNewtonCfg)
     assert cfg.sim.physics.solver_cfg.contact_mode == "newton_native"
@@ -89,9 +93,12 @@ def test_franka_reach_dataset_gen_drops_table_articulation() -> None:
     cfg = FrankaReachDatasetGenEnvCfg()
 
     assert cfg.scene.table is None
-    assert cfg.scene.robot.spawn.articulation_props.enabled_self_collisions is False
     expected_robot = FRANKA_PANDA_LIFT_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-    expected_robot.spawn.articulation_props.enabled_self_collisions = False
+    apply_franka_reach_contact_free_scene(SimpleNamespace(scene=SimpleNamespace(table=None, robot=expected_robot)))
+    props = cfg.scene.robot.spawn.articulation_props
+    for fragment in props if isinstance(props, list) else [props]:
+        assert getattr(fragment, "enabled_self_collisions", False) is False
+        assert getattr(fragment, "self_collision_enabled", False) is False
     expected_robot.soft_joint_pos_limit_factor = FRANKA_REACH_DATASET_SOFT_JOINT_POS_LIMIT_FACTOR
     assert cfg.scene.robot.to_dict() == expected_robot.to_dict()
     assert hasattr(cfg.sim.physics, "newton_mjwarp")

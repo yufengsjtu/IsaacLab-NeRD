@@ -24,13 +24,17 @@ from .anymal_c_dataset_gen_cfg import AnymalCDatasetGenFlatEnvCfg, AnymalCDatase
 from .anymal_nerd_env import (
     AnymalCFlatControlStepDatasetGenEnvCfg,
     AnymalCFlatPolicyEnvCfg,
+    AnymalCRoughControlStepDatasetGenEnvCfg,
+    AnymalCRoughPolicyEnvCfg,
     NerdAnymalCFlatControlStepEnvCfg,
     NerdAnymalCFlatEnv,
     NerdAnymalCFlatEnvCfg,
+    NerdAnymalCRoughControlStepEnvCfg,
     NerdAnymalCRoughEnv,
     NerdAnymalCRoughEnvCfg,
 )
 from .cartpole_nerd_env import NerdCartpoleEnv, NerdCartpoleEnvCfg
+from .cartpole_policy_env import CartpoleControlStepDatasetGenEnvCfg, CartpolePolicyEnvCfg
 from .franka_lift_nerd_env import (
     FrankaLiftCubeDatasetGenEnvCfg,
     FrankaLiftCubePolicyEnvCfg,
@@ -38,6 +42,7 @@ from .franka_lift_nerd_env import (
     NerdFrankaLiftEnvCfg,
 )
 from .franka_reach_nerd_env import (
+    FrankaReachControlStepDatasetGenEnvCfg,
     FrankaReachDatasetGenEnvCfg,
     FrankaReachPolicyEnvCfg,
     NerdFrankaReachEnv,
@@ -59,6 +64,28 @@ gym.register(
         ),
         "skrl_cfg_entry_point": f"{cartpole_agents.__name__}:skrl_ppo_cfg.yaml",
         "sb3_cfg_entry_point": f"{cartpole_agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Cartpole-Policy-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{CartpolePolicyEnvCfg.__module__}:CartpolePolicyEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{cartpole_agents.__name__}.rsl_rl_ppo_cfg:CartpolePPORunnerCfg",
+        "default_agent": "rsl_rl",
+    },
+)
+
+gym.register(
+    id="Isaac-Cartpole-ControlStep-Dataset-Gen-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{CartpoleControlStepDatasetGenEnvCfg.__module__}:CartpoleControlStepDatasetGenEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{cartpole_agents.__name__}.rsl_rl_ppo_cfg:CartpolePPORunnerCfg",
+        "default_agent": "rsl_rl",
     },
 )
 
@@ -124,6 +151,40 @@ gym.register(
     },
 )
 
+_ANYMAL_C_ROUGH_RSL_RL_CFG = f"{anymal_c_agents.__name__}.rsl_rl_ppo_cfg:AnymalCRoughPPORunnerCfg"
+
+gym.register(
+    id="Isaac-Velocity-Rough-Anymal-C-Policy-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{AnymalCRoughPolicyEnvCfg.__module__}:AnymalCRoughPolicyEnvCfg",
+        "rsl_rl_cfg_entry_point": _ANYMAL_C_ROUGH_RSL_RL_CFG,
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Rough-Anymal-C-ControlStep-Dataset-Gen-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{AnymalCRoughControlStepDatasetGenEnvCfg.__module__}:AnymalCRoughControlStepDatasetGenEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": _ANYMAL_C_ROUGH_RSL_RL_CFG,
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Rough-Anymal-C-ControlStep-NeRD-v0",
+    entry_point=f"{NerdAnymalCRoughEnv.__module__}:NerdAnymalCRoughEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{NerdAnymalCRoughControlStepEnvCfg.__module__}:NerdAnymalCRoughControlStepEnvCfg",
+        "rsl_rl_cfg_entry_point": _ANYMAL_C_ROUGH_RSL_RL_CFG,
+    },
+)
+
 gym.register(
     id="Isaac-Velocity-Flat-Anymal-C-Dataset-Gen-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
@@ -170,6 +231,19 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{FrankaReachPolicyEnvCfg.__module__}:FrankaReachPolicyEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{franka_reach_agents.__name__}.rsl_rl_ppo_cfg:FrankaReachPPORunnerCfg",
+        "default_agent": "rsl_rl",
+    },
+)
+
+gym.register(
+    id="Isaac-Reach-Franka-ControlStep-Dataset-Gen-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{FrankaReachControlStepDatasetGenEnvCfg.__module__}:FrankaReachControlStepDatasetGenEnvCfg"
+        ),
         "rsl_rl_cfg_entry_point": f"{franka_reach_agents.__name__}.rsl_rl_ppo_cfg:FrankaReachPPORunnerCfg",
         "default_agent": "rsl_rl",
     },
@@ -279,6 +353,12 @@ __all__ = [
     "AnymalCDatasetGenRoughEnvCfg",
     "AnymalCFlatControlStepDatasetGenEnvCfg",
     "AnymalCFlatPolicyEnvCfg",
+    "AnymalCRoughControlStepDatasetGenEnvCfg",
+    "AnymalCRoughPolicyEnvCfg",
+    "CartpoleControlStepDatasetGenEnvCfg",
+    "CartpolePolicyEnvCfg",
+    "FrankaReachControlStepDatasetGenEnvCfg",
+    "NerdAnymalCRoughControlStepEnvCfg",
     "FrankaLiftCubeDatasetGenEnvCfg",
     "FrankaLiftCubePolicyEnvCfg",
     "FrankaReachDatasetGenEnvCfg",

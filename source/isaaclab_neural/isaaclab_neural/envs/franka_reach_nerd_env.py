@@ -21,6 +21,7 @@ from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 from .franka_scene import FRANKA_PANDA_CFG, apply_franka_lift_robot, apply_franka_reach_contact_free_scene
 from .incremental_joint_position import IncrementalJointPositionActionCfg, implicit_pd_rest_saturation_increment
 from .neural_env_wrapper import NerdManagerBasedRLEnv
+from .recording import apply_frame_stepping
 
 DEFAULT_FRANKA_REACH_NERD_MODEL_PATH: str | None = None
 
@@ -82,6 +83,27 @@ def franka_reach_dataset_arm_action() -> IncrementalJointPositionActionCfg:
     )
 
 
+FRANKA_REACH_PHYSICS_DT = 1.0 / 60.0
+"""Physics step [s] of the Reach NeRD recipes and the Menagerie Reach teacher."""
+
+FRANKA_REACH_DECIMATION = 2
+"""Physics frames per 30 Hz Reach control step."""
+
+
+def apply_franka_reach_timing(env_cfg) -> None:
+    """Pin the 60 Hz physics and 30 Hz control timing the Reach teacher and datasets were recorded with.
+
+    The core Reach task later moved to 120 Hz physics with decimation 4 and two MJWarp substeps; the Reach NeRD recipes
+    keep their one-substep contract.
+    """
+    env_cfg.sim.dt = FRANKA_REACH_PHYSICS_DT
+    env_cfg.decimation = FRANKA_REACH_DECIMATION
+    env_cfg.sim.render_interval = FRANKA_REACH_DECIMATION
+    newton_cfg = getattr(env_cfg.sim.physics, "newton_mjwarp", None)
+    if newton_cfg is not None:
+        newton_cfg.num_substeps = 1
+
+
 @configclass
 class FrankaReachDatasetGenEnvCfg(FrankaReachEnvCfg):
     """Franka Reach config for contact-free NeRD dataset generation.
@@ -107,6 +129,7 @@ class FrankaReachDatasetGenEnvCfg(FrankaReachEnvCfg):
         super().__post_init__()
         apply_franka_lift_robot(self)
         apply_franka_reach_contact_free_scene(self)
+        apply_franka_reach_timing(self)
         self.scene.robot.soft_joint_pos_limit_factor = FRANKA_REACH_DATASET_SOFT_JOINT_POS_LIMIT_FACTOR
         self.actions.arm_action = franka_reach_dataset_arm_action()
         finger_pos = self.scene.robot.init_state.joint_pos["panda_finger_joint.*"]
@@ -148,6 +171,15 @@ class FrankaReachPolicyEnvCfg(FrankaReachDatasetGenEnvCfg):
 
 
 @configclass
+class FrankaReachControlStepDatasetGenEnvCfg(FrankaReachPolicyEnvCfg):
+    """Reach policy environment stepped frame by frame for the env-driven control-step collector."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        apply_frame_stepping(self)
+
+
+@configclass
 class NerdFrankaReachEnvCfg(FrankaReachEnvCfg):
     """Manager-based Franka Reach config using contact-free NeRD Newton physics."""
 
@@ -159,6 +191,7 @@ class NerdFrankaReachEnvCfg(FrankaReachEnvCfg):
         super().__post_init__()
         apply_franka_lift_robot(self)
         apply_franka_reach_contact_free_scene(self)
+        apply_franka_reach_timing(self)
         self.actions.arm_action = franka_reach_rl_arm_action()
         nerd_physics = NerdNewtonCfg(
             solver_cfg=NerdSolverCfg(

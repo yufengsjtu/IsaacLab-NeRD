@@ -1345,6 +1345,8 @@ def test_public_presets_have_valid_unique_training_mappings() -> None:
 
 def test_franka_menagerie_dataset_paths_match_generation_and_training() -> None:
     for path in PRESET_DIR.glob("franka_reach*.yaml"):
+        if "control_step" in path.stem:
+            continue  # Control-step presets are checked by test_control_step_task_presets_follow_allegro_recipe.
         preset = _load_yaml(path)
         experiment = preset["experiment"]
         assert "menagerie-60hz" in preset["workflow"]["dataset_subdir"]
@@ -1805,29 +1807,37 @@ def test_allegro_collector_args_map_specs_to_collection_modes(tmp_path, monkeypa
         assert noisy == (spec.policy_action_noise_std > 0.0)
 
 
-CONTROL_STEP_TASK_PRESETS = ("anymal_flat_control_step", "franka_lift_control_step")
+CONTROL_STEP_TASK_PRESETS = (
+    "anymal_flat_control_step",
+    "anymal_rough_control_step",
+    "cartpole_control_step",
+    "franka_lift_control_step",
+    "franka_reach_control_step",
+)
+
+
+def _expanded_preset(name: str, monkeypatch) -> dict:
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    from lib.preset import load_preset
+
+    return load_preset(name)
 
 
 @pytest.mark.parametrize("name", CONTROL_STEP_TASK_PRESETS)
-def test_control_step_task_presets_follow_allegro_recipe(name) -> None:
-    preset = _load_yaml(PRESET_DIR / f"{name}.yaml")
-    smoke = _load_yaml(PRESET_DIR / f"{name}_smoke.yaml")
+def test_control_step_task_presets_follow_allegro_recipe(name, monkeypatch) -> None:
+    preset = _expanded_preset(name, monkeypatch)
+    smoke = _expanded_preset(f"{name}_smoke", monkeypatch)
     allegro = _load_yaml(PRESET_DIR / "allegro_reorient_control_step.yaml")["experiment"]
     experiment = preset["experiment"]
     config = _load_yaml(REPOSITORY_ROOT / experiment["train_cfg"])
     allegro_cfg = _load_yaml(REPOSITORY_ROOT / allegro["train_cfg"])
     solver, reference_solver = config["env"]["neural_solver_cfg"], allegro_cfg["env"]["neural_solver_cfg"]
-    for key in (
-        "step_mode",
-        "joint_target_input",
-        "reset_history",
-        "use_frame_cache",
-        "inference_precision",
-        "inference_compile",
-        "contact_filter",
-        "contact_token_frame",
-        "num_states_history",
-    ):
+    keys = ["step_mode", "joint_target_input", "reset_history", "use_frame_cache", "inference_precision"]
+    keys += ["inference_compile", "num_states_history"]
+    contact_free = solver["num_contacts_per_env"] == 0
+    if not contact_free:
+        keys += ["contact_filter", "contact_token_frame"]
+    for key in keys:
         assert solver[key] == reference_solver[key], key
     dataset, reference_dataset = config["algorithm"]["dataset"], allegro_cfg["algorithm"]["dataset"]
     for key in ("capacity_unit", "capacity_scope", "window_sampling", "load_mode", "resident_float16_keys"):
@@ -1835,11 +1845,13 @@ def test_control_step_task_presets_follow_allegro_recipe(name) -> None:
     assert config["algorithm"]["precision"] == allegro_cfg["algorithm"]["precision"]
     assert config["algorithm"]["optimizer"]["fused"] is True
     assert config["inputs"]["low_dim"] == allegro_cfg["inputs"]["low_dim"]
+    assert ("contact_set" in config["inputs"]) is not contact_free
     assert config["network"]["transformer"] == allegro_cfg["network"]["transformer"]
     assert config["env"]["env_name"] == experiment["env_name"]
     assert experiment["dataset_collector"] == "env_driven" and experiment["record_control_steps"] is True
-    assert experiment["contact_filter"] == solver["contact_filter"]
-    assert experiment["max_contact_tokens"] == solver["max_contact_tokens"]
+    assert experiment["max_contact_tokens"] == solver["num_contacts_per_env"]
+    if not contact_free:
+        assert experiment["contact_filter"] == solver["contact_filter"]
     specs = experiment["dataset_specs"]
     root = Path(experiment["dataset_dir"]) / experiment["env_name"]
     assert {Path(source["path"]) for source in dataset["train_datasets"].values()} == {
@@ -1852,18 +1864,23 @@ def test_control_step_task_presets_follow_allegro_recipe(name) -> None:
     assert train == experiment["train_transitions"] == dataset["max_capacity"]
     assert sum(source["max_capacity"] for source in dataset["train_datasets"].values()) == dataset["max_capacity"]
     assert experiment["parallel_collection_gpus"] == preset["resources"]["num_gpu"] <= len(specs)
+    # Auxiliary force heads follow the labels the collector records.
+    finger_head = config["network"].get("finger_object_normal_force_head", {}).get("enabled", False)
+    body_head = config["network"].get("body_net_contact_force_head", {}).get("enabled", False)
+    assert body_head == bool(experiment.get("record_body_net_contact_forces"))
+    assert finger_head == (experiment["data_gen_task"] == "Isaac-Lift-Cube-Franka-Dataset-Gen-v0")
     # Closed-loop selection is anchored to the native metric reported by the teacher gate.
     eval_cfg = config["algorithm"]["eval"]
     evaluation = experiment["policy_evaluation"]
     assert eval_cfg["mode"] == "policy_rollout" and eval_cfg["selection"]["reference"] is None
     assert eval_cfg["policy_checkpoint"] == experiment["policy_checkpoint"]
+    assert eval_cfg["policy_task"] == experiment["policy_task"] != experiment["data_gen_task"]
     assert evaluation["reference"] == {
         "metric": eval_cfg["selection"]["metric"],
         "cfg_key": "algorithm.eval.selection.reference",
     }
-    assert evaluation["args"] == ["--task", experiment["policy_task"], "--metric", eval_cfg["selection"]["metric"]]
-    assert eval_cfg["policy_task"] == experiment["policy_task"] != experiment["data_gen_task"]
-    assert [metric["name"] for metric in eval_cfg["metrics"]] == [eval_cfg["selection"]["metric"]]
+    assert evaluation["args"][:2] == ["--task", experiment["policy_task"]]
+    assert [metric["name"] for metric in eval_cfg["metrics"]] == evaluation["args"][3::2]
     bench = experiment["throughput_benchmark"]
     assert bench["env_args"] == ["--task", experiment["policy_task"], "--nerd-task", experiment["train_task"]]
     # The smoke preset runs the same pipeline at small sizes with its own dataset cache.
@@ -1876,10 +1893,9 @@ def test_control_step_task_presets_follow_allegro_recipe(name) -> None:
 
 @pytest.mark.parametrize("name", CONTROL_STEP_TASK_PRESETS)
 def test_control_step_task_collector_args_and_reference(name, tmp_path, monkeypatch) -> None:
-    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    experiment = dict(_expanded_preset(name, monkeypatch)["experiment"])
     import run_experiment
 
-    experiment = dict(_load_yaml(PRESET_DIR / f"{name}.yaml")["experiment"])
     teacher = tmp_path / "model.pt"
     teacher.write_bytes(b"")
     experiment["policy_checkpoint"] = str(teacher)
@@ -1889,6 +1905,8 @@ def test_control_step_task_collector_args_and_reference(name, tmp_path, monkeypa
         assert command[command.index("--task") + 1] == experiment["data_gen_task"]
         assert command[command.index("--env-name") + 1] == experiment["env_name"]
         assert command[command.index("--dataset") + 1] == str(tmp_path / experiment["env_name"] / spec.filename)
+        assert command[command.index("--max-contact-tokens") + 1] == str(experiment["max_contact_tokens"])
+        assert ("--record-body-net-contact-forces" in command) == bool(experiment.get("record_body_net_contact_forces"))
         mode = command[command.index("--collection-mode") + 1]
         assert mode == ("policy" if spec.use_policy else "zero" if spec.zero_actions else "random")
         assert ("--checkpoint" in command) == spec.use_policy
@@ -1899,3 +1917,14 @@ def test_control_step_task_collector_args_and_reference(name, tmp_path, monkeypa
     assert experiment["train_cfg_overrides"].endswith("algorithm.eval.selection.reference 0.25")
     with pytest.raises(RuntimeError, match="did not report"):
         run_experiment.apply_policy_reference(experiment, evaluation, {})
+
+
+@pytest.mark.parametrize("name", ["cartpole_teacher", "anymal_rough_teacher", "anymal_flat_teacher"])
+def test_control_step_teacher_presets_train_on_the_spec_policy_task(name) -> None:
+    from isaaclab_neural.tasks import TASK_SPECS
+
+    teacher = _load_yaml(PRESET_DIR / f"{name}.yaml")["experiment"]["teacher_policy"]
+    spec = next(spec for spec in TASK_SPECS.values() if spec.teacher_preset == name)
+    assert teacher["task"] == spec.policy_task
+    assert teacher["evaluation"]["args"][:2] == ["--task", spec.policy_task]
+    assert teacher["evaluation"]["max_metrics"]["failure_rate"] <= 0.3

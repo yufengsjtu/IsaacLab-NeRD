@@ -13,6 +13,10 @@ selects NeRD checkpoints during training (``algorithm.eval.mode: policy_rollout`
   linear velocity.
 * ``pose_success_rate``: fraction of world steps whose ``command`` pose term reports a position error below
   ``position_threshold`` [m] (and, when tracked, an orientation error below ``orientation_threshold`` [rad]).
+* ``command_error``: mean of the ``key`` metric (default ``position_error``) of the ``command`` term (default
+  ``ee_pose``), e.g. the Reach end-effector position error [m].
+
+``--task-spec NAME`` fills ``--task``, ``--nerd-task`` and the metrics from :mod:`isaaclab_neural.tasks`.
 
 Every report also contains completed episodes, the failure rate (episodes ended by a termination other than a
 timeout), the mean episode length and the mean reward per world step. ``--video-dir`` records world 0 with the
@@ -32,7 +36,7 @@ from typing import Any
 import torch
 from isaaclab_neural.eval.eval import build_policy_env, load_saved_agent_cfg_for_policy, reset_policy
 
-METRIC_NAMES = ("velocity_tracking_error", "pose_success_rate")
+METRIC_NAMES = ("velocity_tracking_error", "pose_success_rate", "command_error")
 """Task metrics supported by :func:`rollout_task_policy`."""
 
 
@@ -82,6 +86,9 @@ def _metric_values(env: Any, metric: dict[str, Any]) -> torch.Tensor:
         if "orientation_error" in errors:
             success &= errors["orientation_error"] < float(metric.get("orientation_threshold", 0.5))
         return success.float()
+    if name == "command_error":
+        errors = env.command_manager.get_term(metric.get("command", "ee_pose")).metrics
+        return errors[metric.get("key", "position_error")].float()
     raise ValueError(f"Unknown rollout metric {name!r}; expected one of {METRIC_NAMES}.")
 
 
@@ -135,8 +142,9 @@ def rollout_task_policy(
             completed += 1
             if on_step is not None:
                 on_step(env)
-            finite = bool(
-                torch.isfinite(env.scene["robot"].data.joint_pos.torch).all() and torch.isfinite(reward).all()
+            finite = bool(torch.isfinite(reward).all()) and all(
+                bool(torch.isfinite(articulation.data.joint_pos.torch).all())
+                for articulation in env.scene.articulations.values()
             )
             if not finite:
                 break
@@ -293,7 +301,8 @@ def main() -> None:
     import isaaclab_tasks  # noqa: F401 - registers the core and contrib tasks
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task", required=True, help="Native MJWarp task.")
+    parser.add_argument("--task-spec", help="Registered isaaclab_neural.tasks spec supplying task and metric defaults.")
+    parser.add_argument("--task", help="Native MJWarp task (required without --task-spec).")
     parser.add_argument("--policy-task", help="Task supplying the fallback RSL-RL runner config; defaults to --task.")
     parser.add_argument("--checkpoint", type=Path, required=True, help="RSL-RL policy checkpoint.")
     add_nerd_override_args(parser)
@@ -308,6 +317,15 @@ def main() -> None:
     add_launcher_args(parser)
     args = parser.parse_args()
     metrics = [{"name": name} for name in args.metric]
+    if args.task_spec:
+        from isaaclab_neural.tasks import get_task_spec
+
+        spec = get_task_spec(args.task_spec)
+        args.task = args.task or spec.policy_task
+        args.nerd_task = args.nerd_task or spec.nerd_task
+        metrics = metrics or [dict(metric) for metric in spec.metrics]
+    if not args.task:
+        parser.error("--task or --task-spec is required")
     if args.num_envs <= 0 or args.control_steps <= 0 or args.video_length <= 0:
         parser.error("environment count and rollout/video lengths must be positive")
     if args.report.exists():

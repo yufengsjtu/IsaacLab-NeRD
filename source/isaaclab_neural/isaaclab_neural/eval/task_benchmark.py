@@ -74,8 +74,8 @@ def main() -> None:
     sub = parser.add_subparsers(dest="mode", required=True)
     model = sub.add_parser("model", help="Model-only NeRD inference over a batch sweep.")
     model.add_argument("--nerd-checkpoint", type=Path, required=True)
-    model.add_argument("--num-bodies", type=int, required=True, help="Primary contact bodies per world.")
-    model.add_argument("--frames-per-control-step", type=int, required=True, help="Task decimation.")
+    model.add_argument("--num-bodies", type=int, help="Primary contact bodies per world.")
+    model.add_argument("--frames-per-control-step", type=int, help="Task decimation.")
     model.add_argument("--batch-sizes", type=int, nargs="+", default=[64, 256, 1024, 2048, 4096, 8192])
     model.add_argument("--valid-tokens", type=int, default=16, help="Valid contact rows per world and frame.")
     model.add_argument("--autocast", choices=("fp32", "fp16", "bf16"), default="fp32")
@@ -83,7 +83,7 @@ def main() -> None:
     model.add_argument("--iterations", type=int, default=50)
     model.add_argument("--device", default="cuda:0")
     env = sub.add_parser("env", help="Policy-driven end-to-end environment steps at one world count.")
-    env.add_argument("--task", required=True, help="Native MJWarp task.")
+    env.add_argument("--task", help="Native MJWarp task (required without --task-spec).")
     env.add_argument("--policy-task", help="Task supplying the fallback RSL-RL runner config; defaults to --task.")
     env.add_argument("--checkpoint", type=Path, required=True, help="RSL-RL teacher checkpoint.")
     add_nerd_override_args(env)
@@ -96,7 +96,22 @@ def main() -> None:
     add_launcher_args(env)
     for sub_parser in (model, env):
         sub_parser.add_argument("--report", type=Path, required=True)
+        sub_parser.add_argument("--task-spec", help="Registered isaaclab_neural.tasks spec supplying the defaults.")
     args = parser.parse_args()
+    if args.task_spec:
+        from isaaclab_neural.tasks import get_task_spec
+
+        spec = get_task_spec(args.task_spec)
+        if args.mode == "model":
+            args.num_bodies = args.num_bodies or spec.num_bodies
+            args.frames_per_control_step = args.frames_per_control_step or spec.frames_per_control_step
+        else:
+            args.task = args.task or spec.policy_task
+            args.nerd_task = args.nerd_task or spec.nerd_task
+    if args.mode == "model" and not (args.num_bodies and args.frames_per_control_step):
+        parser.error("model mode needs --num-bodies and --frames-per-control-step, or --task-spec")
+    if args.mode == "env" and not args.task:
+        parser.error("env mode needs --task or --task-spec")
     if args.report.exists():
         raise FileExistsError(args.report)
     sys.argv = [sys.argv[0]]

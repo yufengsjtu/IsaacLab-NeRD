@@ -1,0 +1,130 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Two-GPU end-to-end check of anymal_rough_control_step at sizes that only exercise the pipeline.
+
+workflow:
+  base_name: anymal-rough-control-step-smoke
+  dataset_subdir: anymal-c-rough-control-step-smoke-v1
+  image: docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095
+
+resources:
+  num_gpu: 2
+  num_cpu: 24
+  memory: 128Gi
+  storage: 192Gi
+  platform: ovx-l40
+
+experiment:
+  # Task ids, dataset environment name, teacher, contact capacity, auxiliary labels and evaluation/benchmark task
+  # arguments come from isaaclab_neural.tasks; keys set here override the spec.
+  task_spec: anymal_c_rough
+  dataset_dir: ./data/datasets/anymal-c-rough-control-step-v1
+  train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_rough_control_step.yaml
+  num_gpus: 2
+  contact_mode: newton_native
+  contact_representation: contact_tokens
+  contact_packing_policy: body_round_robin_pair_atomic
+  contact_filter: solver_active_movable
+  record_control_steps: true
+  collection_chunk_control_steps: 64
+  sample_mode: action
+  initial_states_source: env
+  train_transitions: 30000
+  valid_transitions: 8000
+  data_gen_num_envs: 256
+  train_num_envs: 64
+  # Clips of 32 control steps.
+  trajectory_length: 32
+  parallel_collection_gpus: 2
+  no_time_stamp: true
+  headless: true
+  update_dataset_statistics: true
+  eval_interval: 1
+  save_interval: 1
+  train_cfg_overrides: algorithm.num_epochs 2 algorithm.num_iters_per_epoch 20 algorithm.num_valid_batches 4 algorithm.dataset.valid_max_capacity 30000 algorithm.eval.control_steps 200
+  require_packaged_policy: true
+  policy_evaluation:
+    num_envs: 64
+    control_steps: 300
+    seed: 100
+  throughput_benchmark:
+    checkpoint_name: best_eval_model.pt
+    num_envs: [256]
+    warmup: 10
+    steps: 50
+    breakdown_steps: 10
+    profile_steps: 5
+    model_autocast: [fp16]
+    variants:
+      - name: mjwarp_newton_contacts
+      # reset_history episode_start requires the frame cache, so the baseline keeps it.
+      - name: nerd_fp32_eager
+        nerd: true
+        args: [--inference-precision, fp32, --no-inference-compile]
+      - name: nerd_optimized
+        nerd: true
+  dataset_specs:
+    - filename: dataset_policy_a_train.hdf5
+      seed: 0
+      split: train
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+      num_transitions: 30000
+    - filename: dataset_policy_b_train.hdf5
+      seed: 30
+      split: train
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+      num_transitions: 30000
+    - filename: dataset_policy_noisy_train.hdf5
+      seed: 10
+      split: train
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+      policy_action_noise_std: 0.2
+      num_transitions: 30000
+    - filename: dataset_random_action_train.hdf5
+      seed: 40
+      split: train
+      task_kind: default
+      zero_actions: false
+      use_policy: false
+      num_transitions: 30000
+    - filename: dataset_zero_action_train.hdf5
+      seed: 20
+      split: train
+      task_kind: default
+      zero_actions: true
+      use_policy: false
+      num_transitions: 30000
+    - filename: dataset_policy_valid.hdf5
+      seed: 1
+      split: valid
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+    - filename: dataset_policy_noisy_valid.hdf5
+      seed: 3
+      split: valid
+      task_kind: default
+      zero_actions: false
+      use_policy: true
+      policy_action_noise_std: 0.2
+    - filename: dataset_random_action_valid.hdf5
+      seed: 4
+      split: valid
+      task_kind: default
+      zero_actions: false
+      use_policy: false
+    - filename: dataset_zero_action_valid.hdf5
+      seed: 2
+      split: valid
+      task_kind: default
+      zero_actions: true
+      use_policy: false

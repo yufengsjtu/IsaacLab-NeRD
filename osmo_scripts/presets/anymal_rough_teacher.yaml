@@ -1,0 +1,39 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Rough-terrain ANYmal-C teacher for anymal_rough_control_step: the contrib RSL-RL rough configuration on
+# Isaac-Velocity-Rough-Anymal-C-Policy-v0, whose stateless ANYdrive actuator the control-step NeRD also uses. RSL-RL
+# uploads every checkpoint to the W&B project rl under run id anymal-rough-<id>; submit with --enable-wandb, then
+# stage the final model under pretrained/control_policy/anymal_c_rough_control_step/.
+
+workflow:
+  base_name: anymal-rough-teacher
+  dataset_subdir: anymal-rough-teacher
+  image: docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095
+
+resources:
+  num_gpu: 1
+  num_cpu: 12
+  memory: 64Gi
+  storage: 96Gi
+  platform: ovx-l40
+
+experiment:
+  teacher_only: true
+  teacher_policy:
+    task: Isaac-Velocity-Rough-Anymal-C-Policy-v0
+    experiment_name: anymal_c_rough_control_step_teacher
+    num_gpus: 1
+    seed: 42
+    wandb_project: rl
+    wandb_run_id_prefix: anymal-rough
+    evaluation:
+      module: isaaclab_neural.eval.policy_rollout
+      num_envs: 256
+      control_steps: 1000
+      seed: 100
+      args: [--task, Isaac-Velocity-Rough-Anymal-C-Policy-v0, --metric, velocity_tracking_error]
+      max_metrics:
+        failure_rate: 0.3

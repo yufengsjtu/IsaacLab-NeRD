@@ -35,7 +35,24 @@ def load_preset(name: str, preset_file: str | None = None) -> dict:
     preset = load_yaml(path)
     if not isinstance(preset, dict):
         raise ValueError(f"Preset file {path} did not contain a mapping.")
+    if isinstance(preset.get("experiment"), dict) and preset["experiment"].get("task_spec"):
+        preset["experiment"] = _task_specs().expand_experiment(preset["experiment"])
     return preset
+
+
+def _task_specs():
+    """Load the simulator-free task registry from the repository without importing the package."""
+    import importlib.util
+    import sys
+
+    name = "_isaaclab_neural_task_specs"
+    if name not in sys.modules:
+        path = Path(__file__).resolve().parents[2] / "source/isaaclab_neural/isaaclab_neural/tasks/specs.py"
+        module_spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(module_spec)
+        sys.modules[name] = module
+        module_spec.loader.exec_module(module)
+    return sys.modules[name]
 
 
 def _value(default, override: str | None):

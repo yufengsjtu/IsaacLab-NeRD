@@ -1,0 +1,38 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Cartpole teacher for cartpole_control_step: the core RSL-RL configuration on Isaac-Cartpole-Policy-v0 (Newton
+# MJWarp). RSL-RL uploads every checkpoint to the W&B project rl under run id cartpole-<id>; submit with
+# --enable-wandb, then stage the final model under pretrained/control_policy/cartpole_control_step/.
+
+workflow:
+  base_name: cartpole-teacher
+  dataset_subdir: cartpole-teacher
+  image: docker.io/rowany28070/isaac-lab-nerd:so101-newton160-cu130-sdk095
+
+resources:
+  num_gpu: 1
+  num_cpu: 12
+  memory: 64Gi
+  storage: 96Gi
+  platform: ovx-l40
+
+experiment:
+  teacher_only: true
+  teacher_policy:
+    task: Isaac-Cartpole-Policy-v0
+    experiment_name: cartpole_control_step_teacher
+    num_gpus: 1
+    seed: 42
+    wandb_project: rl
+    wandb_run_id_prefix: cartpole
+    evaluation:
+      module: isaaclab_neural.eval.policy_rollout
+      num_envs: 256
+      control_steps: 1000
+      seed: 100
+      args: [--task, Isaac-Cartpole-Policy-v0]
+      max_metrics:
+        failure_rate: 0.2

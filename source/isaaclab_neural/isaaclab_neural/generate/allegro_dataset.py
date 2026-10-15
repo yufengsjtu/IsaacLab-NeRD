@@ -12,8 +12,11 @@ dropped cubes or fallen robots end their episodes instead of filling trajectorie
 ``--record-control-steps`` stores one record per control step for ``step_mode="control_step"`` models,
 with the boundary state, the first frame's applied effort and joint targets as inputs and the last
 frame's state as the label. Tasks with ``finger_object_normal_force_sensors`` also record the
-post-record filtered finger normal forces. Allegro remains the default task; other tasks pass
-``--task``, ``--env-name`` and, when the task registers no RSL-RL config, ``--policy-task``.
+post-record filtered finger normal forces; ``--record-body-net-contact-forces`` records per-body
+resultant contact forces for force-head recipes. ``--max-contact-tokens 0`` records contact-free tasks.
+Allegro remains the default task; ``--task-spec NAME`` fills the task, dataset environment name,
+policy task, contact capacity and auxiliary labels from :mod:`isaaclab_neural.tasks`, and explicit
+arguments override it.
 
 Chunks are appended to one HDF5 file whose ``data`` group carries a ``recording_contract`` with the
 recording identity, step mode, timing and contact mobility, as unique-transition, sliding-window and
@@ -43,6 +46,9 @@ ENV_DRIVEN_RECORDING_SCHEMA = "env_driven_recording_v1"
 
 FINGER_FORCE_KEY = "finger_object_normal_forces_w"
 """Filtered finger-object normal-force label key [N], shape ``[N, 2, 3]`` per record."""
+
+BODY_FORCE_KEY = "body_net_contact_forces_w"
+"""Per-primary-body resultant contact-force label key [N], shape ``[N, num_primary_bodies, 3]`` per record."""
 
 RECORDING_CONTRACT_ATTR = "recording_contract"
 """HDF5 ``data`` attribute holding the JSON recording contract."""
@@ -76,13 +82,13 @@ class AllegroFrameRecorder:
 
     def _snapshot(self) -> dict[str, Any]:
         raw = self.adapter.raw_neural_inputs()
-        result: dict[str, Any] = {
-            name: _cpu(raw[name][:, 0])
-            for name in ("states", "root_body_q", "root_body_qd", "gravity_dir", "primary_body_q")
-        }
+        names = ("states", "root_body_q", "root_body_qd", "gravity_dir", "primary_body_q")
+        result: dict[str, Any] = {name: _cpu(raw[name][:, 0]) for name in names if name in raw}
+        if self.adapter.contact_adapter is None:
+            return result
         native = self.adapter.native_contact_pairs()
         if native is None:
-            raise RuntimeError("Allegro datasets require native contacts.")
+            raise RuntimeError("Contact-aware recordings require native contacts.")
         result["native"] = {name: _cpu(value) for name, value in native.items()}
         return result
 
@@ -98,6 +104,8 @@ class AllegroFrameRecorder:
         )
         if getattr(self.adapter, "finger_object_normal_force_sensors", ()):
             frame[FINGER_FORCE_KEY] = _cpu(self.adapter.finger_object_normal_forces_w())
+        if getattr(self.adapter, "body_net_contact_force_recorder", None) is not None:
+            frame[BODY_FORCE_KEY] = _cpu(self.adapter.body_net_contact_forces_w())
         self.frames.append(frame)
         self.before = after
 
@@ -183,9 +191,10 @@ class AllegroFrameRecorder:
             "env_origin": _cpu(self.env.scene.env_origins)[worlds],
             **{name: worlds.clone() for name in ("state_world_id", "root_world_id", "contact_world_id")},
         }
-        output["native_contacts"] = pack_keyboard_contact_clips(
-            [frame["native"] for frame in frames], selected, horizon=horizon, num_worlds=self.env.num_envs
-        )
+        if "native" in frames[0]:
+            output["native_contacts"] = pack_keyboard_contact_clips(
+                [frame["native"] for frame in frames], selected, horizon=horizon, num_worlds=self.env.num_envs
+            )
         return output
 
 
@@ -233,8 +242,6 @@ class AllegroControlStepRecorder(AllegroFrameRecorder):
 def recording_contract(env: Any, adapter: Any, args: argparse.Namespace) -> dict[str, Any]:
     """Describe the recording identity, timing, layout and contact mobility for training-time validation."""
     contact_adapter = adapter.contact_adapter
-    if contact_adapter is None:
-        raise ValueError("Allegro recordings require a contact adapter.")
     result: dict[str, Any] = {
         "schema": ALLEGRO_RECORDING_SCHEMA if args.env_name == ALLEGRO_ENV_NAME else ENV_DRIVEN_RECORDING_SCHEMA,
         "env_name": args.env_name,
@@ -249,7 +256,15 @@ def recording_contract(env: Any, adapter: Any, args: argparse.Namespace) -> dict
         "source_seed": args.seed,
         "collection_mode": args.collection_mode,
         "policy_action_noise_std": args.policy_action_noise_std,
-        "contact_filter": contact_adapter.contact_filter,
+        "contact_filter": contact_adapter.contact_filter if contact_adapter is not None else "none",
+        "auxiliary_labels": sorted(
+            key
+            for key, enabled in (
+                (FINGER_FORCE_KEY, bool(getattr(adapter, "finger_object_normal_force_sensors", ()))),
+                (BODY_FORCE_KEY, getattr(adapter, "body_net_contact_force_recorder", None) is not None),
+            )
+            if enabled
+        ),
         "joint_f_contract": (
             "post_actuator_shadow_PD_of_the_first_physics_frame"
             if args.record_control_steps
@@ -261,7 +276,7 @@ def recording_contract(env: Any, adapter: Any, args: argparse.Namespace) -> dict
         result["policy_sha256"] = args.policy_sha256
     if args.record_control_steps:
         result["joint_target_contract"] = "newton_control_joint_target_q_after_first_frame_actuators"
-    if contact_adapter.fixed_body_slots is not None:
+    if contact_adapter is not None and contact_adapter.fixed_body_slots is not None:
         result["contact_fixed_body_slots"] = list(contact_adapter.fixed_body_slots)
     return result
 
@@ -310,7 +325,12 @@ def collect(env: Any, adapter: Any, args: argparse.Namespace, policy: Any, wrapp
         recorded += args.chunk_control_steps * recorder.records_per_step
         if rollouts is None:
             continue
-        append_rollouts_to_hdf5(args.dataset, rollouts, args.env_name)
+        append_rollouts_to_hdf5(
+            args.dataset,
+            rollouts,
+            args.env_name,
+            body_net_contact_force_body_names=adapter.body_net_contact_force_body_names or None,
+        )
         written += rollouts["states"].shape[0] * rollouts["states"].shape[1]
         print(f"[collect] {written}/{args.num_transitions} records, {episodes} episodes", flush=True)
     write_recording_contract(args.dataset, contract)
@@ -325,8 +345,28 @@ def collect(env: Any, adapter: Any, args: argparse.Namespace, policy: Any, wrapp
     }
 
 
+def apply_task_spec_defaults(parser: argparse.ArgumentParser, argv: list[str] | None = None) -> None:
+    """Use ``--task-spec`` (when given) as the defaults of the task, environment, contact and label options."""
+    from isaaclab_neural.tasks import get_task_spec
+
+    known, _ = parser.parse_known_args(argv)
+    if not known.task_spec:
+        return
+    spec = get_task_spec(known.task_spec)
+    if spec.pipeline != "env_driven":
+        parser.error(f"Task spec {spec.name!r} uses the {spec.pipeline!r} pipeline, not this collector.")
+    parser.set_defaults(
+        task=spec.record_task,
+        env_name=spec.env_name,
+        policy_task=spec.policy_task,
+        max_contact_tokens=spec.max_contact_tokens,
+        record_body_net_contact_forces="body_net_contact_forces" in spec.auxiliary_labels,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--task-spec", help="Registered isaaclab_neural.tasks spec supplying the defaults below.")
     parser.add_argument("--task", default="Isaac-Reorient-Cube-Allegro-Policy-v0")
     parser.add_argument("--env-name", default=ALLEGRO_ENV_NAME, help="Dataset environment name.")
     parser.add_argument("--policy-task", help="Task supplying the fallback RSL-RL runner config; defaults to --task.")
@@ -343,7 +383,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--horizon", type=int, required=True, help="Records per reset-safe clip.")
     parser.add_argument("--chunk-control-steps", type=int, default=64, help="Control steps per appended chunk.")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max-contact-tokens", type=int, default=128)
+    parser.add_argument("--max-contact-tokens", type=int, default=128, help="0 records a contact-free task.")
+    parser.add_argument(
+        "--record-body-net-contact-forces",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Record per-body resultant contact forces from the scene sensor 'contact_forces'.",
+    )
     parser.add_argument("--contact-filter", choices=("none", "solver_active", "solver_active_movable"), default="none")
     return parser
 
@@ -363,6 +409,7 @@ def main() -> None:
 
     parser = build_parser()
     add_launcher_args(parser)
+    apply_task_spec_defaults(parser)
     args = parser.parse_args()
     if args.dataset.exists():
         raise FileExistsError(args.dataset)
@@ -372,6 +419,8 @@ def main() -> None:
         parser.error("--policy-action-noise-std must be non-negative and applies to policy collection only")
     if min(args.num_envs, args.num_transitions, args.horizon, args.chunk_control_steps, args.random_hold_controls) <= 0:
         parser.error("counts must be positive")
+    if args.max_contact_tokens < 0 or (args.max_contact_tokens == 0 and args.record_body_net_contact_forces):
+        parser.error("--max-contact-tokens must be non-negative, and contact-force labels need contacts")
     sys.argv = [sys.argv[0]]
     cfg, _ = resolve_task_config(args.task, "rsl_rl_cfg_entry_point", overrides=[])
     cfg = resolve_presets(cfg, {"newton_mjwarp"})
@@ -388,17 +437,19 @@ def main() -> None:
         try:
             with torch.inference_mode():
                 env.reset()
+                contact_free = args.max_contact_tokens == 0
                 adapter = DataGenerationAdapter(
                     env,
                     NerdSolverCfg(
                         states_frame="world",
                         num_contacts_per_env=args.max_contact_tokens,
-                        contact_representation="contact_tokens",
-                        max_contact_tokens=args.max_contact_tokens,
-                        contact_filter=args.contact_filter,
+                        contact_representation="flat" if contact_free else "contact_tokens",
+                        max_contact_tokens=max(args.max_contact_tokens, 1),
+                        contact_filter="none" if contact_free else args.contact_filter,
                         contact_packing_policy="body_round_robin_pair_atomic",
                         joint_target_input=bool(args.record_control_steps),
                     ),
+                    record_body_net_contact_forces=args.record_body_net_contact_forces,
                 )
                 policy = wrapped = None
                 if args.collection_mode == "policy":
