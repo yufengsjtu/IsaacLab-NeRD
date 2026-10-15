@@ -184,6 +184,15 @@ class AnymalCFlatPolicyEnvCfg(AnymalCFlatEnvCfg):
 
 
 @configclass
+class AnymalCFlatControlStepDatasetGenEnvCfg(AnymalCFlatPolicyEnvCfg):
+    """Policy environment with CUDA graphs disabled so the recorder can observe every physics frame."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.sim.physics.newton_mjwarp.use_cuda_graph = False
+
+
+@configclass
 class NerdAnymalCFlatControlStepEnvCfg(NerdAnymalCFlatEnvCfg):
     """Flat Anymal-C NeRD with the stateless actuator of :class:`AnymalCFlatPolicyEnvCfg`, for control-step models."""
 

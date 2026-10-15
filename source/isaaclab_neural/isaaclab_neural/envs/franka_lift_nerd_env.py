@@ -29,14 +29,14 @@ DEFAULT_FRANKA_LIFT_NERD_MODEL_PATH: str | None = None
 
 
 @configclass
-class FrankaLiftCubeDatasetGenEnvCfg(FrankaLiftEnvCfg):
-    """Core Franka Lift with a fixed cube and a static table for contact-aware NeRD data generation.
+class FrankaLiftCubePolicyEnvCfg(FrankaLiftEnvCfg):
+    """Core Franka Lift with a fixed cube and a static table, matching the NeRD scene.
 
     Drives, actions, observations, rewards and resets are those of
     ``Isaac-Lift-Franka``. The object preset is pinned to the cube, the kinematic
-    table becomes a static collider, domain randomization and the gravity ADR
-    curriculum are removed, and CUDA graphs are disabled so the recorder can advance
-    single physics frames.
+    table becomes a static collider, and domain randomization and the gravity ADR
+    curriculum are removed. CUDA graphs stay enabled for native closed-loop
+    evaluation and throughput baselines.
     """
 
     finger_object_normal_force_sensors: tuple[str, ...] = ("panda_rightfinger_object_s", "panda_leftfinger_object_s")
@@ -48,9 +48,17 @@ class FrankaLiftCubeDatasetGenEnvCfg(FrankaLiftEnvCfg):
         physics = self.sim.physics
         if not isinstance(physics, LiftPhysicsCfg):
             raise TypeError("Franka Lift dataset generation expects the core Lift physics presets.")
-        # Configclass instances own deep copies of their defaults, so in-place edits stay local.
-        physics.newton_mjwarp.use_cuda_graph = False
         physics.default = physics.newton_mjwarp
+
+
+@configclass
+class FrankaLiftCubeDatasetGenEnvCfg(FrankaLiftCubePolicyEnvCfg):
+    """Lift policy scene with CUDA graphs disabled so the recorder can advance single physics frames."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Configclass instances own deep copies of their defaults, so in-place edits stay local.
+        self.sim.physics.newton_mjwarp.use_cuda_graph = False
 
 
 @configclass

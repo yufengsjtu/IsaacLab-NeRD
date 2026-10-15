@@ -1861,15 +1861,16 @@ def test_control_step_task_presets_follow_allegro_recipe(name) -> None:
         "metric": eval_cfg["selection"]["metric"],
         "cfg_key": "algorithm.eval.selection.reference",
     }
-    assert evaluation["args"] == ["--task", experiment["data_gen_task"], "--metric", eval_cfg["selection"]["metric"]]
+    assert evaluation["args"] == ["--task", experiment["policy_task"], "--metric", eval_cfg["selection"]["metric"]]
+    assert eval_cfg["policy_task"] == experiment["policy_task"] != experiment["data_gen_task"]
     assert [metric["name"] for metric in eval_cfg["metrics"]] == [eval_cfg["selection"]["metric"]]
     bench = experiment["throughput_benchmark"]
-    assert bench["env_args"] == ["--task", experiment["data_gen_task"], "--nerd-task", experiment["train_task"]]
+    assert bench["env_args"] == ["--task", experiment["policy_task"], "--nerd-task", experiment["train_task"]]
     # The smoke preset runs the same pipeline at small sizes with its own dataset cache.
     smoke_experiment = smoke["experiment"]
     assert smoke["workflow"]["dataset_subdir"] != preset["workflow"]["dataset_subdir"]
     assert [spec["filename"] for spec in smoke_experiment["dataset_specs"]] == [spec["filename"] for spec in specs]
-    for key in ("train_cfg", "train_task", "data_gen_task", "dataset_collector", "policy_checkpoint"):
+    for key in ("train_cfg", "train_task", "data_gen_task", "policy_task", "dataset_collector", "policy_checkpoint"):
         assert smoke_experiment[key] == experiment[key], key
 
 
@@ -1891,6 +1892,8 @@ def test_control_step_task_collector_args_and_reference(name, tmp_path, monkeypa
         mode = command[command.index("--collection-mode") + 1]
         assert mode == ("policy" if spec.use_policy else "zero" if spec.zero_actions else "random")
         assert ("--checkpoint" in command) == spec.use_policy
+        if spec.use_policy:
+            assert command[command.index("--policy-task") + 1] == experiment["policy_task"]
     evaluation = experiment["policy_evaluation"]
     run_experiment.apply_policy_reference(experiment, evaluation, {evaluation["reference"]["metric"]: 0.25})
     assert experiment["train_cfg_overrides"].endswith("algorithm.eval.selection.reference 0.25")

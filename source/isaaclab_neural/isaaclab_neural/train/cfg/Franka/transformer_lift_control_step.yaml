@@ -109,7 +109,7 @@ algorithm:
     interval: 5
     mode: policy_rollout
     policy_checkpoint: ./pretrained/official/Isaac-Lift-Franka_newtonmjwarp_none_rsl_rl.pt
-    policy_task: Isaac-Lift-Cube-Franka-Dataset-Gen-v0
+    policy_task: Isaac-Lift-Cube-Franka-Policy-v0
     control_steps: 600
     seed: 43
     metrics:

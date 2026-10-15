@@ -25,8 +25,10 @@ experiment:
   dataset_dir: ./data/datasets/anymal-c-flat-control-step-v1
   env_name: Anymal-C-Flat-ControlStep
   robot_name: Anymal-C
-  data_gen_task: Isaac-Velocity-Flat-Anymal-C-Policy-v0
-  deployment_task: Isaac-Velocity-Flat-Anymal-C-Policy-v0
+  data_gen_task: Isaac-Velocity-Flat-Anymal-C-ControlStep-Dataset-Gen-v0
+  deployment_task: Isaac-Velocity-Flat-Anymal-C-ControlStep-Dataset-Gen-v0
+  # Graph-enabled twin of the recording task: teacher runner config, native evaluation and baselines.
+  policy_task: Isaac-Velocity-Flat-Anymal-C-Policy-v0
   train_task: Isaac-Velocity-Flat-Anymal-C-ControlStep-NeRD-v0
   train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_flat_control_step.yaml
   train_preset: newton_mjwarp

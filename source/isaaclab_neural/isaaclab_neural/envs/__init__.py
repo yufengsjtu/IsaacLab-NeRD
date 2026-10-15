@@ -22,6 +22,7 @@ from .allegro_reorient_nerd_env import (
 )
 from .anymal_c_dataset_gen_cfg import AnymalCDatasetGenFlatEnvCfg, AnymalCDatasetGenRoughEnvCfg
 from .anymal_nerd_env import (
+    AnymalCFlatControlStepDatasetGenEnvCfg,
     AnymalCFlatPolicyEnvCfg,
     NerdAnymalCFlatControlStepEnvCfg,
     NerdAnymalCFlatEnv,
@@ -32,6 +33,7 @@ from .anymal_nerd_env import (
 from .cartpole_nerd_env import NerdCartpoleEnv, NerdCartpoleEnvCfg
 from .franka_lift_nerd_env import (
     FrankaLiftCubeDatasetGenEnvCfg,
+    FrankaLiftCubePolicyEnvCfg,
     NerdFrankaLiftEnv,
     NerdFrankaLiftEnvCfg,
 )
@@ -81,6 +83,18 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{AnymalCFlatPolicyEnvCfg.__module__}:AnymalCFlatPolicyEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{anymal_c_agents.__name__}.rsl_rl_ppo_cfg:AnymalCFlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Flat-Anymal-C-ControlStep-Dataset-Gen-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{AnymalCFlatControlStepDatasetGenEnvCfg.__module__}:AnymalCFlatControlStepDatasetGenEnvCfg"
+        ),
         "rsl_rl_cfg_entry_point": f"{anymal_c_agents.__name__}.rsl_rl_ppo_cfg:AnymalCFlatPPORunnerCfg",
     },
 )
@@ -252,8 +266,10 @@ __all__ = [
     "NerdSO101KeyboardRandomizedEnvCfg",
     "AnymalCDatasetGenFlatEnvCfg",
     "AnymalCDatasetGenRoughEnvCfg",
+    "AnymalCFlatControlStepDatasetGenEnvCfg",
     "AnymalCFlatPolicyEnvCfg",
     "FrankaLiftCubeDatasetGenEnvCfg",
+    "FrankaLiftCubePolicyEnvCfg",
     "FrankaReachDatasetGenEnvCfg",
     "FrankaReachPolicyEnvCfg",
     "NerdAnymalCFlatControlStepEnvCfg",
