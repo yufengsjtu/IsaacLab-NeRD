@@ -105,6 +105,9 @@
 
 ## OSMO operational checks
 
+- Control-step task specs live in `isaaclab_neural/tasks/specs.py`; presets with `experiment.task_spec` are expanded by `osmo_scripts/lib/preset.py`, which `run_experiment.load_preset` reuses in the pod. Check expanded presets, not raw YAML.
+- Choose pools with `osmo pool list --mode free`. On 2026-10-15 four jobs in `isaac-lab-l40-06` died while downloading/uploading NV-Datasets objects while identical jobs in `isaac-lab-l40-07`/`isaac-lab-l40s-03` passed; the `ovx-l40` platform does not exist in `isaac-lab-l40s-03` (pass `--platform ovx-l40s`).
+
 - Keep YAML environment values such as `'off'` quoted: unquoted `off` can become boolean `False` and fail the runtime CLI. Parse rendered specs before submission. In `isaac-lab-l40s-03`, a one-GPU probe with 128Gi RAM exceeded proportional node limits; the validated probe requests 64Gi instead.
 - The explicit basic-validation Keyboard preset collected 1024 non-deterministic worlds on an L40S without per-chunk physics replay. It uses a separate basic bundle schema, not replay acceptance. CPU contact packing must index world pairs once per recorded frame; repeatedly masking all worlds for each reset-safe clip was the measured large-batch bottleneck.
 - `osmo workflow exec` requires PTY-backed standard streams, including when launched programmatically; plain subprocess pipes can fail with `Inappropriate ioctl for device`. Its `--entry` is transported in a request URI, so large inline payloads can fail with HTTP 414. Keep commands small and verify remotely staged file hashes before executing them; a successful rsync client exit alone is not proof the expected files arrived.
