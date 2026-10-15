@@ -519,11 +519,16 @@ def stage_generated_datasets(
         for file in files:
             shutil.copy2(file, upload_dir / file.name)
         print(f"Uploading generated datasets to NV-Datasets dataset {nvdataset_data_dataset}/{dataset_subdir}.")
-        nvdataset_io.upload_directory(
-            name=nvdataset_data_dataset,
-            source_dir=upload_root,
-            description=nvdataset_data_description,
-        )
+        try:
+            nvdataset_io.upload_directory(
+                name=nvdataset_data_dataset,
+                source_dir=upload_root,
+                description=nvdataset_data_description,
+            )
+        except Exception as error:  # noqa: BLE001 - the cache is optional; keep the run alive
+            # Generic recordings are a reusable cache, not a run output: a failed publication must not discard
+            # the collected data or stop training. Later runs recollect when the cache is incomplete.
+            print(f"WARNING: generated-dataset cache upload failed; continuing without it: {error!r}")
     else:
         print("No data storage target configured; generated HDF5 files remain only in the pod-local dataset dir.")
 
