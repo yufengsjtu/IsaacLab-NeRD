@@ -4,10 +4,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 # SO101/Allegro-style control-step NeRD for flat ANYmal-C with the stateless-actuator teacher trained by
-# anymal_flat_teacher (pretrained/control_policy/anymal_c_flat_control_step): the env-driven collector records reset-safe 32-control-step clips with a recording contract on eight GPUs in the native policy
-# task (stateless ANYdrive actuator, Newton contacts); training uses unique-transition sliding windows, GPU-resident
-# data, FP16 autocast and closed-loop walking evaluation selected against the native tracking error, followed by the
-# throughput benchmarks.
+# anymal_flat_teacher (pretrained/control_policy/anymal_c_flat_control_step): the env-driven collector records
+# reset-safe 32-control-step clips with a recording contract on eight GPUs in the native policy task (stateless
+# ANYdrive actuator, Newton contacts); training uses unique-transition sliding windows, GPU-resident data, FP16
+# autocast and closed-loop walking evaluation selected against the native tracking error, followed by the throughput
+# benchmarks.
 
 workflow:
   base_name: anymal-flat-control-step
