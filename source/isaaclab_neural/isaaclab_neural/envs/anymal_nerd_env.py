@@ -185,11 +185,16 @@ class AnymalCFlatPolicyEnvCfg(AnymalCFlatEnvCfg):
 
 @configclass
 class AnymalCFlatControlStepDatasetGenEnvCfg(AnymalCFlatPolicyEnvCfg):
-    """Policy environment with CUDA graphs disabled so the recorder can observe every physics frame."""
+    """Policy environment that steps every physics frame through Isaac Lab so the recorder can observe it.
+
+    CUDA graphs are disabled and the explicit actuator runs on the Isaac Lab path: with graph-safe Newton actuators the
+    physics manager would fold the whole decimation loop into one step without per-frame scene updates.
+    """
 
     def __post_init__(self) -> None:
         super().__post_init__()
         self.sim.physics.newton_mjwarp.use_cuda_graph = False
+        self.sim.use_newton_actuators = False
 
 
 @configclass

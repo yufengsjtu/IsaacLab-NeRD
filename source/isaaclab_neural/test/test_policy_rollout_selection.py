@@ -13,6 +13,7 @@ import gymnasium as gym
 import isaaclab_neural.envs  # noqa: F401
 import pytest
 from isaaclab_neural.envs.anymal_nerd_env import (
+    AnymalCFlatControlStepDatasetGenEnvCfg,
     AnymalCFlatPolicyEnvCfg,
     NerdAnymalCFlatControlStepEnvCfg,
     NerdAnymalCFlatEnvCfg,
@@ -74,5 +75,15 @@ def test_anymal_control_step_envs_share_the_stateless_actuator_and_contacts() ->
     assert newton_cfg.default_shape_cfg.margin == nerd.sim.physics.default_shape_cfg.margin == 0.0
     assert newton_cfg.collision_cfg.max_triangle_pairs == nerd.sim.physics.collision_cfg.max_triangle_pairs
     assert (policy.sim.dt, policy.decimation) == (nerd.sim.dt, nerd.decimation)
-    for env_id in ("Isaac-Velocity-Flat-Anymal-C-Policy-v0", "Isaac-Velocity-Flat-Anymal-C-ControlStep-NeRD-v0"):
+    # The recording twin must expose every physics frame to the recorder.
+    recording = AnymalCFlatControlStepDatasetGenEnvCfg()
+    assert recording.sim.physics.newton_mjwarp.use_cuda_graph is False
+    assert recording.sim.use_newton_actuators is False and policy.sim.use_newton_actuators is True
+    assert recording.scene.robot.actuators["legs"].to_dict() == policy.scene.robot.actuators["legs"].to_dict()
+    for env_id in (
+        "Isaac-Velocity-Flat-Anymal-C-Policy-v0",
+        "Isaac-Velocity-Flat-Anymal-C-ControlStep-Dataset-Gen-v0",
+        "Isaac-Velocity-Flat-Anymal-C-ControlStep-NeRD-v0",
+        "Isaac-Lift-Cube-Franka-Policy-v0",
+    ):
         assert "rsl_rl_cfg_entry_point" in gym.spec(env_id).kwargs
