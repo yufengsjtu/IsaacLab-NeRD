@@ -92,6 +92,7 @@ benchmark_*.json
 .worktree/
 memory/
 pre-trained_models/
+osmo_outputs/
 
 # Isaac Lab CI environments in native mode
 **/_isaaclab_install_ci_*
