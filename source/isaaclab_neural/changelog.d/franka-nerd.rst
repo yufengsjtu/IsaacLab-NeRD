@@ -10,7 +10,7 @@ Added
   OSMO resource request (8 L40S GPUs, 80 CPUs) and data scale (ten million
   training transitions, trajectory length 100). The preset records a
   policy validation split from
-  ``pretrained/control_policy/franka_reach/model_999.pt``.
+  ``pretrained/control_policy/franka_reach_menagerie/model_999.pt``.
 * Added the ``franka_reach_newton_native_smoke`` OSMO preset (1 GPU, 16
   environments, 3200 transitions) to verify Franka Reach dataset generation.
 * Added the ``franka_reach_policy_train`` OSMO preset so Franka Reach NeRD

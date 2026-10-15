@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}/source/isaaclab_neural:${REPO_ROOT}/source/isaaclab_newton:${REPO_ROOT}/source/isaaclab:${REPO_ROOT}/source/isaaclab_tasks${PYTHONPATH:+:$PYTHONPATH}"
 
-POLICY_CHECKPOINT="${POLICY_CHECKPOINT:-${REPO_ROOT}/pretrained/control_policy/franka_reach/model_999.pt}"
+POLICY_CHECKPOINT="${POLICY_CHECKPOINT:-${REPO_ROOT}/pretrained/control_policy/franka_reach_menagerie/model_999.pt}"
 export OUT_DIR="${OUT_DIR:-${REPO_ROOT}/data/actuator_compare}"
 NUM_ENVS="${NUM_ENVS:-16}"
 NUM_STEPS="${NUM_STEPS:-360}"
