@@ -17,13 +17,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import torch
-from isaaclab_neural.eval.eval import build_policy_env, load_saved_agent_cfg_for_policy, reset_policy
+from isaaclab_neural.eval.eval import reset_policy
 
 ALLEGRO_REORIENT_POLICY_TASK = "Isaac-Reorient-Cube-Allegro-Policy-v0"
 """Task whose dynamics, observations and resets the policy and the NeRD data share."""
@@ -57,24 +56,9 @@ def load_allegro_reorient_policy(env: Any, checkpoint: Path, *, device: str, see
     Returns:
         The wrapped environment, the inference policy and its runner.
     """
-    from isaaclab_tasks.utils.hydra import resolve_presets
-    from isaaclab_tasks.utils.parse_cfg import resolve_task_config
+    from isaaclab_neural.eval.policy_rollout import load_task_policy
 
-    # Explicit empty overrides keep the caller's command line (e.g. training arguments) out of Hydra.
-    _, agent = resolve_task_config(ALLEGRO_REORIENT_POLICY_TASK, "rsl_rl_cfg_entry_point", overrides=[])
-    agent = resolve_presets(agent, {"newton_mjwarp"})
-    runner_cfg = load_saved_agent_cfg_for_policy(str(checkpoint), agent, device=device, seed=seed)
-    # During DDP NeRD training the policy runs on rank 0 only. RSL-RL infers distributed mode from
-    # WORLD_SIZE and would initialize the already-initialized default process group a second time.
-    world_size = os.environ.get("WORLD_SIZE")
-    os.environ["WORLD_SIZE"] = "1"
-    try:
-        return build_policy_env(env, runner_cfg, str(checkpoint), device)
-    finally:
-        if world_size is None:
-            os.environ.pop("WORLD_SIZE", None)
-        else:
-            os.environ["WORLD_SIZE"] = world_size
+    return load_task_policy(env, checkpoint, task=ALLEGRO_REORIENT_POLICY_TASK, device=device, seed=seed)
 
 
 def rollout_reorient_policy(

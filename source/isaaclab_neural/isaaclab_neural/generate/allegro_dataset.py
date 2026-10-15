@@ -3,14 +3,17 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Collect Allegro cube-reorientation NeRD records with the SO101 Keyboard recording contract.
+"""Collect env-driven NeRD records with the SO101 Keyboard recording contract (Allegro, ANYmal, Franka Lift).
 
 Run with ``python -m isaaclab_neural.generate.allegro_dataset``. Unlike the generic generator, the
 native task steps with its own actions, rewards, terminations and auto-resets: records are observed
 after each physics-frame scene update and cut into fixed-length clips that never cross a reset, so
-dropped cubes end their episodes instead of filling trajectories. ``--record-control-steps`` stores
-one record per 30 Hz control step for ``step_mode="control_step"`` models, with the boundary state,
-the first frame's applied effort and joint targets as inputs and the last frame's state as the label.
+dropped cubes or fallen robots end their episodes instead of filling trajectories.
+``--record-control-steps`` stores one record per control step for ``step_mode="control_step"`` models,
+with the boundary state, the first frame's applied effort and joint targets as inputs and the last
+frame's state as the label. Tasks with ``finger_object_normal_force_sensors`` also record the
+post-record filtered finger normal forces. Allegro remains the default task; other tasks pass
+``--task``, ``--env-name`` and, when the task registers no RSL-RL config, ``--policy-task``.
 
 Chunks are appended to one HDF5 file whose ``data`` group carries a ``recording_contract`` with the
 recording identity, step mode, timing and contact mobility, as unique-transition, sliding-window and
@@ -33,7 +36,13 @@ import h5py
 import torch
 
 ALLEGRO_RECORDING_SCHEMA = "allegro_reorient_recording_v1"
-"""Recording-contract schema written by this collector."""
+"""Recording-contract schema written for the Allegro dataset environment."""
+
+ENV_DRIVEN_RECORDING_SCHEMA = "env_driven_recording_v1"
+"""Recording-contract schema written for every other dataset environment."""
+
+FINGER_FORCE_KEY = "finger_object_normal_forces_w"
+"""Filtered finger-object normal-force label key [N], shape ``[N, 2, 3]`` per record."""
 
 RECORDING_CONTRACT_ATTR = "recording_contract"
 """HDF5 ``data`` attribute holding the JSON recording contract."""
@@ -87,6 +96,8 @@ class AllegroFrameRecorder:
             terminated=torch.zeros(num_envs, dtype=torch.bool),
             truncated=torch.zeros(num_envs, dtype=torch.bool),
         )
+        if getattr(self.adapter, "finger_object_normal_force_sensors", ()):
+            frame[FINGER_FORCE_KEY] = _cpu(self.adapter.finger_object_normal_forces_w())
         self.frames.append(frame)
         self.before = after
 
@@ -225,7 +236,8 @@ def recording_contract(env: Any, adapter: Any, args: argparse.Namespace) -> dict
     if contact_adapter is None:
         raise ValueError("Allegro recordings require a contact adapter.")
     result: dict[str, Any] = {
-        "schema": ALLEGRO_RECORDING_SCHEMA,
+        "schema": ALLEGRO_RECORDING_SCHEMA if args.env_name == ALLEGRO_ENV_NAME else ENV_DRIVEN_RECORDING_SCHEMA,
+        "env_name": args.env_name,
         "recording_id": uuid.uuid4().hex,
         "task": args.task,
         "step_mode": "control_step" if args.record_control_steps else "physics_frame",
@@ -298,7 +310,7 @@ def collect(env: Any, adapter: Any, args: argparse.Namespace, policy: Any, wrapp
         recorded += args.chunk_control_steps * recorder.records_per_step
         if rollouts is None:
             continue
-        append_rollouts_to_hdf5(args.dataset, rollouts, ALLEGRO_ENV_NAME)
+        append_rollouts_to_hdf5(args.dataset, rollouts, args.env_name)
         written += rollouts["states"].shape[0] * rollouts["states"].shape[1]
         print(f"[collect] {written}/{args.num_transitions} records, {episodes} episodes", flush=True)
     write_recording_contract(args.dataset, contract)
@@ -316,6 +328,8 @@ def collect(env: Any, adapter: Any, args: argparse.Namespace, policy: Any, wrapp
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task", default="Isaac-Reorient-Cube-Allegro-Policy-v0")
+    parser.add_argument("--env-name", default=ALLEGRO_ENV_NAME, help="Dataset environment name.")
+    parser.add_argument("--policy-task", help="Task supplying the fallback RSL-RL runner config; defaults to --task.")
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--collection-mode", choices=COLLECTION_MODES, default="policy")
@@ -342,8 +356,8 @@ def main() -> None:
     from isaaclab_tasks.utils.hydra import resolve_presets
     from isaaclab_tasks.utils.parse_cfg import resolve_task_config
 
-    import isaaclab_neural.envs  # noqa: F401 - registers the Allegro tasks
-    from isaaclab_neural.eval.allegro_reorient_policy import load_allegro_reorient_policy
+    import isaaclab_neural.envs  # noqa: F401 - registers the NeRD policy and dataset tasks
+    from isaaclab_neural.eval.policy_rollout import load_task_policy
     from isaaclab_neural.generate.adapter import DataGenerationAdapter
     from isaaclab_neural.physics import NerdSolverCfg
 
@@ -388,8 +402,12 @@ def main() -> None:
                 )
                 policy = wrapped = None
                 if args.collection_mode == "policy":
-                    wrapped, policy, _ = load_allegro_reorient_policy(
-                        env, args.checkpoint, device=cfg.sim.device, seed=args.seed
+                    wrapped, policy, _ = load_task_policy(
+                        env,
+                        args.checkpoint,
+                        task=args.policy_task or args.task,
+                        device=cfg.sim.device,
+                        seed=args.seed,
                     )
                     with args.checkpoint.open("rb") as stream:
                         args.policy_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()

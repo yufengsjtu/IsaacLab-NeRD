@@ -563,13 +563,17 @@ def contact_args(experiment: dict) -> list[str]:
     return args
 
 
+ENV_DRIVEN_COLLECTORS = ("allegro_reorient", "env_driven")
+"""``dataset_collector`` values that select the env-driven collector (``allegro_reorient`` is the historical name)."""
+
+
 def build_allegro_collector_args(
     experiment: dict, spec: DatasetSpec, dataset_dir: Path, task: str, transitions: int, policy_checkpoint: str
 ) -> list[str]:
-    """Arguments for the env-driven Allegro collector, which records reset-safe clips with a recording contract.
+    """Arguments for the env-driven collector, which records reset-safe clips with a recording contract.
 
     Policy specs drive the teacher (optionally noisy), ``zero_actions`` specs hold zero actions and other specs hold
-    uniform random actions.
+    uniform random actions. ``policy_task`` names the task supplying the teacher's fallback runner config.
     """
     mode = "policy" if spec.use_policy else "zero" if spec.zero_actions else "random"
     args = [
@@ -577,6 +581,8 @@ def build_allegro_collector_args(
         "isaaclab_neural.generate.allegro_dataset",
         "--task",
         task,
+        "--env-name",
+        str(experiment["env_name"]),
         "--dataset",
         str(dataset_dir / str(experiment["env_name"]) / spec.filename),
         "--collection-mode",
@@ -600,6 +606,8 @@ def build_allegro_collector_args(
         args.append("--record-control-steps")
     if spec.use_policy:
         args += ["--checkpoint", policy_checkpoint]
+        if experiment.get("policy_task"):
+            args += ["--policy-task", str(experiment["policy_task"])]
         if spec.policy_action_noise_std > 0.0:
             args += ["--policy-action-noise-std", str(spec.policy_action_noise_std)]
     return args
@@ -623,7 +631,7 @@ def build_dataset_args(experiment: dict, spec: DatasetSpec, dataset_dir: Path) -
 
     transitions = resolve_spec_transitions(experiment, spec)
     task = experiment.get("deployment_task") if spec.task_kind == "deployment" else experiment.get("data_gen_task")
-    if experiment.get("dataset_collector") == "allegro_reorient":
+    if experiment.get("dataset_collector") in ENV_DRIVEN_COLLECTORS:
         return build_allegro_collector_args(experiment, spec, dataset_dir, str(task), transitions, policy_checkpoint)
 
     args = [
@@ -756,7 +764,11 @@ def latest_rsl_rl_checkpoint(run_dir: Path) -> Path:
 
 
 def evaluate_policy(evaluation: dict, checkpoint: Path, report: Path) -> dict:
-    """Run a closed-loop policy evaluation and enforce its optional minimum goals per episode."""
+    """Run a closed-loop policy evaluation and enforce its optional quality gates.
+
+    ``args`` are passed to the evaluation module. ``min_mean_goals_per_episode``, ``min_metrics`` and ``max_metrics``
+    reject a teacher before any NeRD data is collected with it.
+    """
     command = [
         sys.executable,
         "-m",
@@ -771,18 +783,41 @@ def evaluate_policy(evaluation: dict, checkpoint: Path, report: Path) -> dict:
         str(evaluation.get("control_steps", 1500)),
         "--seed",
         str(evaluation.get("seed", 100)),
+        *[str(item) for item in evaluation.get("args", [])],
     ]
     subprocess.run(command, check=True)
     result = json.loads(report.read_text())
     minimum = evaluation.get("min_mean_goals_per_episode")
     mean_goals = result.get("mean_goals_per_episode")
-    print(f"Policy evaluation: goals/episode={mean_goals}, drop_rate={result.get('drop_rate')}")
+    print(f"Policy evaluation: { {k: v for k, v in result.items() if not isinstance(v, (list, dict))} }")
     if minimum is not None and (mean_goals is None or mean_goals < float(minimum)):
         raise RuntimeError(
             f"Policy reached {mean_goals} goals per episode, below the preset minimum {minimum}; "
             "refusing to collect NeRD data with it."
         )
+    for name, bound in evaluation.get("min_metrics", {}).items():
+        if result.get(name) is None or result[name] < float(bound):
+            raise RuntimeError(f"Policy {name}={result.get(name)} is below the preset minimum {bound}.")
+    for name, bound in evaluation.get("max_metrics", {}).items():
+        if result.get(name) is None or result[name] > float(bound):
+            raise RuntimeError(f"Policy {name}={result.get(name)} exceeds the preset maximum {bound}.")
     return result
+
+
+def apply_policy_reference(experiment: dict, evaluation: dict, result: dict) -> None:
+    """Pass a native evaluation metric to training as the closed-loop checkpoint-selection reference.
+
+    ``evaluation["reference"]`` names the report ``metric`` and the training ``cfg_key`` it overrides.
+    """
+    reference = evaluation.get("reference")
+    if not reference:
+        return
+    value = result.get(reference["metric"])
+    if value is None:
+        raise RuntimeError(f"Native policy evaluation did not report {reference['metric']!r}.")
+    overrides = str(experiment.get("train_cfg_overrides", "") or "").strip()
+    experiment["train_cfg_overrides"] = f"{overrides} {reference['cfg_key']} {float(value)!r}".strip()
+    print(f"Closed-loop selection reference: {reference['cfg_key']}={float(value)!r}")
 
 
 def run_teacher_training(experiment: dict, output_root: Path, wandb_args: argparse.Namespace) -> Path:
@@ -938,11 +973,18 @@ def run_throughput_benchmarks(experiment: dict, output_root: Path) -> dict:
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(bench.get("gpu", 0))}
     module = str(bench["module"])
     runs = []
+    model_args = [str(item) for item in bench.get("model_args", [])]
+    env_args = [str(item) for item in bench.get("env_args", [])]
     for autocast in bench.get("model_autocast", []):
-        runs.append((f"model_{autocast}", ["model", "--nerd-checkpoint", str(checkpoint), "--autocast", str(autocast)]))
+        runs.append(
+            (
+                f"model_{autocast}",
+                ["model", "--nerd-checkpoint", str(checkpoint), "--autocast", str(autocast), *model_args],
+            )
+        )
     for variant in bench.get("variants", []):
         for num_envs in bench.get("num_envs", [8192]):
-            args = ["env", "--checkpoint", str(experiment["policy_checkpoint"]), "--num-envs", str(num_envs)]
+            args = ["env", "--checkpoint", str(experiment["policy_checkpoint"]), "--num-envs", str(num_envs), *env_args]
             for key in ("warmup", "steps", "breakdown_steps", "profile_steps"):
                 if bench.get(key) is not None:
                     args += [f"--{key.replace('_', '-')}", str(bench[key])]
@@ -1405,7 +1447,8 @@ def run(args: argparse.Namespace):
         if not policy_checkpoint.is_file():
             raise FileNotFoundError(f"Policy checkpoint not found: {policy_checkpoint}")
         report = output_root / "policy_evaluation.json"
-        evaluate_policy(experiment["policy_evaluation"], policy_checkpoint, report)
+        result = evaluate_policy(experiment["policy_evaluation"], policy_checkpoint, report)
+        apply_policy_reference(experiment, experiment["policy_evaluation"], result)
     dataset_dir = Path(args.dataset_dir or experiment.get("dataset_dir", "./data/datasets"))
     local_env_dir = dataset_dir / str(experiment["env_name"])
     required_files = required_dataset_files(experiment, specs)

@@ -1803,3 +1803,96 @@ def test_allegro_collector_args_map_specs_to_collection_modes(tmp_path, monkeypa
         assert ("--checkpoint" in command) == spec.use_policy
         noisy = "--policy-action-noise-std" in command
         assert noisy == (spec.policy_action_noise_std > 0.0)
+
+
+CONTROL_STEP_TASK_PRESETS = ("anymal_flat_control_step", "franka_lift_control_step")
+
+
+@pytest.mark.parametrize("name", CONTROL_STEP_TASK_PRESETS)
+def test_control_step_task_presets_follow_allegro_recipe(name) -> None:
+    preset = _load_yaml(PRESET_DIR / f"{name}.yaml")
+    smoke = _load_yaml(PRESET_DIR / f"{name}_smoke.yaml")
+    allegro = _load_yaml(PRESET_DIR / "allegro_reorient_control_step.yaml")["experiment"]
+    experiment = preset["experiment"]
+    config = _load_yaml(REPOSITORY_ROOT / experiment["train_cfg"])
+    allegro_cfg = _load_yaml(REPOSITORY_ROOT / allegro["train_cfg"])
+    solver, reference_solver = config["env"]["neural_solver_cfg"], allegro_cfg["env"]["neural_solver_cfg"]
+    for key in (
+        "step_mode",
+        "joint_target_input",
+        "reset_history",
+        "use_frame_cache",
+        "inference_precision",
+        "inference_compile",
+        "contact_filter",
+        "contact_token_frame",
+        "num_states_history",
+    ):
+        assert solver[key] == reference_solver[key], key
+    dataset, reference_dataset = config["algorithm"]["dataset"], allegro_cfg["algorithm"]["dataset"]
+    for key in ("capacity_unit", "capacity_scope", "window_sampling", "load_mode", "resident_float16_keys"):
+        assert dataset[key] == reference_dataset[key], key
+    assert config["algorithm"]["precision"] == allegro_cfg["algorithm"]["precision"]
+    assert config["algorithm"]["optimizer"]["fused"] is True
+    assert config["inputs"]["low_dim"] == allegro_cfg["inputs"]["low_dim"]
+    assert config["network"]["transformer"] == allegro_cfg["network"]["transformer"]
+    assert config["env"]["env_name"] == experiment["env_name"]
+    assert experiment["dataset_collector"] == "env_driven" and experiment["record_control_steps"] is True
+    assert experiment["contact_filter"] == solver["contact_filter"]
+    assert experiment["max_contact_tokens"] == solver["max_contact_tokens"]
+    specs = experiment["dataset_specs"]
+    root = Path(experiment["dataset_dir"]) / experiment["env_name"]
+    assert {Path(source["path"]) for source in dataset["train_datasets"].values()} == {
+        root / spec["filename"] for spec in specs if spec["split"] == "train"
+    }
+    assert {Path(path) for path in dataset["valid_datasets"].values()} == {
+        root / spec["filename"] for spec in specs if spec["split"] == "valid"
+    }
+    train = sum(spec["num_transitions"] for spec in specs if spec["split"] == "train")
+    assert train == experiment["train_transitions"] == dataset["max_capacity"]
+    assert sum(source["max_capacity"] for source in dataset["train_datasets"].values()) == dataset["max_capacity"]
+    assert experiment["parallel_collection_gpus"] == preset["resources"]["num_gpu"] <= len(specs)
+    # Closed-loop selection is anchored to the native metric reported by the teacher gate.
+    eval_cfg = config["algorithm"]["eval"]
+    evaluation = experiment["policy_evaluation"]
+    assert eval_cfg["mode"] == "policy_rollout" and eval_cfg["selection"]["reference"] is None
+    assert eval_cfg["policy_checkpoint"] == experiment["policy_checkpoint"]
+    assert evaluation["reference"] == {
+        "metric": eval_cfg["selection"]["metric"],
+        "cfg_key": "algorithm.eval.selection.reference",
+    }
+    assert evaluation["args"] == ["--task", experiment["data_gen_task"], "--metric", eval_cfg["selection"]["metric"]]
+    assert [metric["name"] for metric in eval_cfg["metrics"]] == [eval_cfg["selection"]["metric"]]
+    bench = experiment["throughput_benchmark"]
+    assert bench["env_args"] == ["--task", experiment["data_gen_task"], "--nerd-task", experiment["train_task"]]
+    # The smoke preset runs the same pipeline at small sizes with its own dataset cache.
+    smoke_experiment = smoke["experiment"]
+    assert smoke["workflow"]["dataset_subdir"] != preset["workflow"]["dataset_subdir"]
+    assert [spec["filename"] for spec in smoke_experiment["dataset_specs"]] == [spec["filename"] for spec in specs]
+    for key in ("train_cfg", "train_task", "data_gen_task", "dataset_collector", "policy_checkpoint"):
+        assert smoke_experiment[key] == experiment[key], key
+
+
+@pytest.mark.parametrize("name", CONTROL_STEP_TASK_PRESETS)
+def test_control_step_task_collector_args_and_reference(name, tmp_path, monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(REPOSITORY_ROOT / "osmo_scripts"))
+    import run_experiment
+
+    experiment = dict(_load_yaml(PRESET_DIR / f"{name}.yaml")["experiment"])
+    teacher = tmp_path / "model.pt"
+    teacher.write_bytes(b"")
+    experiment["policy_checkpoint"] = str(teacher)
+    for spec in run_experiment.parse_dataset_specs(experiment):
+        command = run_experiment.build_dataset_args(experiment, spec, tmp_path)
+        assert command[:2] == ["-m", "isaaclab_neural.generate.allegro_dataset"]
+        assert command[command.index("--task") + 1] == experiment["data_gen_task"]
+        assert command[command.index("--env-name") + 1] == experiment["env_name"]
+        assert command[command.index("--dataset") + 1] == str(tmp_path / experiment["env_name"] / spec.filename)
+        mode = command[command.index("--collection-mode") + 1]
+        assert mode == ("policy" if spec.use_policy else "zero" if spec.zero_actions else "random")
+        assert ("--checkpoint" in command) == spec.use_policy
+    evaluation = experiment["policy_evaluation"]
+    run_experiment.apply_policy_reference(experiment, evaluation, {evaluation["reference"]["metric"]: 0.25})
+    assert experiment["train_cfg_overrides"].endswith("algorithm.eval.selection.reference 0.25")
+    with pytest.raises(RuntimeError, match="did not report"):
+        run_experiment.apply_policy_reference(experiment, evaluation, {})

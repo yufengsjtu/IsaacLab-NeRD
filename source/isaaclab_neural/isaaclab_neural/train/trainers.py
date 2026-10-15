@@ -864,6 +864,33 @@ class VanillaTrainer:
         self.evaluator = None
         self.keyboard_policy_eval = None
         self.allegro_policy_eval = None
+        self.task_policy_eval = None
+        if eval_cfg.get("mode") == "policy_rollout" and self.eval_interval > 0:
+            checkpoint = Path(eval_cfg["policy_checkpoint"])
+            if not checkpoint.is_file():
+                raise FileNotFoundError(f"Evaluation policy checkpoint not found: {checkpoint}")
+            control_steps = int(eval_cfg.get("control_steps", 500))
+            if control_steps <= 0:
+                raise ValueError("algorithm.eval.control_steps must be positive.")
+            selection = dict(eval_cfg["selection"])
+            metrics = list(eval_cfg.get("metrics", []))
+            if selection.get("metric") not in {
+                "failure_rate",
+                "mean_episode_length",
+                "reward_per_step",
+                *(metric["name"] for metric in metrics),
+            }:
+                raise ValueError("algorithm.eval.selection.metric must name a reported rollout metric.")
+            self.task_policy_eval = {
+                "checkpoint": checkpoint,
+                "policy_task": str(eval_cfg["policy_task"]),
+                "control_steps": control_steps,
+                "seed": int(eval_cfg.get("seed", 43)),
+                "metrics": metrics,
+                "selection": selection,
+            }
+            self._task_policy = None
+            return
         if eval_cfg.get("mode") == "allegro_policy" and self.eval_interval > 0:
             checkpoint = Path(eval_cfg["policy_checkpoint"])
             if not checkpoint.is_file():
@@ -2007,10 +2034,59 @@ class VanillaTrainer:
                 fp.write(f"{epoch}\n")
             print_ok(f"Save Best Eval Model at Epoch {epoch} with {mean_goals:.4f} goals per episode.")
 
+    def _eval_task_policy(self, epoch: int) -> None:
+        """Run the collection policy closed loop in the training environment with the current weights.
+
+        Each evaluation reseeds a forked RNG from ``seed + epoch``. ``selection`` picks ``best_eval_model``: the
+        checkpoint whose metric is closest to a native ``reference`` when one is configured, otherwise the best metric.
+        """
+        from isaaclab_neural.eval.policy_rollout import load_task_policy, rollout_task_policy, selection_error
+
+        settings = cast(dict[str, Any], self.task_policy_eval)
+        env = self.neural_env.neural_adapter.isaaclab_env
+        if self._task_policy is None:
+            self._task_policy = load_task_policy(
+                env,
+                settings["checkpoint"],
+                task=settings["policy_task"],
+                device=str(env.device),
+                seed=settings["seed"],
+            )
+        wrapped, policy, runner = self._task_policy
+        self.neural_model_unwrapped.eval()
+        devices = [torch.device(self.device)] if torch.device(self.device).type == "cuda" else []
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(settings["seed"] + epoch)
+            with torch.inference_mode():
+                summary = rollout_task_policy(
+                    env, wrapped, policy, runner, settings["control_steps"], settings["metrics"]
+                )
+        prefix = "eval_closed_loop"
+        self.logger.add_scalar(f"{prefix}/episodes/epoch", summary["episodes"], epoch)
+        self.logger.add_scalar(f"{prefix}/finite/epoch", float(summary["finite"]), epoch)
+        names = ["failure_rate", "mean_episode_length", "reward_per_step", *(m["name"] for m in settings["metrics"])]
+        for name in names:
+            if summary.get(name) is not None:
+                self.logger.add_scalar(f"{prefix}/{name}/epoch", summary[name], epoch)
+        print_info(
+            "[Evaluate] closed-loop policy: "
+            + ", ".join(f"{name} = {summary.get(name)}" for name in ["episodes", *names, "finite"])
+        )
+        eval_error = selection_error(summary, settings["selection"])
+        if eval_error < self.best_eval_error:
+            self.best_eval_error = eval_error
+            self.save_model("best_eval_model")
+            with open(os.path.join(self.model_log_dir, "saved_best_eval_model_epochs.txt"), "a") as fp:
+                fp.write(f"{epoch}\n")
+            print_ok(f"Save Best Eval Model at Epoch {epoch} with selection error {eval_error:.6f}.")
+
     @torch.no_grad()
     def eval(self, epoch: int) -> None:
         if getattr(self, "keyboard_policy_eval", None) is not None:
             self._eval_keyboard_policy(epoch)
+            return
+        if getattr(self, "task_policy_eval", None) is not None:
+            self._eval_task_policy(epoch)
             return
         if getattr(self, "allegro_policy_eval", None) is not None:
             self._eval_allegro_policy(epoch)

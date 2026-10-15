@@ -24,6 +24,8 @@ import isaaclab_tasks.core.velocity.mdp as mdp
 from isaaclab_tasks.contrib.velocity.config.anymal_c.flat_env_cfg import AnymalCFlatEnvCfg
 from isaaclab_tasks.contrib.velocity.config.anymal_c.rough_env_cfg import AnymalCRoughEnvCfg
 
+from isaaclab_assets.robots.anymal import ANYDRIVE_3_SIMPLE_ACTUATOR_CFG
+
 from isaaclab_neural.physics import NerdNewtonCfg, NerdSolverCfg
 from isaaclab_neural.physics.nerd_solver_cfg import normalize_contact_mode
 
@@ -33,6 +35,17 @@ from .neural_env_wrapper import NerdManagerBasedRLEnv
 DEFAULT_ANYMAL_C_FLAT_NERD_MODEL_PATH: str | None = None
 DEFAULT_ANYMAL_C_ROUGH_NERD_MODEL_PATH: str | None = None
 ROOT_HEIGHT_MINIMUM = 0.4
+
+
+def apply_anymal_simple_actuator(env_cfg) -> None:
+    """Replace the stateful ANYdrive LSTM actuator by the stateless explicit ANYdrive model, keeping the armature.
+
+    A control-step NeRD model evaluates the actuator once per control step, which cannot reproduce the per-frame
+    hidden-state updates of the LSTM; native collection and NeRD deployment must therefore share a stateless model.
+    """
+    armature = env_cfg.scene.robot.actuators["legs"].armature
+    env_cfg.scene.robot.actuators["legs"] = deepcopy(ANYDRIVE_3_SIMPLE_ACTUATOR_CFG)
+    env_cfg.scene.robot.actuators["legs"].armature = armature
 
 
 def apply_contact_mode_mdp(env_cfg) -> None:
@@ -146,6 +159,37 @@ class NerdAnymalCFlatEnvCfg(AnymalCFlatEnvCfg):
             use_cuda_graph=False,
         )
         apply_contact_mode_mdp(self)
+
+
+@configclass
+class AnymalCFlatPolicyEnvCfg(AnymalCFlatEnvCfg):
+    """Native flat Anymal-C matching :class:`NerdAnymalCFlatControlStepEnvCfg` for policy-driven data collection.
+
+    The stock 48-D policy observations, rewards and terminations are kept; pushes are removed, the stateless ANYdrive
+    actuator replaces the LSTM, and the Newton MJWarp preset with Newton contacts and a zero shape margin (the NeRD
+    collision settings) is selected.
+    """
+
+    observations: FlatObservationsCfg = FlatObservationsCfg()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.events.push_robot = None  # type: ignore[assignment]
+        apply_anymal_simple_actuator(self)
+        physics = self.sim.physics
+        newton_cfg = physics.newton_mjwarp
+        if newton_cfg.default_shape_cfg is None:
+            newton_cfg.default_shape_cfg = NewtonShapeCfg(margin=0.0)
+        physics.default = newton_cfg
+
+
+@configclass
+class NerdAnymalCFlatControlStepEnvCfg(NerdAnymalCFlatEnvCfg):
+    """Flat Anymal-C NeRD with the stateless actuator of :class:`AnymalCFlatPolicyEnvCfg`, for control-step models."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        apply_anymal_simple_actuator(self)
 
 
 class NerdAnymalCFlatEnv(NerdManagerBasedRLEnv):

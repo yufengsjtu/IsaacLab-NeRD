@@ -63,3 +63,17 @@ test -f "$NERD_CHECKPOINT"
 See [Advanced Features](advanced.md) before selecting a token, force, or RoPE
 training configuration. Pre-trained dynamics checkpoints are not distributed
 with this release.
+
+## Control-step recipe (SO101/Allegro pipeline)
+
+`anymal_flat_control_step` trains flat ANYmal-C with the optimized control-step pipeline: the env-driven collector
+(`isaaclab_neural.generate.allegro_dataset --task Isaac-Velocity-Flat-Anymal-C-Policy-v0 --env-name
+Anymal-C-Flat-ControlStep --record-control-steps`) records reset-safe clips with the packaged flat teacher on eight
+GPUs; `train/cfg/Anymal/transformer_flat_control_step.yaml` predicts one 20 ms control step per call with joint-target
+input, unique-transition sliding windows, GPU-resident data and FP16 autocast. Collection and
+`Isaac-Velocity-Flat-Anymal-C-ControlStep-NeRD-v0` both use the stateless ANYdrive actuator: a control-step model
+evaluates the actuator once per control step and cannot reproduce the per-frame LSTM state.
+
+The OSMO teacher gate evaluates the policy natively with `isaaclab_neural.eval.policy_rollout` and passes its velocity
+tracking error to training, where `best_eval_model` is the checkpoint closest to that native error. Run
+`anymal_flat_control_step_smoke` first; both presets end with MJWarp/NeRD throughput benchmarks.

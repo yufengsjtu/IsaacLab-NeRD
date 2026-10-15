@@ -236,6 +236,15 @@ reward threshold during no-contact phases. Validate force errors and contact
 precision/recall on independent trajectories, then compare closed-loop behavior
 against MJWarp before using a checkpoint for Lift policy evaluation or RL training.
 
+## Lift control-step recipe (SO101/Allegro pipeline)
+
+`franka_lift_control_step` records reset-safe control-step clips from `Isaac-Lift-Cube-Franka-Dataset-Gen-v0` with
+the official policy, including filtered finger-object normal-force labels, and trains
+`train/cfg/Franka/transformer_lift_control_step.yaml` (one 33 ms control step per prediction, joint-target input,
+finger-force head, unique-transition sliding windows, GPU-resident data, FP16 autocast). The native pose success rate
+from the OSMO teacher gate becomes the checkpoint-selection reference of the closed-loop `policy_rollout` evaluation.
+Run `franka_lift_control_step_smoke` first.
+
 ## Registered task IDs
 
 | Purpose | Reach | Lift |

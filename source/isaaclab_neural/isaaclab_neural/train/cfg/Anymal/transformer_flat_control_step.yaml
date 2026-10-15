@@ -1,0 +1,157 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# Flat ANYmal-C aligned with the SO101/Allegro control-step recipe: one prediction spans a 20 ms control step (four
+# 200 Hz physics frames) with the stateless ANYdrive actuator, env-driven reset-safe clips, unique-transition sliding
+# windows, GPU-resident data and FP16 training autocast.
+env:
+  env_name: Anymal-C-Flat-ControlStep
+  num_envs: 256
+  neural_solver_cfg:
+    name: TransformerNeuralSolver
+    states_frame: body
+    anchor_frame_step: every
+    states_embedding_type: identical
+    prediction_type: relative
+    orientation_prediction_parameterization: quaternion
+    # History covers 10 control steps; joint position targets are a model input as in SO101 control-step NeRD.
+    step_mode: control_step
+    joint_target_input: true
+    # After a reset, stream from the first post-reset frame as training windows do at an episode start.
+    reset_history: episode_start
+    num_states_history: 10
+    use_frame_cache: true
+    # Online inference only; training uses FP16 autocast below. Confirm closed-loop parity against
+    # --inference-precision fp32 --no-inference-compile before reporting FPS.
+    inference_precision: fp16
+    inference_compile: true
+    min_contact_event_threshold: 0.12
+    contact_mode: newton_native
+    contact_representation: contact_tokens
+    # Keep only penetrating pairs that involve a movable body, with tokens in their owner body frame, as SO101 does.
+    contact_filter: solver_active_movable
+    contact_token_frame: owner
+    num_contacts_per_env: 64
+    max_contact_tokens: 64
+    contact_packing_policy: body_round_robin_pair_atomic
+
+algorithm:
+  name: SequenceModelTrainer
+  num_epochs: 300
+  num_iters_per_epoch: 1250
+  # FP16 autocast with loss scaling for the forward pass; losses, statistics and weights stay FP32.
+  precision: fp16
+  sample_sequence_length: 10
+  batch_size: 512
+  num_valid_batches: 100
+  truncate_grad: True
+  grad_norm: 1.0
+  update_dataset_statistics: True
+  loss:
+    type: MSE
+    beta: 0.0
+  optimizer:
+    type: Adam
+    weight_decay: 0.0
+    lr_start: 2e-4
+    lr_end: 2e-5
+    lr_schedule: linear
+    betas: [0.9, 0.999]
+    fused: true
+
+  dataset:
+    # 5 equal shards (one collection GPU each). Unique mixtures need per-source budgets that sum to at
+    # most max_capacity.
+    train_datasets:
+      policy_a:
+        path: ./data/datasets/anymal-c-flat-control-step-v1/Anymal-C-Flat-ControlStep/dataset_policy_a_train.hdf5
+        weight: 0.2
+        max_capacity: 1200000
+      policy_b:
+        path: ./data/datasets/anymal-c-flat-control-step-v1/Anymal-C-Flat-ControlStep/dataset_policy_b_train.hdf5
+        weight: 0.2
+        max_capacity: 1200000
+      policy_noisy:
+        path: ./data/datasets/anymal-c-flat-control-step-v1/Anymal-C-Flat-ControlStep/dataset_policy_noisy_train.hdf5
+        weight: 0.2
+        max_capacity: 1200000
+      random_action:
+        path: ./data/datasets/anymal-c-flat-control-step-v1/Anymal-C-Flat-ControlStep/dataset_random_action_train.hdf5
+        weight: 0.2
+        max_capacity: 1200000
+      zero_action:
+        path: ./data/datasets/anymal-c-flat-control-step-v1/Anymal-C-Flat-ControlStep/dataset_zero_action_train.hdf5
+        weight: 0.2
+        max_capacity: 1200000
+    valid_datasets:
+      policy: ./data/datasets/anymal-c-flat-control-step-v1/Anymal-C-Flat-ControlStep/dataset_policy_valid.hdf5
+      policy_noisy: ./data/datasets/anymal-c-flat-control-step-v1/Anymal-C-Flat-ControlStep/dataset_policy_noisy_valid.hdf5
+      random_action: ./data/datasets/anymal-c-flat-control-step-v1/Anymal-C-Flat-ControlStep/dataset_random_action_valid.hdf5
+      zero_action: ./data/datasets/anymal-c-flat-control-step-v1/Anymal-C-Flat-ControlStep/dataset_zero_action_valid.hdf5
+    max_capacity: 6000000
+    capacity_unit: unique_transition
+    capacity_scope: global
+    window_sampling: sliding
+    valid_max_capacity: 1000000
+    # Rank-local recordings live on the GPU; native contact pairs are converted to tokens every batch.
+    load_mode: gpu
+    resident_float16_keys: [joint_f, gravity_dir]
+    eager_preload_frames: 65536
+    num_data_workers: 0
+
+  eval:
+    # Closed-loop walking with the collection policy in the training environment (rank 0, current weights). The
+    # OSMO pipeline sets selection.reference to the native MJWarp tracking error, so best_eval_model is the checkpoint
+    # closest to native dynamics rather than the most optimistic one.
+    interval: 5
+    mode: policy_rollout
+    policy_checkpoint: ./pretrained/control_policy/anymal_c_flat_terrain/model_299.pt
+    policy_task: Isaac-Velocity-Flat-Anymal-C-Policy-v0
+    control_steps: 500
+    seed: 43
+    metrics:
+      - name: velocity_tracking_error
+        command: base_velocity
+    selection:
+      metric: velocity_tracking_error
+      reference: null
+      higher_is_better: false
+
+inputs:
+  low_dim: [states_embedding, joint_f, gravity_dir, joint_target_offset]
+  contact_set:
+    dim: 17
+    encoder_type: shared_per_body
+    body_latent_dim: 16
+    hidden_dim: 64
+    max_other_bodies: 32
+
+network:
+  normalize_input: True
+  normalize_output: True
+
+  encoder:
+    low_dim:
+      layer_sizes: []
+      activation: relu
+      layernorm: False
+
+  transformer:
+    block_size: 32
+    n_layer: 6
+    n_head: 12
+    n_embd: 384
+    dropout: 0.0
+    bias: False
+    # Streaming temporal cone (receptive field sum(span - 1) + 1 = num_states_history), as in SO101 Keyboard.
+    position_encoding: relative_lag
+    attention_spans: [3, 3, 3, 2, 2, 2]
+
+  model:
+    output_tanh: False
+    mlp:
+      layer_sizes: [64]
+      activation: relu
+      layernorm: False

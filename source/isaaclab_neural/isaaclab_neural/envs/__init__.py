@@ -21,7 +21,14 @@ from .allegro_reorient_nerd_env import (
     NerdAllegroReorientEnvCfg,
 )
 from .anymal_c_dataset_gen_cfg import AnymalCDatasetGenFlatEnvCfg, AnymalCDatasetGenRoughEnvCfg
-from .anymal_nerd_env import NerdAnymalCFlatEnv, NerdAnymalCFlatEnvCfg, NerdAnymalCRoughEnv, NerdAnymalCRoughEnvCfg
+from .anymal_nerd_env import (
+    AnymalCFlatPolicyEnvCfg,
+    NerdAnymalCFlatControlStepEnvCfg,
+    NerdAnymalCFlatEnv,
+    NerdAnymalCFlatEnvCfg,
+    NerdAnymalCRoughEnv,
+    NerdAnymalCRoughEnvCfg,
+)
 from .cartpole_nerd_env import NerdCartpoleEnv, NerdCartpoleEnvCfg
 from .franka_lift_nerd_env import (
     FrankaLiftCubeDatasetGenEnvCfg,
@@ -46,8 +53,7 @@ gym.register(
         "rl_games_cfg_entry_point": f"{cartpole_agents.__name__}:rl_games_ppo_cfg.yaml",
         "rsl_rl_cfg_entry_point": f"{cartpole_agents.__name__}.rsl_rl_ppo_cfg:CartpolePPORunnerCfg",
         "rsl_rl_with_symmetry_cfg_entry_point": (
-            f"{cartpole_agents.__name__}.rsl_rl_ppo_cfg:"
-            "CartpolePPORunnerWithSymmetryCfg"
+            f"{cartpole_agents.__name__}.rsl_rl_ppo_cfg:CartpolePPORunnerWithSymmetryCfg"
         ),
         "skrl_cfg_entry_point": f"{cartpole_agents.__name__}:skrl_ppo_cfg.yaml",
         "sb3_cfg_entry_point": f"{cartpole_agents.__name__}:sb3_ppo_cfg.yaml",
@@ -63,10 +69,29 @@ gym.register(
         "rl_games_cfg_entry_point": f"{anymal_c_agents.__name__}:rl_games_flat_ppo_cfg.yaml",
         "rsl_rl_cfg_entry_point": (f"{anymal_c_nerd_agents.__name__}:AnymalCFlatNeRDPPORunnerCfg"),
         "rsl_rl_with_symmetry_cfg_entry_point": (
-            f"{anymal_c_agents.__name__}.rsl_rl_ppo_cfg:"
-            "AnymalCFlatPPORunnerWithSymmetryCfg"
+            f"{anymal_c_agents.__name__}.rsl_rl_ppo_cfg:AnymalCFlatPPORunnerWithSymmetryCfg"
         ),
         "skrl_cfg_entry_point": f"{anymal_c_agents.__name__}:skrl_flat_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Flat-Anymal-C-Policy-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{AnymalCFlatPolicyEnvCfg.__module__}:AnymalCFlatPolicyEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{anymal_c_agents.__name__}.rsl_rl_ppo_cfg:AnymalCFlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Flat-Anymal-C-ControlStep-NeRD-v0",
+    entry_point=f"{NerdAnymalCFlatEnv.__module__}:NerdAnymalCFlatEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{NerdAnymalCFlatControlStepEnvCfg.__module__}:NerdAnymalCFlatControlStepEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{anymal_c_agents.__name__}.rsl_rl_ppo_cfg:AnymalCFlatPPORunnerCfg",
     },
 )
 
@@ -227,9 +252,11 @@ __all__ = [
     "NerdSO101KeyboardRandomizedEnvCfg",
     "AnymalCDatasetGenFlatEnvCfg",
     "AnymalCDatasetGenRoughEnvCfg",
+    "AnymalCFlatPolicyEnvCfg",
     "FrankaLiftCubeDatasetGenEnvCfg",
     "FrankaReachDatasetGenEnvCfg",
     "FrankaReachPolicyEnvCfg",
+    "NerdAnymalCFlatControlStepEnvCfg",
     "NerdAnymalCFlatEnv",
     "NerdAnymalCFlatEnvCfg",
     "NerdAnymalCRoughEnv",
