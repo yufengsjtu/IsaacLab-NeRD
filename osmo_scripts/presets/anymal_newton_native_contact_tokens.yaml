@@ -18,7 +18,7 @@ experiment:
   env_name: Anymal-C-Flat-Native-v2
   robot_name: Anymal-C
   data_gen_task: Isaac-Velocity-Flat-Anymal-C-Dataset-Gen-v0
-  deployment_task: Isaac-Velocity-Flat-Anymal-C-v0
+  deployment_task: IsaacContrib-Velocity-Flat-AnymalC
   train_task: Isaac-Velocity-Flat-Anymal-C-NeRD-v0
   train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_native_contact_tokens.yaml
   train_preset: newton_mjwarp
