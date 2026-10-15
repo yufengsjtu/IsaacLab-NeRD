@@ -28,7 +28,6 @@ experiment:
   policy_task: Isaac-Velocity-Flat-Anymal-C-Policy-v0
   train_task: Isaac-Velocity-Flat-Anymal-C-ControlStep-NeRD-v0
   train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_flat_control_step.yaml
-  train_preset: newton_mjwarp
   num_gpus: 2
   contact_mode: newton_native
   contact_representation: contact_tokens
@@ -56,7 +55,7 @@ experiment:
   eval_interval: 1
   save_interval: 1
   train_cfg_overrides: algorithm.num_epochs 2 algorithm.num_iters_per_epoch 20 algorithm.num_valid_batches 4 algorithm.dataset.valid_max_capacity 30000 algorithm.eval.control_steps 200
-  policy_checkpoint: ./pretrained/control_policy/anymal_c_flat_terrain/model_299.pt
+  policy_checkpoint: ./pretrained/control_policy/anymal_c_flat_control_step/model_999.pt
   require_packaged_policy: true
   policy_evaluation:
     module: isaaclab_neural.eval.policy_rollout

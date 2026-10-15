@@ -3,8 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-# SO101/Allegro-style control-step NeRD for flat ANYmal-C with the packaged flat teacher: the env-driven
-# collector records reset-safe 32-control-step clips with a recording contract on eight GPUs in the native policy
+# SO101/Allegro-style control-step NeRD for flat ANYmal-C with the stateless-actuator teacher trained by
+# anymal_flat_teacher (pretrained/control_policy/anymal_c_flat_control_step): the env-driven collector records reset-safe 32-control-step clips with a recording contract on eight GPUs in the native policy
 # task (stateless ANYdrive actuator, Newton contacts); training uses unique-transition sliding windows, GPU-resident
 # data, FP16 autocast and closed-loop walking evaluation selected against the native tracking error, followed by the
 # throughput benchmarks.
@@ -31,7 +31,6 @@ experiment:
   policy_task: Isaac-Velocity-Flat-Anymal-C-Policy-v0
   train_task: Isaac-Velocity-Flat-Anymal-C-ControlStep-NeRD-v0
   train_cfg: ./source/isaaclab_neural/isaaclab_neural/train/cfg/Anymal/transformer_flat_control_step.yaml
-  train_preset: newton_mjwarp
   num_gpus: 8
   contact_mode: newton_native
   contact_representation: contact_tokens
@@ -57,7 +56,7 @@ experiment:
   headless: true
   update_dataset_statistics: true
   eval_interval: 5
-  policy_checkpoint: ./pretrained/control_policy/anymal_c_flat_terrain/model_299.pt
+  policy_checkpoint: ./pretrained/control_policy/anymal_c_flat_control_step/model_999.pt
   require_packaged_policy: true
   policy_evaluation:
     module: isaaclab_neural.eval.policy_rollout

@@ -107,7 +107,7 @@ algorithm:
     # closest to native dynamics rather than the most optimistic one.
     interval: 5
     mode: policy_rollout
-    policy_checkpoint: ./pretrained/control_policy/anymal_c_flat_terrain/model_299.pt
+    policy_checkpoint: ./pretrained/control_policy/anymal_c_flat_control_step/model_999.pt
     policy_task: Isaac-Velocity-Flat-Anymal-C-Policy-v0
     control_steps: 500
     seed: 43
